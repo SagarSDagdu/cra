@@ -1,0 +1,66 @@
+// swift-tools-version:5.10
+import PackageDescription
+
+// CEF (Chromium Embedded Framework) lives in vendor/cef, fetched by
+// scripts/fetch-cef.sh, with its C++ wrapper built by CMake into
+// vendor/cef/build/libcef_dll_wrapper.
+let cefRoot = "\(Context.packageDirectory)/vendor/cef"
+
+// Same flags CEF uses for its own wrapper (vendor/cef/cmake/cef_variables.cmake),
+// so the ABI of the wrapper classes matches.
+let cefCXXFlags: [String] = [
+    "-fno-exceptions", "-fno-rtti", "-fno-threadsafe-statics",
+    "-fobjc-call-cxx-cdtors", "-fno-strict-aliasing",
+    "-Wno-unused-parameter", "-Wno-deprecated-declarations",
+    "-I", cefRoot,
+]
+
+let cefLinkerFlags: [String] = [
+    "-L\(cefRoot)/build/libcef_dll_wrapper",
+]
+
+let package = Package(
+    name: "Cra",
+    platforms: [.macOS(.v14)],
+    products: [
+        .executable(name: "Cra", targets: ["Cra"]),
+        .executable(name: "CraHelper", targets: ["CraHelper"]),
+    ],
+    targets: [
+        // Objective-C++ bridge between Swift and CEF.
+        .target(
+            name: "CraCEF",
+            path: "Sources/CraCEF",
+            publicHeadersPath: "include",
+            cxxSettings: [.unsafeFlags(cefCXXFlags + ["-fobjc-arc"])],
+            linkerSettings: [
+                .unsafeFlags(cefLinkerFlags),
+                .linkedLibrary("cef_dll_wrapper"),
+                .linkedFramework("AppKit"),
+                .linkedFramework("IOSurface"),
+            ]
+        ),
+        // Subprocess executable (renderer, GPU, utility...). Bundled five
+        // times as "Cra Helper*.app" inside Cra.app/Contents/Frameworks.
+        .executableTarget(
+            name: "CraHelper",
+            path: "Sources/CraHelper",
+            cxxSettings: [.unsafeFlags(cefCXXFlags)],
+            linkerSettings: [
+                .unsafeFlags(cefLinkerFlags),
+                .linkedLibrary("cef_dll_wrapper"),
+                .linkedFramework("AppKit"),
+                .linkedFramework("IOSurface"),
+            ]
+        ),
+        // The browser itself: AppKit window, SwiftUI sidebar and command bar.
+        .executableTarget(
+            name: "Cra",
+            dependencies: ["CraCEF"],
+            path: "Sources/Cra",
+            swiftSettings: [.unsafeFlags(["-Onone"], .when(configuration: .debug))]
+        ),
+    ],
+    swiftLanguageVersions: [.v5],
+    cxxLanguageStandard: .cxx20
+)

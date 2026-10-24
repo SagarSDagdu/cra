@@ -1,0 +1,454 @@
+import AppKit
+import CryptoKit
+import Foundation
+
+// Importers read Arc's and Dia's on-disk stores (see docs/arc-reverse-engineering.md)
+// into a neutral ImportPlan that the store applies.
+
+struct ImportedItem {
+    var customTitle: String?
+    var pageTitle: String = ""
+    var url: String?
+    var isFolder = false
+    var children: [ImportedItem] = []
+    var createdAt = Date()
+    /// Cached favicon file in the source browser, if any.
+    var faviconPath: String?
+}
+
+struct ImportedSpace {
+    var title: String
+    var emoji: String
+    var theme: SpaceTheme?
+    var pinned: [ImportedItem] = []
+    var today: [ImportedItem] = []
+}
+
+struct ImportedArchiveEntry {
+    var customTitle: String?
+    var pageTitle: String
+    var url: String
+    var archivedAt: Date
+    var reason: ArchiveReason
+    var spaceTitle: String?
+}
+
+struct ImportedSettings {
+    var autoArchive: AutoArchiveThreshold?
+    var sidebarWidth: Double?
+}
+
+struct ImportPlan {
+    var source: String
+    var spaces: [ImportedSpace] = []
+    var favorites: [ImportedItem] = []
+    var archive: [ImportedArchiveEntry] = []
+    var settings = ImportedSettings()
+
+    var tabCount: Int {
+        func count(_ items: [ImportedItem]) -> Int { items.reduce(0) { $0 + ($1.isFolder ? count($1.children) : 1) } }
+        return spaces.reduce(count(favorites)) { $0 + count($1.pinned) + count($1.today) }
+    }
+    var folderCount: Int {
+        func count(_ items: [ImportedItem]) -> Int { items.reduce(0) { $0 + ($1.isFolder ? 1 + count($1.children) : 0) } }
+        return spaces.reduce(count(favorites)) { $0 + count($1.pinned) + count($1.today) }
+    }
+}
+
+enum ImportError: LocalizedError {
+    case notFound(String)
+    case unreadable(String)
+    var errorDescription: String? {
+        switch self {
+        case .notFound(let s): return "\(s) data was not found on this Mac."
+        case .unreadable(let s): return "Could not read \(s)."
+        }
+    }
+}
+
+private func refDate(_ v: Any?) -> Date {
+    if let d = v as? Double { return Date(timeIntervalSinceReferenceDate: d) }
+    return Date()
+}
+
+/// Arc stores `[id, object, id, object…]` for ordered dictionaries.
+private func pairs(_ list: Any?) -> [(String, [String: Any])] {
+    guard let arr = list as? [Any] else { return [] }
+    var out: [(String, [String: Any])] = []
+    var i = 0
+    while i + 1 < arr.count {
+        if let id = arr[i] as? String, let obj = arr[i + 1] as? [String: Any] { out.append((id, obj)); i += 2 }
+        else { i += 1 }
+    }
+    return out
+}
+
+// MARK: - Arc
+
+enum ArcImporter {
+    static let supportDir = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/Arc", isDirectory: true)
+
+    static var isAvailable: Bool { FileManager.default.fileExists(atPath: supportDir.appendingPathComponent("StorableSidebar.json").path) }
+
+    static func plan() throws -> ImportPlan {
+        let url = supportDir.appendingPathComponent("StorableSidebar.json")
+        guard let data = try? Data(contentsOf: url) else { throw ImportError.notFound("Arc") }
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sidebar = root["sidebar"] as? [String: Any],
+              let containers = sidebar["containers"] as? [[String: Any]] else { throw ImportError.unreadable("Arc's sidebar") }
+        var plan = ImportPlan(source: "Arc")
+        guard let main = containers.first(where: { $0["spaces"] != nil }) else { return plan }
+        let items = Dictionary(uniqueKeysWithValues: pairs(main["items"]).map { ($0.0, $0.1) })
+        var spaceTitleByID: [String: String] = [:]
+
+        func convert(_ id: String) -> ImportedItem? {
+            guard let it = items[id], let dataDict = it["data"] as? [String: Any] else { return nil }
+            let custom = it["title"] as? String
+            let created = refDate(it["createdAt"])
+            let childIDs = it["childrenIds"] as? [String] ?? []
+            if let tab = dataDict["tab"] as? [String: Any] {
+                guard let u = tab["savedURL"] as? String, !u.isEmpty else { return nil }
+                return ImportedItem(customTitle: custom, pageTitle: tab["savedTitle"] as? String ?? "", url: u, createdAt: created,
+                                    faviconPath: faviconFile(forItemID: id))
+            }
+            if dataDict["list"] != nil {
+                return ImportedItem(customTitle: custom, pageTitle: custom ?? "Folder", url: nil, isFolder: true,
+                                    children: childIDs.compactMap(convert), createdAt: created)
+            }
+            if dataDict["splitView"] != nil || dataDict["tabGroup"] != nil {
+                // Flatten split views into their tabs.
+                let kids = childIDs.compactMap(convert)
+                return kids.count == 1 ? kids[0] : ImportedItem(customTitle: custom ?? "Split", pageTitle: "", url: nil, isFolder: true, children: kids, createdAt: created)
+            }
+            return nil
+        }
+
+        // Favorites (topApps) container(s).
+        for (_, it) in items {
+            guard let d = it["data"] as? [String: Any], let c = d["itemContainer"] as? [String: Any],
+                  let type = c["containerType"] as? [String: Any], type["topApps"] != nil else { continue }
+            for cid in it["childrenIds"] as? [String] ?? [] { if let x = convert(cid) { plan.favorites.append(x) } }
+        }
+
+        for (sid, space) in pairs(main["spaces"]) {
+            let title = space["title"] as? String ?? "Space"
+            spaceTitleByID[sid] = title
+            var emoji = "🗂️"
+            if let info = space["customInfo"] as? [String: Any], let icon = info["iconType"] as? [String: Any] {
+                if let e = icon["emoji_v2"] as? String { emoji = e }
+                else if let code = icon["emoji"] as? Int, let scalar = UnicodeScalar(code) { emoji = String(Character(scalar)) }
+            }
+            var pinnedID: String?, todayID: String?
+            if let ids = space["containerIDs"] as? [Any] {
+                var i = 0
+                while i + 1 < ids.count {
+                    if let k = ids[i] as? String, let v = ids[i + 1] as? String {
+                        if k == "pinned" { pinnedID = v } else if k == "unpinned" { todayID = v }
+                    }
+                    i += 2
+                }
+            }
+            var sp = ImportedSpace(title: title, emoji: emoji, theme: theme(from: space))
+            if let p = pinnedID, let c = items[p] { sp.pinned = (c["childrenIds"] as? [String] ?? []).compactMap(convert) }
+            if let t = todayID, let c = items[t] { sp.today = (c["childrenIds"] as? [String] ?? []).compactMap(convert) }
+            plan.spaces.append(sp)
+        }
+
+        // Archive
+        if let adata = try? Data(contentsOf: supportDir.appendingPathComponent("StorableArchiveItems.json")),
+           let aroot = try? JSONSerialization.jsonObject(with: adata) as? [String: Any],
+           let aitems = aroot["items"] as? [Any] {
+            for case let e as [String: Any] in aitems {
+                guard let si = e["sidebarItem"] as? [String: Any], let d = si["data"] as? [String: Any],
+                      let tab = d["tab"] as? [String: Any], let u = tab["savedURL"] as? String, !u.isEmpty else { continue }
+                let reason = (e["reason"] as? String) == "auto" ? ArchiveReason.auto : .manual
+                var spaceTitle: String?
+                if let src = e["source"] as? [String: Any], let sp = src["space"] as? [String: Any], let id = sp["_0"] as? String { spaceTitle = spaceTitleByID[id] }
+                plan.archive.append(ImportedArchiveEntry(customTitle: si["title"] as? String, pageTitle: tab["savedTitle"] as? String ?? "",
+                                                         url: u, archivedAt: refDate(e["archivedAt"]), reason: reason, spaceTitle: spaceTitle))
+            }
+            plan.archive.sort { $0.archivedAt > $1.archivedAt }
+            if plan.archive.count > 1500 { plan.archive.removeLast(plan.archive.count - 1500) }
+        }
+
+        // Settings
+        if let wdata = try? Data(contentsOf: supportDir.appendingPathComponent("StorableWindows.json")),
+           let wroot = try? JSONSerialization.jsonObject(with: wdata) as? [String: Any],
+           let prefs = wroot["sidebarViewPreferences"] as? [String: Any], let w = prefs["sidebarWidth"] as? Double {
+            plan.settings.sidebarWidth = w
+        }
+        if let threshold = UserDefaults(suiteName: "company.thebrowser.Browser")?.string(forKey: "autoArchiveTimeThreshold") {
+            plan.settings.autoArchive = AutoArchiveThreshold(rawValue: threshold)
+        }
+        return plan
+    }
+
+    /// Arc caches sidebar favicons as 32x32 PNGs named md5(item id).
+    static func faviconFile(forItemID id: String) -> String? {
+        let digest = Insecure.MD5.hash(data: Data(id.utf8)).map { String(format: "%02x", $0) }.joined()
+        let path = supportDir.appendingPathComponent("SidebarItemsFaviconCache/\(digest)").path
+        return FileManager.default.fileExists(atPath: path) ? path : nil
+    }
+
+    /// Arc's blendedGradient → SpaceTheme. Prefers the dark variant when one exists.
+    private static func theme(from space: [String: Any]) -> SpaceTheme? {
+        guard let info = space["customInfo"] as? [String: Any], let wt = info["windowTheme"] as? [String: Any],
+              let bg = wt["background"] as? [String: Any] else { return nil }
+        var variant: [String: Any]?
+        var appearance = "auto"
+        if let ab = bg["appearanceBased"] as? [String: Any] {
+            variant = (ab["dark"] as? [String: Any]) ?? (ab["light"] as? [String: Any])
+            appearance = ab["dark"] != nil ? "dark" : "light"
+        } else if let single = bg["single"] as? [String: Any] {
+            variant = single["_0"] as? [String: Any]
+        }
+        guard let v = variant else { return nil }
+        if let a = v["contentOverBackgroundAppearance"] as? String { appearance = a }
+        let vibrant = v["isVibrant"] as? Bool ?? false
+        guard let style = v["style"] as? [String: Any], let color = style["color"] as? [String: Any],
+              let c0 = color["_0"] as? [String: Any], let bg2 = c0["blendedGradient"] as? [String: Any],
+              let g = bg2["_0"] as? [String: Any], let base = g["baseColors"] as? [[String: Any]], !base.isEmpty else { return nil }
+        let overlays = g["overlayColors"] as? [[String: Any]] ?? []
+        func comp(_ c: [String: Any], _ k: String) -> Double { max(0, min(1, c[k] as? Double ?? 0)) }
+        // Arc blends an overlay gradient onto the base gradient and the wheel
+        // mixes the two base colours; bake both into our two stops (fitted to
+        // Arc's rendering: top stop leans toward the second base colour).
+        func hex(_ i: Int) -> String {
+            let b = base[min(i, base.count - 1)]
+            let other = base[min(i == 0 ? 1 : 0, base.count - 1)]
+            var r = comp(b, "red"), gg = comp(b, "green"), bl = comp(b, "blue")
+            if i == 0 {
+                r += (comp(other, "red") - r) * 0.1; gg += (comp(other, "green") - gg) * 0.1; bl += (comp(other, "blue") - bl) * 0.1
+            }
+            if i < overlays.count {
+                let o = overlays[i]
+                let a = comp(o, "alpha") * 0.85
+                r += (comp(o, "red") - r) * a; gg += (comp(o, "green") - gg) * a; bl += (comp(o, "blue") - bl) * a
+            }
+            return String(format: "#%02X%02X%02X", Int((r * 255).rounded()), Int((gg * 255).rounded()), Int((bl * 255).rounded()))
+        }
+        var colors = [hex(0), hex(1)]
+        let mods = g["modifiers"] as? [String: Any]
+        var intensity = mods?["intensityFactor"] as? Double ?? 0.5
+        if vibrant && appearance != "dark" {
+            // Fitted to Arc over white and black backdrops: the top stop is the
+            // first base colour nudged toward the second and 30% toward white;
+            // the bottom stop is the base colour pulled 30% toward the overlay's
+            // end colour (or the second base colour) and 20% toward white.
+            // Opacity ramps 0.45 → 0.59 (see SpacePalette).
+            func rgb(_ c: [String: Any]) -> (Double, Double, Double) { (comp(c, "red"), comp(c, "green"), comp(c, "blue")) }
+            func mix(_ a: (Double, Double, Double), _ b: (Double, Double, Double), _ t: Double) -> (Double, Double, Double) {
+                (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, a.2 + (b.2 - a.2) * t)
+            }
+            func hexOf(_ c: (Double, Double, Double)) -> String {
+                String(format: "#%02X%02X%02X", Int((c.0 * 255).rounded()), Int((c.1 * 255).rounded()), Int((c.2 * 255).rounded()))
+            }
+            let b0 = rgb(base[0]), b1 = rgb(base[min(1, base.count - 1)])
+            let end = overlays.last(where: { comp($0, "alpha") > 0 }).map(rgb) ?? b1
+            let white = (1.0, 1.0, 1.0)
+            colors = [hexOf(mix(mix(b0, b1, 0.15), white, 0.30)), hexOf(mix(mix(b0, end, 0.30), white, 0.20))]
+        }
+        let accent = String(format: "#%02X%02X%02X", Int((comp(base[0], "red") * 255).rounded()),
+                            Int((comp(base[0], "green") * 255).rounded()), Int((comp(base[0], "blue") * 255).rounded()))
+        if appearance == "dark" && !vibrant {
+            // Measured from Arc: dark themes show ~27% of the colour over a
+            // slightly purple dark grey (#2B2632).
+            colors = colors.map { c in
+                let k = HexColor.components(c) ?? (0, 0, 0)
+                func ch(_ v: Double, _ base: Double) -> Int { Int((v * 255 * 0.27 + base).rounded()) }
+                return String(format: "#%02X%02X%02X", ch(k.r, 43), ch(k.g, 38), ch(k.b, 50))
+            }
+            intensity = 1
+        }
+        return SpaceTheme(colors: colors, intensity: intensity,
+                          noise: mods?["noiseFactor"] as? Double ?? 0.15, appearance: appearance, vibrant: vibrant, accent: accent)
+    }
+}
+
+// MARK: - Dia
+
+enum DiaImporter {
+    static let supportDir = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/Dia", isDirectory: true)
+
+    static var isAvailable: Bool { FileManager.default.fileExists(atPath: supportDir.appendingPathComponent("StorableProfileContainers.json").path) }
+
+    static func plan() throws -> ImportPlan {
+        guard isAvailable else { throw ImportError.notFound("Dia") }
+        var plan = ImportPlan(source: "Dia")
+
+        // Open tabs and the favorites container.
+        if let data = try? Data(contentsOf: supportDir.appendingPathComponent("StorableProfileContainers.json")),
+           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let containers = root["containers"] as? [[String: Any]] {
+            var openTabs: [ImportedItem] = []
+            for c in containers {
+                let idInfo = c["id"] as? [String: Any]
+                let kind = idInfo?["container"] as? [String: Any]
+                let isFavorites = kind?["favorites"] != nil
+                for tab in c["tabs"] as? [[String: Any]] ?? [] {
+                    guard let contents = tab["contents"] as? [[String: Any]] else { continue }
+                    for content in contents {
+                        guard let variant = content["variant"] as? [String: Any], let web = variant["webContent"] as? [String: Any],
+                              let w = web["_0"] as? [String: Any], let url = w["url"] as? String else { continue }
+                        let item = ImportedItem(pageTitle: w["title"] as? String ?? "", url: url, createdAt: refDate(tab["creationDate"]))
+                        if isFavorites { plan.favorites.append(item) } else { openTabs.append(item) }
+                    }
+                }
+            }
+            if !openTabs.isEmpty { plan.spaces.append(ImportedSpace(title: "Dia", emoji: "🌀", theme: nil, today: openTabs)) }
+        }
+
+        // Bookmarks: Dia keeps imported Arc spaces as folders on the bookmarks bar.
+        let profiles = (try? FileManager.default.contentsOfDirectory(atPath: supportDir.appendingPathComponent("User Data").path)) ?? []
+        for prof in profiles where prof == "Default" || prof.hasPrefix("Profile ") {
+            let bm = supportDir.appendingPathComponent("User Data/\(prof)/Bookmarks")
+            guard let data = try? Data(contentsOf: bm), let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let roots = root["roots"] as? [String: Any], let bar = roots["bookmark_bar"] as? [String: Any] else { continue }
+            func convert(_ node: [String: Any]) -> ImportedItem? {
+                let name = node["name"] as? String ?? ""
+                if node["type"] as? String == "url", let u = node["url"] as? String {
+                    return ImportedItem(customTitle: name.isEmpty ? nil : name, pageTitle: name, url: u)
+                }
+                if node["type"] as? String == "folder" {
+                    let kids = (node["children"] as? [[String: Any]] ?? []).compactMap(convert)
+                    return ImportedItem(customTitle: name, pageTitle: name, url: nil, isFolder: true, children: kids)
+                }
+                return nil
+            }
+            for child in bar["children"] as? [[String: Any]] ?? [] {
+                guard let item = convert(child) else { continue }
+                if item.isFolder {
+                    if item.pageTitle.lowercased() == "favorites" { plan.favorites.append(contentsOf: item.children.filter { !$0.isFolder }) }
+                    else if !item.children.isEmpty {
+                        if let i = plan.spaces.firstIndex(where: { $0.title == item.pageTitle }) { plan.spaces[i].pinned.append(contentsOf: item.children) }
+                        else { plan.spaces.append(ImportedSpace(title: item.pageTitle, emoji: "📁", theme: nil, pinned: item.children)) }
+                    }
+                } else {
+                    plan.favorites.append(item)
+                }
+            }
+            if let other = roots["other"] as? [String: Any], let kids = (other["children"] as? [[String: Any]])?.compactMap(convert), !kids.isEmpty {
+                plan.spaces.append(ImportedSpace(title: "Other Bookmarks", emoji: "🔖", theme: nil, pinned: kids))
+            }
+        }
+
+        // Auto-archive store (best effort; shape varies between Dia versions).
+        if let data = try? Data(contentsOf: supportDir.appendingPathComponent("StorableAutoArchive.json")),
+           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let containers = root["containers"] as? [[String: Any]] {
+            for c in containers {
+                for t in c["archivedTabs"] as? [[String: Any]] ?? [] {
+                    if let (url, title) = firstURL(in: t) {
+                        plan.archive.append(ImportedArchiveEntry(customTitle: nil, pageTitle: title, url: url,
+                                                                 archivedAt: refDate(t["archivedAt"] ?? t["archiveDate"] ?? t["date"]), reason: .auto, spaceTitle: "Dia"))
+                    }
+                }
+            }
+        }
+        return plan
+    }
+
+    private static func firstURL(in obj: Any) -> (String, String)? {
+        if let d = obj as? [String: Any] {
+            if let u = d["url"] as? String, u.hasPrefix("http") { return (u, d["title"] as? String ?? "") }
+            for v in d.values { if let r = firstURL(in: v) { return r } }
+        } else if let a = obj as? [Any] {
+            for v in a { if let r = firstURL(in: v) { return r } }
+        }
+        return nil
+    }
+}
+
+// MARK: - Applying
+
+extension SidebarStore {
+    struct ImportResult { var spaces = 0; var tabs = 0; var folders = 0; var archived = 0 }
+
+    /// Merge a plan into the sidebar. Spaces with the same title merge; favorites
+    /// and pinned tabs skip URLs that already exist in that section.
+    @discardableResult
+    func apply(_ plan: ImportPlan, includeArchive: Bool, includeSettings: Bool) -> ImportResult {
+        var result = ImportResult()
+
+        // A pinned tab that has navigated still counts as present via its home URL.
+        func existingURLs(under container: UUID) -> Set<String> {
+            Set(tabs(under: container).flatMap { [$0.tab?.url, $0.tab?.savedURL].compactMap { $0 } })
+        }
+
+        // Favicons first, for every item (also ones skipped as duplicates).
+        func copyFavicons(_ items: [ImportedItem]) {
+            for it in items {
+                if it.isFolder { copyFavicons(it.children); continue }
+                guard let src = it.faviconPath, let url = it.url, let key = FaviconCache.key(for: url) else { continue }
+                let dst = AppPaths.favicons.appendingPathComponent(FaviconCache.fileName(key))
+                if !FileManager.default.fileExists(atPath: dst.path) {
+                    try? FileManager.default.copyItem(atPath: src, toPath: dst.path)
+                }
+            }
+        }
+        copyFavicons(plan.favorites)
+        for sp in plan.spaces { copyFavicons(sp.pinned); copyFavicons(sp.today) }
+
+        func insert(_ items: [ImportedItem], into parent: UUID, skip: Set<String>, pinned: Bool) {
+            var skip = skip
+            for it in items {
+                if it.isFolder {
+                    let name = it.customTitle ?? it.pageTitle
+                    // Re-importing must not duplicate folders: reuse one with the same name.
+                    let folder: SidebarItem
+                    if let existing = children(of: parent).first(where: { $0.isFolder && ($0.title ?? "") == name }) {
+                        folder = existing
+                    } else {
+                        folder = createFolder(named: name, in: parent)
+                        setExpanded(folder.id, false)
+                        result.folders += 1
+                    }
+                    insert(it.children, into: folder.id, skip: existingURLs(under: folder.id), pinned: pinned)
+                } else if let url = it.url, !skip.contains(url) {
+                    skip.insert(url)
+                    var tab = SidebarItem.tab(url, title: it.pageTitle, parent: parent)
+                    tab.title = it.customTitle
+                    tab.createdAt = it.createdAt
+                    if var t = tab.tab { t.timeLastActiveAt = it.createdAt; tab.data = .tab(t) }
+                    insertItem(tab, into: parent, at: nil)
+                    result.tabs += 1
+                }
+            }
+        }
+
+        insert(plan.favorites, into: favoritesContainerID, skip: existingURLs(under: favoritesContainerID), pinned: true)
+
+        for sp in plan.spaces {
+            let space: Space
+            if var existing = orderedSpaces.first(where: { $0.title.caseInsensitiveCompare(sp.title) == .orderedSame }) {
+                if let t = sp.theme, existing.theme != t { existing.theme = t; updateSpace(existing) }
+                space = existing
+            } else {
+                space = createSpace(title: sp.title, emoji: sp.emoji, theme: sp.theme, focus: false)
+                result.spaces += 1
+            }
+            insert(sp.pinned, into: space.pinnedContainerID, skip: existingURLs(under: space.pinnedContainerID), pinned: true)
+            insert(sp.today, into: space.todayContainerID, skip: existingURLs(under: space.todayContainerID), pinned: false)
+        }
+
+        if includeArchive {
+            let known = Set(archive.compactMap { $0.item.tab?.url })
+            for e in plan.archive where !known.contains(e.url) {
+                var item = SidebarItem.tab(e.url, title: e.pageTitle, parent: nil)
+                item.title = e.customTitle
+                let sid = orderedSpaces.first { $0.title == e.spaceTitle }?.id
+                appendArchived(ArchivedItem(archivedAt: e.archivedAt, reason: e.reason, sourceSpaceID: sid, wasPinned: false, item: item))
+                result.archived += 1
+            }
+        }
+
+        if includeSettings {
+            if let a = plan.settings.autoArchive { settings.autoArchive = a }
+            if let w = plan.settings.sidebarWidth { prefs.sidebarWidth = min(max(w, 220), 520) }
+        }
+        touchAfterImport()
+        return result
+    }
+}
