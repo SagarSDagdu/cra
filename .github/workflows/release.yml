@@ -31,6 +31,8 @@ jobs:
     runs-on: macos-15
     env:
       CRA_VERSION: ${{ github.event.inputs.version || github.ref_name }}
+      # The secrets context is not allowed in step `if`s, so resolve it once here.
+      HAS_CERT: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -49,7 +51,7 @@ jobs:
 
       - name: Import signing certificate
         id: cert
-        if: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+        if: ${{ env.HAS_CERT == 'true' }}
         env:
           P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12 }}
           P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
