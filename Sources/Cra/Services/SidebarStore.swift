@@ -300,6 +300,16 @@ final class SidebarStore {
         items[parent] = p
     }
 
+    /// A Little Window closed: its page goes to the Library like a closed tab
+    /// (Arc archives Little Arcs with source `littleArc`). It never had a
+    /// sidebar slot, so `sourceSpaceID` is nil and restore uses the focused space.
+    func archiveLittleWindowPage(url: String, title: String) {
+        let it = SidebarItem.tab(url, title: title, parent: nil)
+        archive.insert(ArchivedItem(archivedAt: Date(), reason: .manual, sourceSpaceID: nil, wasPinned: false, item: it, fromLittleWindow: true), at: 0)
+        if archive.count > 2000 { archive.removeLast(archive.count - 2000) }
+        touch()
+    }
+
     func appendArchived(_ entry: ArchivedItem) {
         archive.append(entry)
         archive.sort { $0.archivedAt > $1.archivedAt }

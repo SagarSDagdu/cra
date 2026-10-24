@@ -193,3 +193,210 @@ the main toolbar; that button and `InspectorFrontendHost.closeWindow()` reach th
 console message, which calls `CloseDevTools()`. The CEF window is non-opaque with its right
 corners masked to the card radius. Still missing versus Arc: the device-mode toggle, which
 the frontend only offers when it can dock.
+
+### Developer Mode, shortcuts, extensions (24 Oct, evening)
+
+Arc's View ▸ Developer submenu (read via Accessibility): View Source ⌥⌘U, Developer Tools
+⌥⌘I, Inspect Elements ⌥⌘C, JavaScript Console ⌥⌘J, "Turn off Developer Mode for this
+site" ⌃D. ⇧⌘D is Hide Toolbar and ⌘D is Pin/Unpin Tab. Developer Mode is per site and
+swaps the toolbar: default = nav buttons left, centred friendly URL (host bright, path dim)
+behind a link glyph, sidebar toggle right; developer = lock + full monospace URL left,
+copy/capture/DevTools/source icons right, nav buttons in the sidebar's title row. Cra
+stores the hosts in `AppSettings.developerHosts`.
+
+Extensions: CEF 154 has no extension API for Alloy-style browsers. A spike
+(`cra://debug?chromeSpike=<url>`) proved the alternative: a Chrome-style Views window
+(`CefWindow` + `CefBrowserView`, `GetChromeToolbarType = CEF_CTT_NONE`, frameless, runtime
+style CHROME) attached as a child window over the content area loads unpacked extensions
+from `~/Library/Application Support/Cra/Extensions/*` via `--load-extension` (an MV3
+content script rendered its banner). Chrome style also docks DevTools natively. Moving the
+page browsers to that hosting is the route to extensions; one Chrome-style window per tab.
+
+## Split View (Arc 1.170.0, 24 Oct 2026, evening)
+
+Method: REA CLI 6.4.0 `inspect-macho` (Evidence ev_84b238…, arm64 SHA-256 25af5f4e…) and `demangle-swift`
+(ev_026c6350…); REA's `inspect-native-dispatch-metadata` refuses the 80 MB executable (64 MiB budget). The
+model below comes from parsing the arm64 slice's Swift reflection metadata (`__swift5_types` /
+`__swift5_fieldmd` / `__swift5_proto`, nominal types with their stored properties and enum cases) and
+`otool -oV` Objective-C class data (selectors, ivars), plus the user's own
+~/Library/Application Support/Arc/StorableSidebar.json (21 split items) and StorableWindows.json.
+No decompiler, so property names and types are observed; the algorithms are inferred from them.
+
+### Where it lives
+- [O] Everything is in Arc's native Swift shell, not in Chromium. ArcCore (Chromium) only carries upstream
+  Chrome's own `tabs.createSplit` / `splitViewId` extension API and "Cannot create split view with
+  non-adjacent tabs" strings; the Arc UI never references them.
+- [O] Generic engine: `ARCUI.SplitViewController: NSViewController` (module ARCUI, file
+  ARCUI/SplitViewController.swift) with `SplitViewControllerLayout` (pure layout types) and
+  `SplitViewContentPaneView`. It is NOT built on NSSplitView: no Arc class implements any
+  `splitView:…` delegate selector (the NSSplitViewDelegate selectors in the binary are protocol metadata
+  only). The one NSSplitView subclass, `WebContentViewControllerSplitView` (private to
+  WindowContentViewController, overrides mouseDown/mouseUp/viewDidEndLiveResize, `onDidEndLiveResize`),
+  is a per-pane inner split, not the pane layout. [I]
+- [O] Arc-specific glue: `Arc.WindowContentsContainerViewController: XiblessViewController<NSView>`
+  conforms to `SplitViewControllerDelegate`, owns one lazy `splitViewController`, a
+  `LayoutConstraintsMap<SplitViewConstraintType>` (leading, trailing, top, bottom, minHeight) and a lazy
+  `splitViewTopConstraint`. Each pane is an `Arc.WindowContentViewController` (conforms to
+  `SplitViewContentPaneWithInsets`); an empty/drop pane is `SplitViewContentPlaceholderView` (NSView with
+  `contentInsets`, a `BorderView` with `borderColor`, also `SplitViewContentPaneWithInsets`).
+- [O] State is TCA (ComposableArchitecture): `Store<WindowState, WindowAction>` with view stores; feature
+  modules WindowContents (`SplitViewState`, `SplitViewLayoutCache`, `WindowSplitViewLayout`,
+  `WindowContentPresentationDisposition`), SharedWindowFeature (`WindowAction.SplitViewAction`),
+  BaseModels (`SidebarSplitViewData`, `SplitViewPaneMenuOperation`), SidebarUI (`SplitViewCellState`).
+
+### Data model
+- [O] Sidebar: a split is a sidebar item like a folder. `SidebarItemData.splitView(SidebarSplitViewData)`
+  with `itemWidthFactors: [Identifier<SidebarItem>: CGFloat]`, `layoutOrientation: horizontal|vertical`,
+  `timeLastActiveAt: Date?`, `customInfo: { iconType: SidebarCustomIcon }?` (user icon, used together with
+  the item `title` when renamed), `focusItemID: Identifier<SidebarItem>?`. The tabs are the item's
+  `childrenIds` (order = pane order, left→right / top→bottom). JSON on this Mac:
+  `{"data":{"splitView":{"itemWidthFactors":[<id>,0.3835,<id>,0.6165],"layoutOrientation":"horizontal",
+  "focusItemID":<id>,"timeLastActiveAt":…,"customInfo":null}},"childrenIds":[…],"parentID":<container>,…}`.
+  All 21 local splits: 2 children, horizontal, parent = a space's pinned/unpinned container (not inside
+  folders here), title/customInfo never set. Untouched splits store a single factor `[firstChild, 0.5]`;
+  after a drag both factors are stored and sum to 1.0. One zombie split with 0 children exists; the
+  binary logs "Noticed zombie split view (without any children)" (`ZombieSplitSeenLocation`:
+  rawUpdate/appliedChange/publishedValue) and repairs it on sync. [I] Missing factors = equal share of
+  the remainder.
+- [O] Window: `WindowContents.State { windowContents: [WindowContentID: WindowContent], splitViewState,
+  modalWindowContentV2State, windowContentSidebarItemMap: BidirectionalMap<WindowContentID,
+  Identifier<SidebarItem>> }`. `SplitViewState { windowContentIDs: OrderedSet<WindowContentID>,
+  layoutOrientation, interactionState, focusedContentID }`; only `windowContentIDs` + `focusedContentID`
+  are Codable (StorableWindows.json `splitViewState`), orientation and widths are rebuilt from the
+  sidebar item. `InteractionState { activePaneEditStyles: Set<.dragAndDrop>, proposedWindowContentDropTarget:
+  WindowContentID?, isResizingPanes }`. Legacy `SplitViewState_Legacy { windowContentIDs }`.
+- [O] Per-window width cache: `WindowSplitViewLayout { paneWidths: [CGFloat] }` kept by
+  `SplitViewLayoutCache { storeLayoutForWindowID, layoutForWindowID }` (a TCA DependencyKey) and
+  handed to the view as `restorableSplitViewLayout`; `SplitViewWindowContentContext { numPanes,
+  restorablePaneWidths: [CGFloat]?, splitViewLayoutOrientation }` is what the container passes to
+  `SplitViewController`.
+- [O] Container view state (`WindowContentsContainerViewController.ViewState`): `splitViewWindowContentIDs:
+  OrderedSet<WindowContentID>`, `focusedContentID`, `splitViewLayoutOrientation`, `restorableSplitViewLayout`,
+  `canDragOntoSplit`, `isDraggingToCreateSplitView`, `shouldShowInteractivePaneInsertionHandle`,
+  `contentInsets`, `contentCornerRadius`, `hiddenScrimEdges`, `sidebarPresentation`.
+
+### The layout engine (ARCUI.SplitViewController)
+- [O] Properties: `draggerHandleWidth`, `draggerHandleHitTargetOutset`, `minimumPaneWidth`,
+  `layoutOrientation`, `displayInteractivePaneInsertionDraggerHandle`, `allowInteractivePaneInsertion`,
+  `verticalLayoutOrientationFromDragAllowed`, `shouldDisplayDraggerPaneForSecondaryAxis`,
+  `isDragDropHapticFeedbackEnabled`, weak `delegate`, `contentPanes: OrderedDictionary<Identifier<ContentPane>,
+  ContentPane>`, `paneResizeState?`, `dragDestinationState?`, `dragSourceState?`,
+  `dragInfoSubject: PassthroughSubject<NSDraggingInfo, Never>`, lazy `minimumWidthConstraint`.
+- [O] `SplitViewControllerLayout.ContentPane { id, view: NSView & SplitViewContentPane, trailingDraggerHandle,
+  bottomDraggerHandle: DraggerHandle { view: NSView & SplitViewControllerDraggerHandleType }, widthFactor: CGFloat,
+  resizeStyle: flexible|fixed, displayState: collapsed|expanded, inFlightTransition: StateTransition?,
+  content: .dropRegion(NSView) | .viewController(SplitViewContentPaneContentViewController) }`.
+  `StateTransition { identifier: UUID, targetState, style: .animated(removePaneOnCompletion: Bool) | .immediate,
+  draggerHandleWidth: CGFloat? }`. `ContentPanePair { leading, trailing? }`.
+- [O] `SplitViewControllerLayout.Context { contentPanes, containerSize, backingScaleFactor, minimumPaneWidth,
+  draggerHandleWidth, displayInteractivePaneInsertionDraggerHandle, shouldDisplayDraggerPaneForSecondaryAxis,
+  layoutOrientation, yAxisOriginAtTop }` → frames are a pure function of the context (pixel-snapped via
+  backingScaleFactor). [I] Each pane gets `widthFactor × (container − handles)` along the main axis, clamped to
+  `minimumPaneWidth`; every pane carries its own trailing (horizontal) and bottom (vertical) handle view, the
+  last one hidden or used as the "insert a pane here" handle when `displayInteractivePaneInsertionDraggerHandle`.
+- [O] Resize: `PaneResizeState { initialClickLocationInDragHandle: CGPoint, canSnapToCenter, isCenterSnapped }`
+  driven by `handleDraggerPanGesture:` (NSPanGestureRecognizer) and `handleDraggerDoubleClickGesture:`
+  (double-click a handle = reset to equal widths, [I]). Dragging snaps to the 50/50 centre when allowed.
+  Pane add/remove animates via `StateTransition` (collapsed ↔ expanded, remove on completion).
+- [O] Panes are hosted in `SplitViewContentPaneView: NSView { contentView, contentConstraints:
+  LayoutConstraintsMap<NSLayoutConstraint.Attribute>, lockContentWidth: Bool, lockedContentAlignment:
+  leading|center|trailing, userInteractionEnabled }` (overrides hitTest). [I] While a handle is being
+  dragged the web content keeps its old width and is pinned to one edge instead of relayouting Chromium on
+  every mouse move; `userInteractionEnabled=false` blocks the page from eating the drag.
+  `WindowContentViewController` adds `ContentResizeMode { intrinsic, throttle, locked }`,
+  `pendingResizeFrames`, `resizeTimer`, `lockedContentSize`, `contentResizeThrottleSubscription`; the
+  container has `isAnimatingResize` and `ContentSizeThrottleFlags` (OptionSet).
+- [O] Handles: Arc's `SplitViewDraggerHandleView: FlippedView` (vertical divider: lazy `handle` NSView pill,
+  `backgroundView: WindowBackgroundContainerView?` so the space theme shows through the gap, `isHighlighted`,
+  `draggableArea: NSTrackingArea`, `draggableRegion: CGRect`, `resetCursorRects`, mouseEntered/Exited,
+  `contentAppearance`) with `ViewState { displayBackgroundView, windowBackgroundConfiguration,
+  contentOverBackgroundAppearance, isHandleVisible, metalWindowBackgroundRenderingEnabled }`;
+  `SplitViewBottomDraggerHandleView` for vertical layouts adds `handle: .dragger | .scrimLoader` and
+  `isContentBelowLoading` (the handle doubles as a loading scrim). ARCUI ships a plain
+  `SplitViewControllerDefaultDraggerHandleView`.
+
+### Drag and drop (how a split is created with the mouse)
+- [O] `SplitViewController` is both `NSDraggingSource` and `NSDraggingDestination` (draggingEntered/Updated/
+  Exited/Ended, prepareForDragOperation, performDragOperation, wantsPeriodicDraggingUpdates,
+  updateDraggingItemsForDrag, draggingSession:…). `DragSourceState { contentPaneID, initialIndex,
+  initialWidthFactor, contentPaneSnapshot: NSImage?, contentPaneSize }` = reordering a pane by dragging its
+  toolbar (snapshot image as drag preview). `DragDestinationState { operation: NSDragOperation,
+  isDraggingInView, proposedTarget: DropTarget?, isDraggingContentPane }`.
+- [O] `DropTarget = .replaceContent(index) | .insertContent(index)`; `ProposedDropTargetInfo { target,
+  dropRegionInsertionIndex: Int?, existingDropRegion: ContentPane?, layoutOrientation }`. [I] Hovering near an
+  edge inserts a temporary `.dropRegion` pane (placeholder view, animated open) at that index; hovering over
+  the middle of a pane proposes replacing it; `verticalLayoutOrientationFromDragAllowed` lets a drop on the
+  top/bottom edge flip the layout to vertical.
+- [O] What can be dropped (`WindowContentsContainerViewController.SplitViewDragItem`): `.sidebarItem(id)`
+  or `.url(URL)`. Actions: `onDropSidebarItem(itemID, target, layoutOrientation, maybeMoveDecision)`,
+  `onDropURL(url, target, layoutOrientation)`, `onDidUpdateSplitViewProposedDropTarget(WindowContentID?)`,
+  `onDidBegin/EndSplitViewInteractivePaneEditingWith(.dragAndDrop)`.
+- [O] Sidebar side: dragging a tab over another tab's left/right half (`SidebarDropTargetRegion = left|right`,
+  `TabSplitViewPosition = left|right`) shows `SplitDragPreviewView` (title, favicon, "tab info" and "empty"
+  background containers) after `splitDropTargetDelaySatisfied`; dropping makes a split item. Flags:
+  `drag-to-combine-tabs-into-split-enabled`, `sidebar-drag-to-split-preview-ui-enabled`, `win-drag-to-split-enabled`.
+  Onboarding copy: "Drag a tab from your sidebar into the middle of the screen to create a Split View."
+
+### Commands, menus, entry points
+- [O] `WindowAction.SplitViewAction`: `addPanel(index: InsertionLocation, showCommandBar: Bool)`,
+  `movePanel(from:to:)`, `onDropSidebarItem`, `onDropURL`, `onDidBeginWindowContentsSplitViewPaneResize`,
+  `onDidEndWindowContentsSplitViewPaneResize(WindowSplitViewLayout)`, `onDidUpdateSplitViewProposedDropTarget`,
+  `onPaneCreated(source)`, `onPaneClosed`, `onDidRestoreSplitViewState`, `containerDelegate(…)`,
+  `panelAction(ContentToolbarAction)`. Container delegate: `onDidAddItemsToContainer`,
+  `onDidMoveItemsWithinContainer`, `onDidRemoveItemsFromContainers(itemIDs)`, `onDidAdjustLayoutOrientation`.
+- [O] Where a new pane goes: `WindowContentPresentationDisposition.splitView(SplitViewTarget)` with
+  `.paneAtIndex(Int) | .newPane(InsertionLocation) | .pane(WindowContentID) | .replaceAllPanes |
+  .firstEmptyOrNewPane`; `InsertionLocation = .index(Int) | .after(id) | .before(id) | .last | .afterFocusedPane`.
+- [O] Pane menu (`SplitViewPaneMenuOperation`, each `.enabled|.disabled`): moveLeft, moveRight, addPaneLeft,
+  addPaneRight, addPaneTop, addPaneBottom, separate, copyLink, flipLayoutOrientation. Toolbar menu items
+  (`ContentPanelSplitViewMenuItemType`): move/add/separate/copyLink × horizontal/vertical, flipToVertical,
+  flipToHorizontal. Sidebar context menu on a split: `childItem(id, .separateFromSplitView)`, `separateAllItems`,
+  `addPanel`, `flipLayoutOrientation`. Toolbar hover actions: separate, close, addHorizontal, addVertical,
+  move, copyLink (`split-view-actions-hover-button-enabled`).
+- [O] Menu strings: "Add Vertical Split View", "New Bottom Split", "Add Bottom Split", "Convert to
+  Horizontal/Vertical Split View", "Flip to horizontal/vertical split view", "Close Split View Pane", "Separate Tab
+  from Split", "Remove Tab from Split View", "Open in Split View", "Add to Split View", "Share Split View",
+  "Multitask with Split View", "Switch to next/previous Split View", "Jumps to the first…fourth Split View page".
+  Type-travel candidates: AddLeft/Right/Top/BottomSplit, ConvertToHorizontal/VerticalSplitView,
+  NewVerticalSplitViewPane. Key bindings (see above): Add Split View ⌃⇧=, Close Split Pane ⌃⇧−.
+- [O] Entry sources tracked (`SplitViewEnteredSource`): plusButton, windowContent, dragAndDrop, menu,
+  contextMenu, alternateClick (option-click a tab), typeTravel, tabCreation, easel, navigationBar, tabHoverMenu.
+  Option-click on a split child's close button un-splits (`option-click-split-tab-close-button-to-unsplit-enabled`).
+- [O] Limits: errors `splitViewMaximumPanesExceeded`, `splitViewTargetOutOfRange`,
+  `unableToInsertSplitViewContainer`, `missingSplitViewContainer`; `ModalParentSplitState { parentIsSplitCompatible,
+  numberOfPanels, maximumNumberOfPanels, layoutOrientation }`. [I] Max is 4 panes (shortcuts stop at "fourth").
+  Toolbar `shouldShowSplitViewClose` only in a split; `maximizeCurrentSplitViewPane:` exists (notification token).
+
+### Sidebar cell
+- [O] `SplitViewCellView: SelectableCellView<SplitViewCellState>` with `SplitViewCellState { sidebarItemID,
+  isCurrentItem, isContentVisible, isKeyDraggedItem, isHighlighted, isMultiSelected, shouldDim, canResetTab,
+  layoutStyle: .childItems(OrderedDictionary<id, ChildItemState>) | .customInfo(CustomInfo), colorPalette,
+  closeItemShortcut, lastUpdatedLocally, hasLeadingRecordingIndicator, dropTargetRegion?, closeButtonConfiguration,
+  closeButtonAction, shouldPerformUserAttentionAnimation }`. `ChildItemState { itemID, iconType: FaviconType?,
+  title, isGroupSelected, isRecording, closeButtonConfiguration, optionClickSplitTabCloseButtonToUnsplitEnabled,
+  newSplitSeparationMechanismsEnabled }`. `CustomInfo { title, isEditingTitle, icon: .childItemCount(Int) |
+  .customIcon(SidebarCustomIcon) }`.
+- [O] Views: `SplitViewCellChildrenContainerView` (one `SplitViewCellChildItemView` per tab, `separatorLayers:
+  [CALayer]` between them, `isGroupHovered`, `InsetSpec { defaultInset, extendedInset }`), each child with
+  favicon + title + its own close button and recording dot; renamed splits show `SplitViewCellCustomInfoView`
+  (icon or item-count badge `SplitViewCellItemCountIconView`, editable title, hover subtitle). Icons:
+  icon-split-add-left/right/top/bottom, icon-split-horizontal/vertical, icon-split-move-*, icon-separate-from-split,
+  icon-split-share-*, icon-split-x; colour asset SplitViewLeftBackground.
+
+### Plan for Cra (design, not observation)
+1. Model: add `ItemData.split(SplitData)` to SidebarModel with `widthFactors: [UUID: Double]`,
+   `orientation`, `focusTabID`; children = the pane tabs (reuse `childrenIds`/`parentID` like folders). Store
+   per-window `splitState { paneTabIDs, focusedTabID }` in WindowPrefs; rebuild widths from the item.
+2. Engine: a `SplitPaneLayout` value type (panes with widthFactor, min width, handle width, orientation,
+   pixel snap) → frames; a `SplitContainerView` in ShellView's `webContainer` that owns one pane view and one
+   handle view per visible tab. Cra's CEF browsers are child windows positioned by
+   `MainWindowController.positionPageWindows`, so each pane needs its own screen rect: change
+   `BrowserManager.show` to a set of visible tabs and `onWebFrame` to deliver per-tab rects.
+3. Resize: pan on the handle updates factors; during the drag freeze each page window's size (Cra already
+   has `frozenWebBounds`) and only move it, resize once on mouse-up (Arc's lockContentWidth/throttle);
+   double-click = equal widths; snap at 50/50.
+4. Creation: ⌃⇧= adds an empty pane (placeholder with dashed border + command bar); drag a sidebar tab onto
+   the content card: edges insert, centre replaces; option-click a tab adds it as a pane; context menu
+   "Open in Split View"; "Separate", "Flip orientation", "Close pane".
+5. Sidebar: a grouped row showing each pane's favicon+title with hairline separators, group selection
+   highlight, per-child close, rename → icon/count badge.

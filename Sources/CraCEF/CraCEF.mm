@@ -1,6 +1,10 @@
 // Objective-C++ bridge between Swift and CEF. See include/CraCEF.h.
 #import "CraCEF.h"
 
+#include "include/views/cef_browser_view.h"
+#include "include/views/cef_browser_view_delegate.h"
+#include "include/views/cef_window.h"
+#include "include/views/cef_window_delegate.h"
 #include <crt_externs.h>
 #include <atomic>
 #include <string>
@@ -10,6 +14,7 @@
 #include "include/cef_application_mac.h"
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
+#include "include/cef_command_ids.h"
 #include "include/cef_command_line.h"
 #include "include/cef_context_menu_handler.h"
 #include "include/cef_display_handler.h"
@@ -32,6 +37,7 @@ static std::atomic<bool> g_contextInitialized{false};
 static std::atomic<int> g_liveBrowsers{0};
 static bool g_quitting = false;
 static bool g_useChromeStyle = false;
+static BOOL g_chromeHosting = NO;
 static NSMutableArray<CraBrowser*>* g_pendingCreation = nil;
 static void (^g_relaunchHandler)(NSArray<NSString*>*) = nil;
 static BOOL g_alreadyRunning = NO;
@@ -54,6 +60,7 @@ enum CraMenuCommand {
     kMenuInspectElement,
     kMenuOpenImageInNewTab,
     kMenuCopyImageURL,
+    kMenuPictureInPicture,
 };
 
 // MARK: - Downloads
@@ -74,11 +81,16 @@ class CraClient;
 @property (nonatomic) BOOL canGoForward;
 @property (nonatomic) BOOL isCreated;
 @property (nonatomic) BOOL isClosed;
+@property (nonatomic) BOOL isInPictureInPicture;
+- (void)requestPictureInPictureInFrame:(CefRefPtr<CefFrame>)frame automatic:(BOOL)automatic x:(int)x y:(int)y;
 - (void)adoptBrowser:(CefRefPtr<CefBrowser>)browser;
 - (void)browserClosed;
 - (CefRefPtr<CefBrowser>)cefBrowser;
 - (CefRefPtr<CefClient>)cefClient;
 - (void)createNow;
+- (void)hostWindowCreated:(NSWindow*)window;
+- (void)hostPopupBrowserView:(CefRefPtr<CefBrowserView>)view;
+@property (nonatomic, strong, nullable) NSWindow* hostWindow;
 @end
 
 // MARK: - CEF app
@@ -94,6 +106,21 @@ public:
         // Chromium Safe Storage" keychain prompt. Cookies are still encrypted,
         // just with a key that is not in the user's keychain.
         command_line->AppendSwitch("use-mock-keychain");
+        // Chrome-style windows are ours; Chrome must not restore or reopen them.
+        command_line->AppendSwitch("no-startup-window");
+        command_line->AppendSwitch("disable-session-crashed-bubble");
+        command_line->AppendSwitch("hide-crash-restore-bubble");
+        command_line->AppendSwitch("no-first-run");
+        // Unpacked Chrome extensions (Chrome-style browsers only): one folder per extension.
+        if (process_type.empty()) {
+            NSString* dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/Cra/Extensions"];
+            NSMutableArray<NSString*>* paths = [NSMutableArray array];
+            for (NSString* name in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:nil]) {
+                NSString* p = [dir stringByAppendingPathComponent:name];
+                if ([[NSFileManager defaultManager] fileExistsAtPath:[p stringByAppendingPathComponent:@"manifest.json"]]) [paths addObject:p];
+            }
+            if (paths.count) command_line->AppendSwitchWithValue("load-extension", CefStringFromNS([paths componentsJoinedByString:@","]));
+        }
         command_line->AppendSwitchWithValue("autoplay-policy", "document-user-activation-required");
     }
 
@@ -208,6 +235,9 @@ public:
             // as a child window over the dock area. (A child *browser* for
             // DevTools trips a CHECK in CEF 154, and re-parenting the view is
             // unsafe because CEF closes `view.window` when DevTools closes.)
+            // Views-hosted (Chrome-style) DevTools are reported by
+            // CraDevToolsWindowDelegate once their window exists.
+            if (browser->GetHost()->HasView()) return;
             if (CraBrowser* o = owner_) [o.delegate browser:o didCreateDevToolsView:view];
             return;
         }
@@ -244,6 +274,7 @@ class CraClient : public CefClient,
                   public CefFocusHandler,
                   public CefPermissionHandler {
 public:
+    CraBrowser* owner() { return owner_; }
     explicit CraClient(CraBrowser* owner) : owner_(owner) {}
 
     CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
@@ -273,6 +304,15 @@ public:
         if (g_quitting && g_liveBrowsers <= 0) CefQuitMessageLoop();
     }
 
+    void OnBeforeDevToolsPopup(CefRefPtr<CefBrowser> browser, CefWindowInfo& windowInfo, CefRefPtr<CefClient>& client,
+                               CefBrowserSettings& settings, CefRefPtr<CefDictionaryValue>& extra_info,
+                               bool* use_default_window) override {
+        CraBrowser* o = owner_;
+        if (!o) return;
+        client = new DevToolsClient(NSZeroRect, o, o.containerView);
+        *use_default_window = false;
+    }
+
     bool OnBeforePopup(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int popup_id,
                        const CefString& target_url, const CefString& target_frame_name,
                        WindowOpenDisposition target_disposition, bool user_gesture,
@@ -285,11 +325,12 @@ public:
         BOOL background = (target_disposition == CEF_WOD_NEW_BACKGROUND_TAB);
         CraBrowser* host = [o.delegate browser:o popupHostForURL:NSStringFromCef(target_url) inBackground:background];
         if (!host) return true;  // blocked
+        client = [host cefClient];
+        if (g_chromeHosting) return false;  // Views path: CraChromeViewDelegate hosts the popup view
         NSView* view = host.containerView;
         NSRect b = view.bounds;
         windowInfo.SetAsChild((__bridge void*)view, CefRect(0, 0, (int)b.size.width, (int)b.size.height));
         if (g_useChromeStyle) windowInfo.runtime_style = CEF_RUNTIME_STYLE_CHROME;
-        client = [host cefClient];
         return false;  // allow, CEF creates it into our view with the opener kept
     }
 
@@ -306,6 +347,13 @@ public:
     }
 
     void OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int httpStatusCode) override {
+        // Every frame reports Picture in Picture changes (the events don't bubble, hence capture).
+        frame->ExecuteJavaScript(
+            "(function(){if(window.__craPip)return;window.__craPip=1;"
+            "document.addEventListener('enterpictureinpicture',function(){console.log('__cra_pip:1');},true);"
+            "document.addEventListener('leavepictureinpicture',function(){console.log('__cra_pip:0');},true);"
+            "if(document.pictureInPictureElement)console.log('__cra_pip:1');})();",
+            frame->GetURL(), 0);
         if (!frame->IsMain()) return;
         CraBrowser* o = owner_;
         if (!o) return;
@@ -328,6 +376,22 @@ public:
     bool OnConsoleMessage(CefRefPtr<CefBrowser> browser, cef_log_severity_t level, const CefString& message,
                           const CefString& source, int line) override {
         std::string m = message.ToString();
+        if (m.compare(0, 10, "__cra_pip:") == 0) {
+            CraBrowser* o = owner_;
+            if (!o) return true;
+            std::string v = m.substr(10);
+            if (v == "1" || v == "0") {
+                BOOL active = (v == "1");
+                if (o.isInPictureInPicture != active) {
+                    o.isInPictureInPicture = active;
+                    if ([o.delegate respondsToSelector:@selector(browser:didChangePictureInPicture:)])
+                        [o.delegate browser:o didChangePictureInPicture:active];
+                }
+            } else if (v.compare(0, 3, "err") == 0) {
+                NSLog(@"CraCEF: Picture in Picture %s", v.c_str());
+            }
+            return true;
+        }
         const std::string prefix = "__cra_theme:";
         if (m.compare(0, prefix.size(), prefix) != 0) return false;
         CraBrowser* o = owner_;
@@ -432,6 +496,13 @@ public:
             model->InsertItemAt(index++, kMenuCopyImageURL, "Copy Image Address");
             model->InsertSeparatorAt(index++);
         }
+        // Chrome-style menus already carry Chrome's own "Picture in picture" item.
+        if (params->GetMediaType() == CM_MEDIATYPE_VIDEO && (params->GetMediaStateFlags() & CM_MEDIAFLAG_CAN_PICTURE_IN_PICTURE) &&
+            model->GetIndexOf(IDC_CONTENT_CONTEXT_PICTUREINPICTURE) < 0) {
+            bool inPiP = params->GetMediaStateFlags() & CM_MEDIAFLAG_PICTURE_IN_PICTURE;
+            model->InsertItemAt(index++, kMenuPictureInPicture, inPiP ? "Exit Picture in Picture" : "Picture in Picture");
+            model->InsertSeparatorAt(index++);
+        }
         if (model->GetCount() > 0) model->AddSeparator();
         model->AddItem(kMenuInspectElement, "Inspect Element");
     }
@@ -462,6 +533,9 @@ public:
             }
             case kMenuInspectElement:
                 [o showDevToolsInspectingPoint:NSMakePoint(params->GetXCoord(), params->GetYCoord())];
+                return true;
+            case kMenuPictureInPicture:
+                [o requestPictureInPictureInFrame:frame automatic:NO x:params->GetXCoord() y:params->GetYCoord()];
                 return true;
             default:
                 return false;
@@ -582,6 +656,81 @@ private:
 
 // MARK: - CraBrowser
 
+// MARK: - Chrome-style hosting (Views). One frameless Chrome window per page; the
+// shell attaches it as a child window over the content card.
+
+class CraDevToolsWindowDelegate : public CefWindowDelegate {
+public:
+    CraDevToolsWindowDelegate(CraBrowser* owner, CefRefPtr<CefBrowserView> view) : owner_(owner), view_(view) {}
+    void OnWindowCreated(CefRefPtr<CefWindow> window) override {
+        window->AddChildView(view_);
+        window->Show();
+        NSView* v = (__bridge NSView*)window->GetWindowHandle();
+        if (CraBrowser* o = owner_) [o.delegate browser:o didCreateDevToolsView:v];
+    }
+    bool IsFrameless(CefRefPtr<CefWindow> window) override { return true; }
+    bool WithStandardWindowButtons(CefRefPtr<CefWindow> window) override { return false; }
+    cef_runtime_style_t GetWindowRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
+    CefRect GetInitialBounds(CefRefPtr<CefWindow> window) override { return CefRect(0, 0, 10, 10); }
+private:
+    __weak CraBrowser* owner_;
+    CefRefPtr<CefBrowserView> view_;
+    IMPLEMENT_REFCOUNTING(CraDevToolsWindowDelegate);
+};
+
+class CraChromeViewDelegate : public CefBrowserViewDelegate {
+public:
+    explicit CraChromeViewDelegate(CraBrowser* owner) : owner_(owner) {}
+    ChromeToolbarType GetChromeToolbarType(CefRefPtr<CefBrowserView> browser_view) override { return CEF_CTT_NONE; }
+    cef_runtime_style_t GetBrowserRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
+    CefRefPtr<CefBrowserViewDelegate> GetDelegateForPopupBrowserView(CefRefPtr<CefBrowserView> browser_view,
+                                                                     const CefBrowserSettings& settings,
+                                                                     CefRefPtr<CefClient> client, bool is_devtools) override {
+        if (is_devtools) return new CraChromeViewDelegate(owner_);
+        CraClient* cc = static_cast<CraClient*>(client.get());
+        return new CraChromeViewDelegate(cc ? cc->owner() : nil);
+    }
+    bool OnPopupBrowserViewCreated(CefRefPtr<CefBrowserView> browser_view, CefRefPtr<CefBrowserView> popup_browser_view,
+                                   bool is_devtools) override {
+        if (is_devtools) {
+            // Chrome's DevTools for a Chrome-style page: host it in a frameless
+            // window of ours; the shell docks it beside the page like before.
+            CraBrowser* o = owner_;
+            if (!o) return false;
+            CefWindow::CreateTopLevelWindow(new CraDevToolsWindowDelegate(o, popup_browser_view));
+            return true;
+        }
+        CefRefPtr<CefBrowser> b = popup_browser_view->GetBrowser();
+        CraClient* cc = b ? static_cast<CraClient*>(b->GetHost()->GetClient().get()) : nullptr;
+        CraBrowser* host = cc ? cc->owner() : nil;
+        if (!host) return false;
+        [host hostPopupBrowserView:popup_browser_view];
+        return true;
+    }
+private:
+    __weak CraBrowser* owner_;
+    IMPLEMENT_REFCOUNTING(CraChromeViewDelegate);
+};
+
+class CraChromeWindowDelegate : public CefWindowDelegate {
+public:
+    CraChromeWindowDelegate(CraBrowser* owner, CefRefPtr<CefBrowserView> view) : owner_(owner), view_(view) {}
+    void OnWindowCreated(CefRefPtr<CefWindow> window) override {
+        window->AddChildView(view_);
+        window->Show();
+        NSView* v = (__bridge NSView*)window->GetWindowHandle();
+        if (CraBrowser* o = owner_) [o hostWindowCreated:v.window];
+    }
+    bool IsFrameless(CefRefPtr<CefWindow> window) override { return true; }
+    bool WithStandardWindowButtons(CefRefPtr<CefWindow> window) override { return false; }
+    cef_runtime_style_t GetWindowRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
+    CefRect GetInitialBounds(CefRefPtr<CefWindow> window) override { return CefRect(0, 0, 10, 10); }
+private:
+    __weak CraBrowser* owner_;
+    CefRefPtr<CefBrowserView> view_;
+    IMPLEMENT_REFCOUNTING(CraChromeWindowDelegate);
+};
+
 @implementation CraBrowser {
     CefRefPtr<CefBrowser> _browser;
     CefRefPtr<CraClient> _client;
@@ -617,6 +766,13 @@ private:
 
 - (void)createNow {
     if (_isClosed || _browser) return;
+    if (g_chromeHosting) {
+        CefBrowserSettings settings;
+        CefRefPtr<CefBrowserView> view = CefBrowserView::CreateBrowserView(
+            _client, CefStringFromNS(_pendingURL ?: @"about:blank"), settings, nullptr, nullptr, new CraChromeViewDelegate(self));
+        CefWindow::CreateTopLevelWindow(new CraChromeWindowDelegate(self, view));
+        return;
+    }
     CefWindowInfo windowInfo;
     NSRect b = _containerView.bounds;
     windowInfo.SetAsChild((__bridge void*)_containerView,
@@ -629,6 +785,15 @@ private:
 
 - (CefRefPtr<CefBrowser>)cefBrowser { return _browser; }
 - (CefRefPtr<CefClient>)cefClient { return _client; }
+
+- (void)hostWindowCreated:(NSWindow*)window {
+    self.hostWindow = window;
+    [self.delegate browser:self didCreateHostWindow:window];
+}
+
+- (void)hostPopupBrowserView:(CefRefPtr<CefBrowserView>)view {
+    CefWindow::CreateTopLevelWindow(new CraChromeWindowDelegate(self, view));
+}
 
 - (void)adoptBrowser:(CefRefPtr<CefBrowser>)browser {
     _browser = browser;
@@ -670,6 +835,11 @@ private:
 
 - (void)showDevToolsInspectingPoint:(NSPoint)point {
     if (!_browser) return;
+    if (self.hostWindow) {
+        // Chrome-style: Chrome docks DevTools inside the page window itself.
+        _browser->GetHost()->ShowDevTools(CefWindowInfo(), nullptr, CefBrowserSettings(), CefPoint((int)point.x, (int)point.y));
+        return;
+    }
     if (_browser->GetHost()->HasDevTools()) {
         _browser->GetHost()->ShowDevTools(CefWindowInfo(), nullptr, CefBrowserSettings(),
                                           CefPoint((int)point.x, (int)point.y));
@@ -710,6 +880,88 @@ private:
 }
 - (void)stopFinding:(BOOL)clearSelection { if (_browser) _browser->GetHost()->StopFinding(clearSelection); }
 - (void)setAudioMuted:(BOOL)muted { if (_browser) _browser->GetHost()->SetAudioMuted(muted); }
+
+// MARK: Picture in Picture
+//
+// Chromium only lets a page enter Picture in Picture while it holds a user
+// activation, which clicks in Cra's own UI never give the page. Cra therefore
+// first sends the page a harmless key (F19: no page or Chromium shortcut
+// listens to it), which the renderer counts as an interaction, then runs the
+// request once `navigator.userActivation` reports active. `x`/`y` (view DIPs,
+// -1 for none) pick the video under a context-menu click; otherwise the
+// playing, largest video wins. Automatic requests (leaving the tab) take only
+// a playing video of some size and skip GIF-like muted loops.
+static NSString* PictureInPictureScript(BOOL automatic, int x, int y) {
+    return [NSString stringWithFormat:
+        @"(function(auto,x,y){try{"
+        "if(document.pictureInPictureElement){if(!auto){document.exitPictureInPicture().catch(function(){});}return;}"
+        "var area=function(v){var r=v.getBoundingClientRect();return r.width*r.height;};"
+        "var c=Array.prototype.slice.call(document.querySelectorAll('video')).filter(function(v){return !v.disablePictureInPicture&&v.readyState>=1&&v.videoWidth>0;});"
+        "if(auto){c=c.filter(function(v){return !v.paused&&!v.ended&&!(v.muted&&v.loop)&&area(v)>=20000;});}"
+        "if(!c.length){console.log('__cra_pip:none');return;}"
+        "var v=null;"
+        "if(x>=0){v=c.filter(function(e){var r=e.getBoundingClientRect();return x>=r.left&&x<=r.right&&y>=r.top&&y<=r.bottom;}).sort(function(a,b){return area(a)-area(b);})[0]||null;}"
+        "if(!v){c.sort(function(a,b){return ((b.paused?0:1)-(a.paused?0:1))||(area(b)-area(a));});v=c[0];}"
+        "var go=function(){v.requestPictureInPicture().then(function(){console.log('__cra_pip:ok');}).catch(function(e){console.log('__cra_pip:err '+e.name+': '+e.message);});};"
+        "var n=0;var t=setInterval(function(){if((navigator.userActivation&&navigator.userActivation.isActive)||++n>20){clearInterval(t);go();}},50);"
+        "}catch(e){console.log('__cra_pip:err '+e);}})(%d,%d,%d);", automatic ? 1 : 0, x, y];
+}
+
+- (void)nudgeUserActivation {
+    if (!_browser) return;
+    CefKeyEvent key;
+    key.windows_key_code = 0x82;  // VK_F19
+    key.native_key_code = 0x50;   // kVK_F19
+    key.modifiers = 0;
+    key.character = 0;
+    key.unmodified_character = 0;
+    key.is_system_key = 0;
+    key.type = KEYEVENT_RAWKEYDOWN;
+    _browser->GetHost()->SendKeyEvent(key);
+    key.type = KEYEVENT_KEYUP;
+    _browser->GetHost()->SendKeyEvent(key);
+}
+
+- (void)requestPictureInPictureInFrame:(CefRefPtr<CefFrame>)frame automatic:(BOOL)automatic x:(int)x y:(int)y {
+    if (!_browser) return;
+    if (self.isInPictureInPicture) {
+        if (!automatic) [self exitPictureInPicture];
+        return;
+    }
+    [self nudgeUserActivation];
+    double zoom = pow(1.2, _browser->GetHost()->GetZoomLevel());  // view DIPs → CSS px
+    NSString* hit = PictureInPictureScript(automatic, x < 0 ? -1 : (int)(x / zoom), y < 0 ? -1 : (int)(y / zoom));
+    NSString* any = PictureInPictureScript(automatic, -1, -1);
+    if (frame) {
+        // Click coordinates are relative to the top-level view, so only the main frame can hit-test.
+        frame->ExecuteJavaScript(CefStringFromNS(frame->IsMain() ? hit : any), frame->GetURL(), 0);
+        return;
+    }
+    // Every frame looks for a video: embedded players live in iframes.
+    std::vector<CefString> ids;
+    _browser->GetFrameIdentifiers(ids);
+    for (const auto& id : ids) {
+        CefRefPtr<CefFrame> f = _browser->GetFrameByIdentifier(id);
+        if (f && f->IsValid()) f->ExecuteJavaScript(CefStringFromNS(any), f->GetURL(), 0);
+    }
+}
+
+- (void)requestPictureInPictureAutomatic:(BOOL)automatic {
+    [self requestPictureInPictureInFrame:nullptr automatic:automatic x:-1 y:-1];
+}
+
+- (void)exitPictureInPicture {
+    if (!_browser) return;
+    std::vector<CefString> ids;
+    _browser->GetFrameIdentifiers(ids);
+    for (const auto& id : ids) {
+        CefRefPtr<CefFrame> f = _browser->GetFrameByIdentifier(id);
+        if (f && f->IsValid()) {
+            f->ExecuteJavaScript("if(document.pictureInPictureElement){document.exitPictureInPicture().catch(function(){});}",
+                                 f->GetURL(), 0);
+        }
+    }
+}
 - (void)print { if (_browser) _browser->GetHost()->Print(); }
 - (void)viewSource { if (_browser) _browser->GetMainFrame()->ViewSource(); }
 - (void)executeJavaScript:(NSString*)script {
@@ -732,7 +984,47 @@ private:
 
 // MARK: - Runtime
 
+// MARK: - Chrome-style spike (extensions need Chrome style; on macOS that means a Views window)
+
+static void (^g_spikeWindowHandler)(NSWindow*) = nil;
+
+class SpikeBrowserViewDelegate : public CefBrowserViewDelegate {
+public:
+    ChromeToolbarType GetChromeToolbarType(CefRefPtr<CefBrowserView> browser_view) override { return CEF_CTT_NONE; }
+    cef_runtime_style_t GetBrowserRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
+    IMPLEMENT_REFCOUNTING(SpikeBrowserViewDelegate);
+};
+
+class SpikeWindowDelegate : public CefWindowDelegate {
+public:
+    explicit SpikeWindowDelegate(CefRefPtr<CefBrowserView> view) : view_(view) {}
+    void OnWindowCreated(CefRefPtr<CefWindow> window) override {
+        window->AddChildView(view_);
+        window->Show();
+        NSView* v = (__bridge NSView*)window->GetWindowHandle();
+        if (g_spikeWindowHandler && v.window) g_spikeWindowHandler(v.window);
+    }
+    bool IsFrameless(CefRefPtr<CefWindow> window) override { return true; }
+    bool WithStandardWindowButtons(CefRefPtr<CefWindow> window) override { return false; }
+    cef_runtime_style_t GetWindowRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
+    CefRect GetInitialBounds(CefRefPtr<CefWindow> window) override { return CefRect(300, 200, 900, 640); }
+private:
+    CefRefPtr<CefBrowserView> view_;
+    IMPLEMENT_REFCOUNTING(SpikeWindowDelegate);
+};
+
 @implementation CraCEFRuntime
+
++ (void)setChromeHosting:(BOOL)enabled { g_chromeHosting = enabled; }
++ (BOOL)chromeHosting { return g_chromeHosting; }
+
++ (void)spikeChromeWindowWithURL:(NSString*)url handler:(void (^)(NSWindow*))handler {
+    g_spikeWindowHandler = [handler copy];
+    CefBrowserSettings settings;
+    CefRefPtr<CefBrowserView> view = CefBrowserView::CreateBrowserView(
+        new DevToolsClient(NSZeroRect, nil, nil), CefStringFromNS(url), settings, nullptr, nullptr, new SpikeBrowserViewDelegate());
+    CefWindow::CreateTopLevelWindow(new SpikeWindowDelegate(view));
+}
 
 + (BOOL)initializeWithCachePath:(NSString*)cachePath
                userAgentProduct:(NSString*)product
@@ -819,7 +1111,7 @@ private:
         if ([fr isKindOfClass:[NSView class]]) {
             NSView* v = (NSView*)fr;
             for (CraBrowser* b in [g_allBrowsers allObjects]) {
-                if ([v isDescendantOf:b.containerView]) {
+                if ([v isDescendantOf:b.containerView] || (b.hostWindow && key == b.hostWindow)) {
                     [key sendEvent:event];
                     return;
                 }

@@ -1,7 +1,9 @@
 #!/bin/bash
 # Builds Cra.app into build/Cra.app.
-#   scripts/build.sh            release build
+#   scripts/build.sh            release build, ad-hoc signed
 #   scripts/build.sh debug      debug build
+#   CRA_SIGN_IDENTITY="Developer ID Application: …" scripts/build.sh
+#                               distributable build (see docs/release.md)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
@@ -45,12 +47,29 @@ for entry in "|" " (Alerts)|.alerts" " (GPU)|.gpu" " (Plugin)|.plugin" " (Render
   echo -n "APPL????" > "$HELPER/Contents/PkgInfo"
 done
 
-# Ad-hoc signatures, innermost first.
+# Code signing, innermost first. Ad-hoc by default; set CRA_SIGN_IDENTITY to a
+# "Developer ID Application: …" identity for a distributable build with the
+# hardened runtime, timestamps and the CEF entitlements. scripts/release.sh
+# then notarizes the result.
+IDENTITY="${CRA_SIGN_IDENTITY:--}"
+sign() {  # sign <path> [entitlements]
+  local target="$1" ent="${2:-}"
+  if [ "$IDENTITY" = "-" ]; then
+    codesign --force --sign - "$target"
+  else
+    local args=(--force --sign "$IDENTITY" --options runtime --timestamp)
+    [ -n "$ent" ] && args+=(--entitlements "$ent")
+    codesign "${args[@]}" "$target"
+  fi
+}
 FW="$APP/Contents/Frameworks/Chromium Embedded Framework.framework"
-find "$FW/Libraries" -name '*.dylib' -exec codesign --force --sign - {} \; 2>/dev/null || true
-codesign --force --sign - "$FW"
-for h in "$APP"/Contents/Frameworks/*.app; do codesign --force --sign - "$h"; done
-codesign --force --sign - "$APP"
+find "$FW/Libraries" -name '*.dylib' -print0 2>/dev/null | while IFS= read -r -d '' lib; do sign "$lib"; done
+sign "$FW"
+for h in "$APP"/Contents/Frameworks/*.app; do sign "$h" "$ROOT/resources/CraHelper.entitlements"; done
+sign "$APP" "$ROOT/resources/Cra.entitlements"
+if [ "$IDENTITY" != "-" ]; then
+  codesign --verify --deep --strict --verbose=2 "$APP"
+fi
 
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 mkdir -p "$FINAL_APP"

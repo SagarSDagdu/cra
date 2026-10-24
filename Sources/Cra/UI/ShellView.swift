@@ -26,6 +26,13 @@ final class ShellView: NSView {
     var devToolsWidth: CGFloat = 460 { didSet { needsLayout = true } }
     /// Reports the dock area (window coordinates) so the DevTools child window follows it.
     var onDevToolsFrame: ((NSRect) -> Void)?
+    /// Reports the page area (window coordinates) so Chrome-style page windows follow it.
+    var onWebFrame: ((NSRect) -> Void)?
+    /// Sidebar animation: target page area + duration, so page windows animate alongside.
+    var onAnimateWebFrame: ((NSRect, TimeInterval) -> Void)?
+    /// Where the status bubble, toasts and find bar live (the web container, or an
+    /// overlay panel's content view when pages are separate windows).
+    private(set) var overlayParent: NSView
     /// Set while the sidebar/card frames are being animated; layout() then leaves them alone.
     private var animatingFrames = false
     /// While the sidebar animates, Chromium views are kept at their final size
@@ -71,6 +78,7 @@ final class ShellView: NSView {
         statusHost = NSHostingView(rootView: status)
         toastHost = NSHostingView(rootView: toasts)
         findHost = NSHostingView(rootView: find)
+        overlayParent = webContainer
         super.init(frame: frame)
         wantsLayer = true
 
@@ -235,8 +243,10 @@ final class ShellView: NSView {
         webContainer.layer?.backgroundColor = (hasTab ? NSColor.white : NSColor.clear).cgColor
         let wb = webContainer.bounds
         // Chromium views are added after the overlays; keep overlays on top.
-        for h in [statusHost, toastHost, findHost] where webContainer.subviews.last !== h {
-            webContainer.addSubview(h, positioned: .above, relativeTo: nil)
+        if overlayParent === webContainer {
+            for h in [statusHost, toastHost, findHost] where webContainer.subviews.last !== h {
+                webContainer.addSubview(h, positioned: .above, relativeTo: nil)
+            }
         }
         placeholderHost.frame = wb
         let chromiumBounds = frozenWebBounds ?? wb
@@ -249,6 +259,14 @@ final class ShellView: NSView {
         toastHost.frame = NSRect(x: wb.width - 330, y: 0, width: 330, height: CGFloat(toastCount) * 76 + 20)
         findHost.isHidden = !findVisible
         findHost.frame = NSRect(x: wb.width - 360, y: wb.height - 60, width: 360, height: 60)
+        if frozenWebBounds == nil { onWebFrame?(contentContainer.convert(webContainer.frame, to: nil)) }
+    }
+
+    /// Chrome-style hosting: overlays move into a panel above the page windows.
+    func moveOverlays(to view: NSView) {
+        overlayParent = view
+        for h in [statusHost, toastHost, findHost] { h.removeFromSuperview(); view.addSubview(h) }
+        needsLayout = true
     }
 
     /// Animate between sidebar states by interpolating frames.
@@ -260,6 +278,8 @@ final class ShellView: NSView {
         frozenWebBounds = NSRect(x: 0, y: 0, width: target.content.width - devW, height: max(0, target.content.height - toolbarH))
         layoutContentChildren()
         animatingFrames = true
+        onAnimateWebFrame?(NSRect(x: target.content.minX, y: target.content.minY, width: target.content.width - devW,
+                                  height: max(0, target.content.height - toolbarH)), duration)
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = duration
             // Fast start, soft landing: feels immediate without a visible snap.
@@ -287,6 +307,9 @@ final class ResizeHandleView: NSView {
     var onEnd: (() -> Void)?
     private var lastX: CGFloat = 0
 
+    /// The window is movable by its background; this strip must own its drags.
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeLeftRight) }
     override func mouseDown(with event: NSEvent) { lastX = event.locationInWindow.x }
     override func mouseDragged(with event: NSEvent) {
@@ -301,6 +324,8 @@ final class ResizeHandleView: NSView {
 /// Thin vertical grab area on the DevTools divider.
 final class DevToolsResizeHandle: NSView {
     var onDrag: ((CGFloat) -> Void)?
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeLeftRight) }
     override func mouseDragged(with event: NSEvent) { onDrag?(event.deltaX) }
     override func hitTest(_ point: NSPoint) -> NSView? { bounds.contains(convert(point, from: superview)) ? self : nil }

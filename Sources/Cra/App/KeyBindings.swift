@@ -154,6 +154,8 @@ final class KeyBindingRegistry {
             // File
             KeyAction(id: "newTab", name: "New Tab…", section: .file, shortcuts: [Shortcut("t", cmd)], triggers: ["new tab"]),
             KeyAction(id: "newWindow", name: "New Window", section: .file, shortcuts: [Shortcut("n", cmd)], inCommandBar: false),
+            // Arc: File ▸ New Little Arc Window ⌥⌘N.
+            KeyAction(id: "newLittleWindow", name: "New Little Window", section: .file, shortcuts: [Shortcut("n", cmdOpt)], triggers: ["little window", "little arc"]),
             KeyAction(id: "reopenClosedTab", name: "Restore Last Closed Tab", section: .file, shortcuts: [Shortcut("t", cmdShift)], triggers: ["reopen", "undo close", "restore"]),
             KeyAction(id: "editURL", name: "Open Command Bar", section: .file, shortcuts: [Shortcut("l", cmd)], triggers: ["url", "address", "command bar"]),
             KeyAction(id: "newFolder", name: "New Folder", section: .file, shortcuts: [], triggers: ["folder"]),
@@ -183,6 +185,8 @@ final class KeyBindingRegistry {
             KeyAction(id: "devTools", name: "Developer Tools", section: .view, shortcuts: [Shortcut("i", cmdOpt)], triggers: ["devtools", "inspect", "console"]),
             KeyAction(id: "inspectElement", name: "Inspect Elements", section: .view, shortcuts: [Shortcut("c", cmdOpt)], inCommandBar: false),
             KeyAction(id: "jsConsole", name: "JavaScript Console", section: .view, shortcuts: [Shortcut("j", cmdOpt)], inCommandBar: false),
+            // Arc: Extensions ▸ Picture in Picture (no shortcut); "Open Picture in Picture" in the command bar.
+            KeyAction(id: "pictureInPicture", name: "Picture in Picture", section: .view, shortcuts: [], triggers: ["pip", "picture in picture", "pop out", "popout", "video"]),
             // Spaces
             KeyAction(id: "nextSpace", name: "Next Space", section: .spaces, shortcuts: [Shortcut(Shortcut.right, cmdOpt)], inCommandBar: false),
             KeyAction(id: "previousSpace", name: "Previous Space", section: .spaces, shortcuts: [Shortcut(Shortcut.left, cmdOpt)], inCommandBar: false),
@@ -206,6 +210,9 @@ final class KeyBindingRegistry {
             // Window
             KeyAction(id: "openLibrary", name: "Open Library…", section: .window, shortcuts: [Shortcut("l", cmdShift)], triggers: ["library"]),
             KeyAction(id: "viewDownloads", name: "View Downloads…", section: .window, shortcuts: [Shortcut("j", cmdShift)], triggers: ["downloads"]),
+            // Arc's Little Arc "Open in Space" button (LittleBrowserMoveButton) and "Close Little Arc Windows".
+            KeyAction(id: "promoteLittleWindow", name: "Open Little Window in Current Space", section: .window, shortcuts: [], inCommandBar: false),
+            KeyAction(id: "closeLittleWindows", name: "Close Little Windows", section: .window, shortcuts: [], triggers: ["close little"]),
             // App
             KeyAction(id: "settings", name: "Settings…", section: .app, shortcuts: [Shortcut(",", cmd)], triggers: ["preferences", "settings"]),
             KeyAction(id: "signIn", name: "Sign In…", section: .app, shortcuts: [], triggers: ["account", "login", "sign in"]),

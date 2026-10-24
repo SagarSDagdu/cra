@@ -117,6 +117,8 @@ struct ContentToolbarView: View {
                 .padding(.trailing, 6)
         }
         .frame(height: CraMetrics.toolbarHeight)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { actions.titleBarDoubleClick() }
         .background(onCard ? cardFill : (palette.isDark ? Color.white.opacity(0.025) : Color.black.opacity(0.03)))
         .overlay(alignment: .bottom) {
             if !onCard { Rectangle().fill(palette.isDark ? Color.white.opacity(0.07) : Color.black.opacity(0.07)).frame(height: 1) }

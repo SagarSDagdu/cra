@@ -1,0 +1,96 @@
+name: Release
+
+# Cut a release by pushing a tag: git tag v0.1.0 && git push origin v0.1.0
+# Signing and notarization run when the secrets below exist; otherwise the
+# job publishes an ad-hoc build marked as a pre-release.
+#
+# Secrets (Settings → Secrets and variables → Actions):
+#   MACOS_CERTIFICATE_P12        base64 of the Developer ID Application .p12
+#   MACOS_CERTIFICATE_PASSWORD   password of that .p12
+#   MACOS_SIGN_IDENTITY          e.g. "Developer ID Application: Victor Kildahl (TEAMID)"
+#   APPLE_ID                     Apple ID used for notarization
+#   APPLE_TEAM_ID                10-character team id
+#   APPLE_APP_PASSWORD           app-specific password for that Apple ID
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build (without the v)
+        required: true
+        default: 0.1.0
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, sign, notarize, publish
+    runs-on: macos-15
+    env:
+      CRA_VERSION: ${{ github.event.inputs.version || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Normalise version
+        run: echo "CRA_VERSION=${CRA_VERSION#v}" >> "$GITHUB_ENV"
+
+      - name: Read pinned CEF version
+        id: cef
+        run: echo "version=$(sed -n 's/^CEF_VERSION="${CEF_VERSION:-\(.*\)}"$/\1/p' scripts/fetch-cef.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache CEF
+        uses: actions/cache@v4
+        with:
+          path: vendor/cef
+          key: cef-${{ runner.arch }}-${{ steps.cef.outputs.version }}
+
+      - name: Import signing certificate
+        id: cert
+        if: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+        env:
+          P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          rm "$RUNNER_TEMP/cert.p12"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build, sign, notarize, package
+        env:
+          CRA_SIGN_IDENTITY: ${{ steps.cert.outputs.signed == 'true' && secrets.MACOS_SIGN_IDENTITY || '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: scripts/release.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cra-${{ env.CRA_VERSION }}
+          path: build/dist/*
+
+      - name: Publish GitHub release
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNED: ${{ steps.cert.outputs.signed == 'true' }}
+        run: |
+          NOTES="Cra ${CRA_VERSION} for macOS 14 and later (Apple silicon)."
+          FLAGS=()
+          if [ "$SIGNED" != "true" ]; then
+            FLAGS+=(--prerelease)
+            NOTES="$NOTES"$'\n\n'"This build is ad-hoc signed and not notarized. On first launch, right-click Cra and choose Open."
+          fi
+          gh release create "${{ github.ref_name }}" build/dist/* \
+            --title "Cra ${CRA_VERSION}" --notes "$NOTES" --verify-tag "${FLAGS[@]}"

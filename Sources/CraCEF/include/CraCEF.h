@@ -48,6 +48,8 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 - (void)browser:(CraBrowser *)browser didCreateDevToolsView:(NSView *)view;
 /// The DevTools browser closed (either mode).
 - (void)browserDidCloseDevTools:(CraBrowser *)browser;
+/// Chrome-style hosting: the page's window exists (also for popups).
+- (void)browser:(CraBrowser *)browser didCreateHostWindow:(NSWindow *)window;
 /// Reserved shortcuts, before the page sees the key. Return YES to consume.
 - (BOOL)browser:(CraBrowser *)browser handleKeyEvent:(NSEvent *)event;
 /// Keys the page did not handle (Chrome gives the page first chance at
@@ -59,13 +61,21 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 - (void)browser:(CraBrowser *)browser requestsPermissionForOrigin:(NSString *)origin kinds:(NSUInteger)kinds completion:(void (^)(BOOL allowed))completion;
 - (void)browserDidReceiveFocus:(CraBrowser *)browser;
 - (void)browserDidClose:(CraBrowser *)browser;
+@optional
+/// A video of this page entered or left Chromium's Picture in Picture window
+/// (whether the page, the user or Cra asked for it).
+- (void)browser:(CraBrowser *)browser didChangePictureInPicture:(BOOL)active;
 @end
 
 @interface CraBrowser : NSObject
 @property (nonatomic, weak, nullable) id<CraBrowserDelegate> delegate;
-/// A plain NSView that owns the Chromium view. Put it in your hierarchy and
-/// size it; Chromium follows.
+/// Embedded (Alloy) hosting: a plain NSView that owns the Chromium view. Put
+/// it in your hierarchy and size it; Chromium follows.
 @property (nonatomic, readonly) NSView *containerView;
+/// Chrome-style hosting (see +[CraCEFRuntime setChromeHosting:]): the page
+/// lives in its own frameless Chrome window, delivered through
+/// -browser:didCreateHostWindow:. Attach it as a child window and size it.
+@property (nonatomic, readonly, nullable) NSWindow *hostWindow;
 @property (nonatomic, readonly, copy) NSString *currentURL;
 @property (nonatomic, readonly, copy) NSString *currentTitle;
 @property (nonatomic, readonly) BOOL isLoading;
@@ -96,6 +106,14 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 - (void)findText:(NSString *)text forward:(BOOL)forward matchCase:(BOOL)matchCase findNext:(BOOL)findNext;
 - (void)stopFinding:(BOOL)clearSelection;
 - (void)setAudioMuted:(BOOL)muted;
+/// Pops the page's video out into Chromium's floating Picture in Picture
+/// window. Manual requests toggle (a second call brings the video back).
+/// `automatic` is the "leaving a video tab" case: only a playing video of some
+/// size qualifies, and nothing happens when there is none.
+- (void)requestPictureInPictureAutomatic:(BOOL)automatic;
+- (void)exitPictureInPicture;
+/// YES while a video of this page is in the Picture in Picture window.
+@property (nonatomic, readonly) BOOL isInPictureInPicture;
 - (void)print;
 - (void)viewSource;
 - (void)executeJavaScript:(NSString *)script;
@@ -106,6 +124,12 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 
 @interface CraCEFRuntime : NSObject
 /// Call once, after NSApplication exists, before creating browsers.
+/// Experiment: a Chrome-style (extension-capable) Views window; the handler gets its NSWindow.
++ (void)spikeChromeWindowWithURL:(NSString *)url handler:(void (^)(NSWindow *))handler;
+/// Host pages as Chrome-style windows (Chrome extensions, Chrome's docked
+/// DevTools) instead of embedded Alloy views. Set before any browser exists.
++ (void)setChromeHosting:(BOOL)enabled;
++ (BOOL)chromeHosting;
 + (BOOL)initializeWithCachePath:(NSString *)cachePath
                  userAgentProduct:(NSString *)product
                           logPath:(NSString *)logPath

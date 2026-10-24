@@ -94,6 +94,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         observeStore()
         refresh()
         shell.onDevToolsFrame = { [weak self] rect in self?.positionDevToolsWindow(rect) }
+        shell.onWebFrame = { [weak self] rect in self?.positionPageWindows(rect) }
+        shell.onAnimateWebFrame = { [weak self] rect, d in self?.animatePageWindows(to: rect, duration: d) }
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.shell.windowActive = true }
         }
@@ -107,6 +109,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
     // MARK: Wiring
 
     private func wireActions() {
+        sidebarActions.titleBarDoubleClick = { [weak self] in (self?.window as? CraWindow)?.performTitleDoubleClickAction() }
         sidebarActions.openCommandBar = { [weak self] mode in self?.openCommandBar(mode) }
         sidebarActions.closeTab = { [weak self] id in self?.closeTab(id) }
         sidebarActions.goBack = { [weak self] in self?.currentBrowser?.goBack() }
@@ -215,6 +218,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         let toast = DownloadToast(id: download.identifier, name: name, percent: download.percent, state: download.state.rawValue, path: download.fullPath)
         if let i = overlay.toasts.firstIndex(where: { $0.id == toast.id }) { overlay.toasts[i] = toast } else { overlay.toasts.append(toast) }
         shell.toastCount = overlay.toasts.count
+        overlayPanel?.ignoresMouseEvents = overlay.toasts.isEmpty && !overlay.findVisible
         shell.layoutContentChildren()
         if download.state != .inProgress {
             let id = toast.id
@@ -246,6 +250,86 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         shell.needsLayout = true
         shell.layoutSubtreeIfNeeded()
         return shell.devToolsHost
+    }
+
+    // MARK: Chrome-style page windows
+
+    private var overlayPanel: NSPanel?
+    private var lastWebRectInWindow: NSRect = .zero
+
+    private func ensureOverlayPanel() {
+        guard overlayPanel == nil, let window else { return }
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.isMovable = false
+        panel.ignoresMouseEvents = true
+        panel.hidesOnDeactivate = false
+        panel.contentView = NSView(frame: panel.contentRect(forFrameRect: panel.frame))
+        shell.moveOverlays(to: panel.contentView!)
+        window.addChildWindow(panel, ordered: .above)
+        overlayPanel = panel
+    }
+
+    /// Attaches the visible tab's Chrome window over the page area, hides the others.
+    func browserManagerPageWindowsChanged(focus: Bool) {
+        guard let window else { return }
+        ensureOverlayPanel()
+        let visible = browsers.visibleRuntime?.hostWindow
+        for rt in browsers.runtimes.values {
+            guard let w = rt.hostWindow else { continue }
+            if w !== visible { if w.isVisible { w.orderOut(nil) }; continue }
+            if w.parent !== window {
+                w.styleMask.insert(.fullSizeContentView)
+                w.titlebarAppearsTransparent = true
+                w.titleVisibility = .hidden
+                w.isMovable = false
+                w.hasShadow = false
+                w.isOpaque = false
+                w.backgroundColor = .clear
+                if let cv = w.contentView {
+                    cv.wantsLayer = true
+                    cv.layer?.cornerRadius = CraMetrics.contentCornerRadius
+                    cv.layer?.cornerCurve = .continuous
+                    cv.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+                    cv.layer?.masksToBounds = true
+                }
+                window.addChildWindow(w, ordered: .above)
+            }
+            positionPageWindows(lastWebRectInWindow)
+            w.orderFront(nil)
+            if focus { w.makeKey() }
+        }
+        // Keep the overlay panel above the page windows.
+        if let panel = overlayPanel {
+            window.removeChildWindow(panel)
+            window.addChildWindow(panel, ordered: .above)
+            panel.orderFront(nil)
+        }
+    }
+
+    private func positionPageWindows(_ rectInWindow: NSRect) {
+        guard let window, !rectInWindow.isEmpty else { return }
+        lastWebRectInWindow = rectInWindow
+        let onScreen = window.convertToScreen(rectInWindow)
+        for rt in browsers.runtimes.values {
+            if let w = rt.hostWindow, w.frame != onScreen { w.setFrame(onScreen, display: true) }
+        }
+        if let panel = overlayPanel, panel.frame != onScreen { panel.setFrame(onScreen, display: true) }
+    }
+
+    private func animatePageWindows(to rectInWindow: NSRect, duration: TimeInterval) {
+        guard let window, let w = browsers.visibleRuntime?.hostWindow else { return }
+        lastWebRectInWindow = rectInWindow
+        let onScreen = window.convertToScreen(rectInWindow)
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = duration
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.85, 0.25, 1)
+            w.animator().setFrame(onScreen, display: true)
+            overlayPanel?.animator().setFrame(onScreen, display: true)
+        }
     }
 
     /// Docks the visible tab's DevTools window (CEF-owned, borderless) over the
@@ -298,7 +382,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
 
     func browserManagerHandleKey(_ event: NSEvent) -> Bool { app.handleReservedKey(event) }
     func browserManagerHandleUnhandledKey(_ event: NSEvent) -> Bool { app.handleUnhandledKey(event) }
-    func browserManagerFocusedBrowser(_ tabID: UUID) {}
+    /// A hidden page asked for focus: the Picture in Picture window's "back to tab" button.
+    func browserManagerFocusedBrowser(_ tabID: UUID) {
+        guard tabID != browsers.visibleTabID, browsers.runtime(for: tabID)?.browser.isInPictureInPicture == true else { return }
+        store.selectTab(tabID)
+        showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
     func browserManagerOpenInternalURL(_ url: String) {
         if let u = URL(string: url) { app.handleInternalURL(u) }
     }
@@ -358,7 +448,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         if let screen = NSScreen.screens.first {
             screenRect.origin.y = screen.frame.height - screenRect.maxY
         }
-        guard let image = CGWindowListCreateImage(screenRect, .optionIncludingWindow, CGWindowID(window.windowNumber), [.bestResolution]) else { return }
+        let captureWindow = browsers.visibleRuntime?.hostWindow ?? window
+        guard let image = CGWindowListCreateImage(screenRect, .optionIncludingWindow, CGWindowID(captureWindow.windowNumber), [.bestResolution]) else { return }
         let rep = NSBitmapImageRep(cgImage: image)
         guard let png = rep.representation(using: .png, properties: [:]) else { return }
         let f = DateFormatter()
@@ -521,6 +612,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         overlay.findVisible = true
         overlay.findFocusToken += 1
         shell.findVisible = true
+        overlayPanel?.ignoresMouseEvents = false
+        overlayPanel?.makeKeyAndOrderFront(nil)
         shell.layoutContentChildren()
         window?.makeFirstResponder(shell.findHost)
     }
@@ -528,6 +621,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
     func hideFindBar() {
         overlay.findVisible = false
         shell.findVisible = false
+        overlayPanel?.ignoresMouseEvents = overlay.toasts.isEmpty
         currentBrowser?.stopFinding(true)
         shell.layoutContentChildren()
         currentBrowser?.setFocused(true)
@@ -638,6 +732,20 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
 final class CraWindow: NSWindow {
     var trafficLightsRevealed = false {
         didSet { if oldValue != trafficLightsRevealed { updateTrafficLightAlpha(animated: true) } }
+    }
+
+    /// The real title bar is hidden under the content, so double-clicks on the
+    /// header strip never reach AppKit's zoom handling. The SwiftUI header rows
+    /// call this on a double-click of their empty parts; it performs the system
+    /// "double-click a window's title bar" action from System Settings.
+    func performTitleDoubleClickAction() {
+        guard !styleMask.contains(.fullScreen) else { return }
+        let action = UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") ?? "Maximize"
+        switch action {
+        case "None": break
+        case "Minimize": miniaturize(nil)
+        default: zoom(nil)   // "Maximize" and "Fill"
+        }
     }
 
     override func layoutIfNeeded() {

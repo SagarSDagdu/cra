@@ -67,6 +67,8 @@ struct SidebarTopBar: View {
             .padding(.top, CraMetrics.titleRowCenter - 14)
             .padding(.bottom, CraMetrics.titleAreaHeight - CraMetrics.titleRowCenter - 14)
             .padding(.horizontal, 6)
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { actions.titleBarDoubleClick() }
             if !store.settings.showToolbar {
                 HStack(spacing: 2) {
                     navButtons

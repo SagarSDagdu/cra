@@ -89,6 +89,8 @@ private struct ArchiveRow: View {
             Spacer()
             if let sid = entry.sourceSpaceID, let s = store.space(sid) {
                 Text("\(s.emoji) \(s.title)").font(.system(size: 11)).foregroundStyle(.secondary)
+            } else if entry.fromLittleWindow == true {
+                Text("Little Window").font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Text(entry.reason == .auto ? "auto" : "").font(.system(size: 10)).foregroundStyle(.tertiary)
             Text(entry.archivedAt, style: .time).font(.system(size: 11)).foregroundStyle(.tertiary)

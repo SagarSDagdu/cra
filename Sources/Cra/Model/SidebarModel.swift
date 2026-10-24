@@ -208,6 +208,9 @@ struct ArchivedItem: Codable, Identifiable, Equatable {
     var sourceSpaceID: UUID?
     var wasPinned: Bool
     var item: SidebarItem
+    /// Closed from a Little Window (Arc: archive source `littleArc`); never
+    /// had a place in the sidebar, so restoring puts it in the focused space.
+    var fromLittleWindow: Bool? = nil
 }
 
 enum AutoArchiveThreshold: String, Codable, CaseIterable, Identifiable {
@@ -265,6 +268,14 @@ struct AppSettings: Codable, Equatable {
     /// Arc's per-site Developer Mode (⌃D): the toolbar shows the full URL in
     /// monospace with the developer icons, and the nav buttons move to the sidebar.
     var developerHosts: Set<String> = []
+    /// Host pages in Chrome-style windows: Chrome extensions and Chrome's own
+    /// DevTools docking. Needs a restart to change.
+    var chromeEngine: Bool = true
+    /// Arc's "Links from other apps open in Little Arc": URLs handed to Cra by
+    /// other apps open in a small disposable window instead of a sidebar tab.
+    var openExternalLinksInLittleWindow: Bool = true
+    /// Arc: "Enable Picture in Picture when you leave a video tab".
+    var autoPictureInPicture: Bool = true
 
     init() {}
 
@@ -286,6 +297,8 @@ struct WindowPrefs: Codable, Equatable {
     var collapsedPinnedSpaces: Set<UUID> = []
     var selectedTabPerSpace: [UUID: UUID] = [:]
     var windowFrame: String?
+    /// Last Little Window size (Arc: LittleBrowserWindow_size).
+    var littleWindowSize: String?
 }
 
 struct HistoryEntry: Codable, Equatable {
@@ -316,6 +329,9 @@ extension AppSettings {
         showToolbar = try c.decodeIfPresent(Bool.self, forKey: .showToolbar) ?? true
         hasSeenImportPrompt = try c.decodeIfPresent(Bool.self, forKey: .hasSeenImportPrompt) ?? false
         developerHosts = try c.decodeIfPresent(Set<String>.self, forKey: .developerHosts) ?? []
+        chromeEngine = try c.decodeIfPresent(Bool.self, forKey: .chromeEngine) ?? true
+        autoPictureInPicture = try c.decodeIfPresent(Bool.self, forKey: .autoPictureInPicture) ?? true
+        openExternalLinksInLittleWindow = try c.decodeIfPresent(Bool.self, forKey: .openExternalLinksInLittleWindow) ?? true
     }
 }
 
@@ -329,6 +345,7 @@ extension WindowPrefs {
         collapsedPinnedSpaces = try c.decodeIfPresent(Set<UUID>.self, forKey: .collapsedPinnedSpaces) ?? []
         selectedTabPerSpace = try c.decodeIfPresent([UUID: UUID].self, forKey: .selectedTabPerSpace) ?? [:]
         windowFrame = try c.decodeIfPresent(String.self, forKey: .windowFrame)
+        littleWindowSize = try c.decodeIfPresent(String.self, forKey: .littleWindowSize)
     }
 }
 

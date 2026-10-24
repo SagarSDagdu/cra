@@ -19,13 +19,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var archiveWindow: NSWindow?
     private var accountWindow: NSWindow?
     private var lastPushedSettings: AppSettings?
+    /// Arc's Little Arc windows: small, sidebar-less, disposable (see LittleWindowController).
+    private(set) var littleWindows: [LittleWindowController] = []
 
     /// Shortcuts the app takes before the web page sees them (Chrome calls
     /// these reserved). Everything else goes to the page first.
     static let reservedActions: Set<String> = Set([
         "newTab", "newWindow", "closeTab", "closeWindow", "reopenClosedTab", "editURL", "toggleSidebar", "toggleToolbar",
         "nextTab", "previousTab", "recentTab", "nextSpace", "previousSpace", "devTools", "jsConsole", "inspectElement",
-        "viewArchive", "openLibrary", "settings", "clearToday",
+        "viewArchive", "openLibrary", "settings", "clearToday", "newLittleWindow", "promoteLittleWindow",
     ] + (1...9).flatMap { ["item\($0)", "space\($0)"] })
 
     // MARK: Lifecycle
@@ -37,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         bootstrapped = true
         NSApp.setActivationPolicy(.regular)
         installURLEventHandler()
+        CraCEFRuntime.setChromeHosting(store.settings.chromeEngine)
         buildMenus()
         NotificationCenter.default.addObserver(forName: .craKeyBindingsChanged, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.buildMenus() }
@@ -129,6 +132,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Little Windows are not in the sidebar; keep their pages in the Library.
+        for w in littleWindows { w.archivePage() }
         store.saveAll()
         return .terminateNow
     }
@@ -140,9 +145,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             handleInternalURL(u)
             return
         }
+        // Arc: "Links from other apps open in Little Arc".
+        if store.settings.openExternalLinksInLittleWindow {
+            openLittleWindow(url: url)
+            return
+        }
         store.createTab(url: url, select: true)
         main.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: Little Windows
+
+    /// The little window that owns the key window (the window itself, or its
+    /// Chrome-style page window, which is a child).
+    var keyLittleWindow: LittleWindowController? {
+        guard let key = NSApp.keyWindow else { return nil }
+        return littleWindows.first { $0.window === key || $0.window === key.parent }
+    }
+
+    /// Creates a little window without showing it (`url` nil = popup host).
+    func makeLittleWindow(url: String?) -> LittleWindowController {
+        let w = LittleWindowController(app: self, url: url)
+        littleWindows.append(w)
+        return w
+    }
+
+    @discardableResult
+    func openLittleWindow(url: String, activate: Bool = true) -> LittleWindowController {
+        let w = makeLittleWindow(url: url)
+        if activate { w.show() } else { w.window?.orderFront(nil) }
+        return w
+    }
+
+    func removeLittleWindow(_ w: LittleWindowController) {
+        littleWindows.removeAll { $0 === w }
+    }
+
+    func closeLittleWindows() {
+        for w in littleWindows { w.window?.performClose(nil) }
     }
 
     /// cra://commandbar?query=…&mode=edit, cra://action/<id>, cra://open?url=…,
@@ -153,8 +194,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func handleInternalURL(_ u: URL) {
         let comps = URLComponents(url: u, resolvingAgainstBaseURL: false)
         func q(_ name: String) -> String? { comps?.queryItems?.first { $0.name == name }?.value }
-        main.showWindow(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        // Actions keep their target: a key Little Window stays key (perform routes to it).
+        if u.host != "action" || keyLittleWindow == nil {
+            main.showWindow(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
         switch u.host {
         case "commandbar":
             main.openCommandBar(q("mode") == "edit" ? .editURL : .newTab)
@@ -162,7 +206,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case "action":
             perform(String(u.path.dropFirst()))
         case "open":
-            if let url = q("url") {
+            if let url = q("url"), q("little") == "1" {
+                openLittleWindow(url: url)
+            } else if let url = q("url") {
                 let tab = store.createTab(url: url, select: q("background") != "1")
                 if q("background") == "1" { store.markUnread(tab.id, true); main.browsers.ensureRuntime(for: tab.id) }
             }
@@ -198,6 +244,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case "debug":
             var dict: [String: String] = [:]
             for item in comps?.queryItems ?? [] { if let v = item.value { dict[item.name] = v } }
+            if let spikeURL = dict["chromeSpike"] {
+                CraCEFRuntime.spikeChromeWindow(withURL: spikeURL) { [weak self] w in
+                    guard let self, let host = self.main.window else { return }
+                    w.styleMask.insert(.fullSizeContentView)
+                    w.titlebarAppearsTransparent = true
+                    w.titleVisibility = .hidden
+                    w.isMovable = false
+                    w.hasShadow = false
+                    host.addChildWindow(w, ordered: .above)
+                    let rect = self.main.shell.contentContainer.convert(self.main.shell.webContainer.frame, to: nil)
+                    w.setFrame(host.convertToScreen(rect), display: true)
+                    w.orderFront(nil)
+                }
+                return
+            }
+            if dict["windows"] != nil {
+                for w in NSApp.windows {
+                    NSLog("Cra windows: %@ '%@' frame=%@ parent=%@ visible=%d key=%d mask=%lu class=%@ children=%d",
+                          String(describing: w.windowController.map { type(of: $0) } ?? nil as AnyClass?), w.title, NSStringFromRect(w.frame),
+                          w.parent.map { NSStringFromRect($0.frame) } ?? "-", w.isVisible ? 1 : 0, w.isKeyWindow ? 1 : 0, w.styleMask.rawValue,
+                          NSStringFromClass(type(of: w)), w.childWindows?.count ?? 0)
+                }
+                NSLog("Cra windows: little=%d tabs=%d runtimes=%d", littleWindows.count, store.allTabs().count, main.browsers.runtimes.count)
+                return
+            }
             CraTuning.shared.apply(dict)
             main.refresh()
             if let w = main.window {
@@ -242,6 +313,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             item.title = on ? "Turn off Developer Mode for this Site" : "Turn on Developer Mode for this Site"
         case "pinTab": item.title = store.selectedTabID.map { store.isPinned($0) ? "Unpin Tab" : "Pin Tab" } ?? "Pin/Unpin Tab"
         case "signIn": item.title = account.isSignedIn ? "Account…" : "Sign In…"
+        case "pictureInPicture":
+            item.title = main.currentBrowser?.isInPictureInPicture == true ? "Exit Picture in Picture" : "Picture in Picture"
+        case "promoteLittleWindow": return keyLittleWindow?.hasPage ?? false
+        case "closeLittleWindows": return !littleWindows.isEmpty
         default: break
         }
         return true
@@ -264,8 +339,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func perform(_ id: String) {
         store.recordCommandUse(id)
+        // A key Little Window takes the page/window actions first (⌘W, ⌘L, ⌘R…).
+        if let little = keyLittleWindow, little.handle(action: id) { return }
         let current = store.selectedTabID
         switch id {
+        case "newLittleWindow": openLittleWindow(url: "")
+        case "closeLittleWindows": closeLittleWindows()
+        case "promoteLittleWindow": break  // only meaningful while a little window is key
         case "newTab", "newWindow": main.openCommandBar(.newTab)
         case "editURL": main.openCommandBar(.editURL)
         case "newFolder":
@@ -319,6 +399,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 main.browsers.runtime(for: c)?.browser.setAudioMuted(!t.muted)
             }
         case "clearToday": store.clearToday()
+        case "pictureInPicture": main.currentBrowser?.requestPictureInPictureAutomatic(false)
         case "nextTab": main.cycleTab(1); markKeyboardFocus()
         case "previousTab": main.cycleTab(-1); markKeyboardFocus()
         case "recentTab": if let id = store.mostRecentOtherTab() { store.selectTab(id); markKeyboardFocus() }
@@ -375,7 +456,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if settingsWindow == nil {
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 640), styleMask: [.titled, .closable], backing: .buffered, defer: false)
             w.title = "Settings"
-            w.contentView = NSHostingView(rootView: SettingsView(onImport: { [weak self] in self?.main.showImport() },
+            w.contentView = NSHostingView(rootView: SettingsView(onImport: { [weak self] in self?.main.showImport() }, onOpenURL: { [weak self] url in guard let self else { return }; _ = self.store.createTab(url: url, select: true); self.settingsWindow?.close() },
                                                                 onAccount: { [weak self] in self?.showAccountWindow() })
                 .environment(store).environment(bindings).environment(account))
             w.isReleasedWhenClosed = false
@@ -453,7 +534,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         menubar.addItem(submenu: appMenu, title: "Cra")
 
         let file = NSMenu(title: "File")
-        for id in ["newTab", "newWindow", "reopenClosedTab", "editURL", "newFolder", "newSpace"] { file.addItem(item(id)) }
+        for id in ["newTab", "newWindow", "newLittleWindow", "reopenClosedTab", "editURL", "newFolder", "newSpace"] { file.addItem(item(id)) }
         file.addItem(.separator())
         file.addItem(item("closeWindow")); file.addItem(item("closeTab"))
         file.addItem(.separator())
@@ -483,6 +564,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         view.addItem(item("stop")); view.addItem(item("reload")); view.addItem(item("hardReload"))
         view.addItem(.separator())
         view.addItem(item("resetZoom")); view.addItem(item("zoomIn")); view.addItem(item("zoomOut"))
+        view.addItem(.separator())
+        view.addItem(item("pictureInPicture"))
         view.addItem(.separator())
         let dev = NSMenu(title: "Developer")
         for id in ["viewSource", "devTools", "inspectElement", "jsConsole"] { dev.addItem(item(id)) }
@@ -518,6 +601,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         window.addItem(std("Zoom", #selector(NSWindow.performZoom(_:))))
         window.addItem(.separator())
         window.addItem(item("openLibrary")); window.addItem(item("viewDownloads"))
+        window.addItem(.separator())
+        window.addItem(item("promoteLittleWindow")); window.addItem(item("closeLittleWindows"))
         window.addItem(.separator())
         window.addItem(std("Bring All to Front", #selector(NSApplication.arrangeInFront(_:))))
         menubar.addItem(submenu: window, title: "Window")

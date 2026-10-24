@@ -38,6 +38,8 @@ final class SidebarActions {
     var resetPinnedTab: (UUID) -> Void = { _ in }
     var openURL: (String) -> Void = { _ in }
     var performAction: (String) -> Void = { _ in }
+    /// Double-click on an empty part of the header strip (sidebar title row or toolbar).
+    var titleBarDoubleClick: () -> Void = {}
 }
 
 private struct SidebarActionsKey: EnvironmentKey {

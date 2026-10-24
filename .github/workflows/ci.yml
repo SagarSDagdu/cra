@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Cra.app
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pinned CEF version
+        id: cef
+        run: echo "version=$(sed -n 's/^CEF_VERSION="${CEF_VERSION:-\(.*\)}"$/\1/p' scripts/fetch-cef.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache CEF
+        uses: actions/cache@v4
+        with:
+          path: vendor/cef
+          key: cef-${{ runner.arch }}-${{ steps.cef.outputs.version }}
+
+      - name: Build (debug, ad-hoc signed)
+        run: scripts/build.sh debug
+
+      - name: Verify bundle
+        run: |
+          codesign --verify --deep --strict --verbose=2 build/Cra.app
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/Cra.app/Contents/Info.plist

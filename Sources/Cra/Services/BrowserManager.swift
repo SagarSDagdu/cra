@@ -9,6 +9,12 @@ final class TabRuntime {
     let browser: CraBrowser
     var progress: Double = 0
     var themeColor: String = ""
+    /// Cra popped this tab's video out because the user left the tab (Arc's
+    /// auto Picture in Picture); coming back brings the video home.
+    var autoPictureInPicture = false
+    var pendingAutoPictureInPicture = false
+    /// Chrome-style hosting: the page's own window (nil until created, or for Alloy).
+    var hostWindow: NSWindow? { browser.hostWindow }
     init(tabID: UUID, browser: CraBrowser) {
         self.tabID = tabID
         self.browser = browser
@@ -24,6 +30,8 @@ protocol BrowserManagerDelegate: AnyObject {
     func browserManagerDevToolsHost(for tabID: UUID) -> NSView?
     /// A DevTools pane appeared or closed; the shell decides whether to show the dock.
     func browserManagerDevToolsChanged()
+    /// Chrome-style hosting: page windows appeared/changed; the shell re-attaches and orders them.
+    func browserManagerPageWindowsChanged(focus: Bool)
     func browserManagerHandleKey(_ event: NSEvent) -> Bool
     func browserManagerHandleUnhandledKey(_ event: NSEvent) -> Bool
     func browserManagerFocusedBrowser(_ tabID: UUID)
@@ -58,6 +66,18 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
         return register(browser: browser, tabID: tabID)
     }
 
+    /// Take over a live browser from elsewhere (a Little Window being promoted
+    /// to a tab): it keeps its history, scroll position and page state.
+    @discardableResult
+    func adopt(_ browser: CraBrowser, for tabID: UUID) -> TabRuntime {
+        if let host = browser.hostWindow, let parent = host.parent { parent.removeChildWindow(host) }
+        browser.containerView.removeFromSuperview()
+        browser.delegate = self
+        let rt = register(browser: browser, tabID: tabID)
+        store.updateTab(tabID, url: browser.currentURL, title: browser.currentTitle)
+        return rt
+    }
+
     /// Popup host: a browser shell CEF will fill with window.open content.
     func makePopupHost(for tabID: UUID) -> CraBrowser {
         let browser = CraBrowser(frame: container.bounds, url: nil, delegate: self)
@@ -81,7 +101,9 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
     }
 
     func show(_ tabID: UUID?, focus: Bool) {
+        if let previous = visibleTabID, previous != tabID { leaveTab(previous) }
         if let tabID, let rt = ensureRuntime(for: tabID) {
+            returnToTab(rt)
             for (id, other) in runtimes where id != tabID { other.browser.containerView.isHidden = true }
             rt.browser.containerView.frame = container.bounds
             rt.browser.containerView.isHidden = false
@@ -92,6 +114,11 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
             visibleTabID = nil
         }
         syncDevToolsVisibility()
+        delegate?.browserManagerPageWindowsChanged(focus: focus)
+    }
+
+    func browser(_ browser: CraBrowser, didCreateHostWindow window: NSWindow) {
+        delegate?.browserManagerPageWindowsChanged(focus: tabID(of: browser) == visibleTabID)
     }
 
     func unload(_ tabID: UUID) {
@@ -113,6 +140,37 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
     }
 
     private func tabID(of browser: CraBrowser) -> UUID? { byBrowser[ObjectIdentifier(browser)] }
+
+    // MARK: Picture in Picture
+
+    /// Arc: "Enable Picture in Picture when you leave a video tab". The request
+    /// goes out before the page is hidden, so the video keeps playing in the
+    /// floating window; the page answers through didChangePictureInPicture.
+    private func leaveTab(_ tabID: UUID) {
+        guard store.settings.autoPictureInPicture, let rt = runtimes[tabID], !rt.browser.isInPictureInPicture else { return }
+        rt.pendingAutoPictureInPicture = true
+        rt.browser.requestPictureInPictureAutomatic(true)
+    }
+
+    /// Back on the tab: a video Cra popped out automatically comes home (Chrome
+    /// and Arc do the same); one the user popped out stays floating.
+    private func returnToTab(_ rt: TabRuntime) {
+        rt.pendingAutoPictureInPicture = false
+        if rt.autoPictureInPicture { rt.browser.exitPictureInPicture() }
+    }
+
+    func browser(_ browser: CraBrowser, didChangePictureInPicture active: Bool) {
+        guard let id = tabID(of: browser), let rt = runtimes[id] else { return }
+        if active {
+            rt.autoPictureInPicture = rt.pendingAutoPictureInPicture
+            rt.pendingAutoPictureInPicture = false
+            // The request from leaving the tab landed after the user came back.
+            if rt.autoPictureInPicture, id == visibleTabID { browser.exitPictureInPicture() }
+        } else {
+            rt.autoPictureInPicture = false
+        }
+        delegate?.browserManagerDidUpdate(id)
+    }
 
     // MARK: CraBrowserDelegate
 

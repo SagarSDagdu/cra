@@ -14,6 +14,12 @@ Shell: Swift (AppKit + SwiftUI). Engine: Chromium Embedded Framework.
 
 Requirements: Xcode 16+, CMake (`brew install cmake`).
 
+## Release
+
+`scripts/release.sh` builds, signs with a Developer ID, notarizes, and packages a DMG and
+zip into `build/dist`. Pushing a `v*` tag runs the same through GitHub Actions and
+publishes a release. See `docs/release.md` for the one-time certificate setup.
+
 ## Layout
 
 - `Sources/Cra` — the app (model, store, sidebar, command bar, windows)
@@ -86,3 +92,11 @@ multiply blends survive) used by `BrandMark`, and `resources/AppIcon.icns` is bu
 The marketing site lives in a separate private repository (VictorKildahl/cra-website).
 Logo sources are in `brand/` (see `brand/README.md`); `resources/brand` holds the PNGs the
 app loads and `resources/AppIcon.icns` the app icon.
+
+## Developer Mode and shortcuts
+
+⌃D toggles Arc's per-site Developer Mode: the toolbar switches from the friendly centred
+URL (nav buttons at its left) to the full monospace URL with the developer icons, and the
+nav buttons move into the sidebar. Every shortcut can be changed in Settings → Shortcuts
+(click the shortcut, press new keys; Esc cancels, ⌫ removes; conflicts are flagged).
+Overrides live in `keybindings.json` in the app's support folder.
