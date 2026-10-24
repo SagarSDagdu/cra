@@ -34,7 +34,7 @@ jobs:
       # The secrets context is not allowed in step `if`s, so resolve it once here.
       HAS_CERT: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Normalise version
         run: echo "CRA_VERSION=${CRA_VERSION#v}" >> "$GITHUB_ENV"
@@ -44,7 +44,7 @@ jobs:
         run: echo "version=$(sed -n 's/^CEF_VERSION="${CEF_VERSION:-\(.*\)}"$/\1/p' scripts/fetch-cef.sh)" >> "$GITHUB_OUTPUT"
 
       - name: Cache CEF
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: vendor/cef
           key: cef-${{ runner.arch }}-${{ steps.cef.outputs.version }}
@@ -77,7 +77,7 @@ jobs:
         run: scripts/release.sh
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Cra-${{ env.CRA_VERSION }}
           path: build/dist/*

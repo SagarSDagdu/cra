@@ -14,14 +14,14 @@ jobs:
     name: Build Cra.app
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Read pinned CEF version
         id: cef
         run: echo "version=$(sed -n 's/^CEF_VERSION="${CEF_VERSION:-\(.*\)}"$/\1/p' scripts/fetch-cef.sh)" >> "$GITHUB_OUTPUT"
 
       - name: Cache CEF
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: vendor/cef
           key: cef-${{ runner.arch }}-${{ steps.cef.outputs.version }}
