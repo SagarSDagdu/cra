@@ -208,6 +208,17 @@ static bool CraCDPPipeSetUp() {
     return true;
 }
 
+// Chrome keeps running while a --remote-debugging-pipe client is attached, so
+// CefQuitMessageLoop alone never returns from the run loop (Cmd-Q hung). Hanging
+// up the pipe lets Chrome shut down; it exits cleanly ("exit_type": "Normal").
+static void CraQuitMessageLoop() {
+    if (g_cdpWriteFD >= 0) {
+        close(g_cdpWriteFD);
+        g_cdpWriteFD = -1;
+    }
+    CefQuitMessageLoop();
+}
+
 class CraApp : public CefApp, public CefBrowserProcessHandler {
 public:
     CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
@@ -485,7 +496,7 @@ public:
         g_liveBrowsers--;
         CraDevToolsLog(@"OnBeforeClose");
         if (CraBrowser* o = owner_) { [o devToolsBrowserClosed]; [o.delegate browserDidCloseDevTools:o]; }
-        if (g_quitting && g_liveBrowsers <= 0) CefQuitMessageLoop();
+        if (g_quitting && g_liveBrowsers <= 0) CraQuitMessageLoop();
     }
 private:
     NSRect frame_;
@@ -580,7 +591,7 @@ public:
         CEF_REQUIRE_UI_THREAD();
         g_liveBrowsers--;
         if (CraBrowser* o = owner_) [o browserClosed];
-        if (g_quitting && g_liveBrowsers <= 0) CefQuitMessageLoop();
+        if (g_quitting && g_liveBrowsers <= 0) CraQuitMessageLoop();
     }
 
     void OnBeforeDevToolsPopup(CefRefPtr<CefBrowser> browser, CefWindowInfo& windowInfo, CefRefPtr<CefClient>& client,
@@ -1539,14 +1550,14 @@ static void MarkProfileExitedCleanly(NSString* cachePath) {
 + (void)setStrayPageHandler:(void (^)(NSString*))handler { g_strayPageHandler = [handler copy]; }
 
 + (void)runMessageLoop { CefRunMessageLoop(); }
-+ (void)quitMessageLoop { CefQuitMessageLoop(); }
++ (void)quitMessageLoop { CraQuitMessageLoop(); }
 + (void)shutdown { CefShutdown(); }
 
 + (void)closeAllBrowsersAndQuit {
     g_quitting = true;
     NSArray<CraBrowser*>* all = [g_allBrowsers allObjects];
     if (all.count == 0 || g_liveBrowsers <= 0) {
-        CefQuitMessageLoop();
+        CraQuitMessageLoop();
         return;
     }
     for (CraBrowser* b in all) [b close];
