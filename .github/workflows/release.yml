@@ -2,7 +2,7 @@ name: Release
 
 # Cut a release by pushing a tag: git tag v0.1.0 && git push origin v0.1.0
 # Signing and notarization run when the secrets below exist; otherwise the
-# job publishes an ad-hoc build marked as a pre-release.
+# job publishes an ad-hoc build with install steps from release-notes-unsigned.md.
 #
 # Secrets (Settings → Secrets and variables → Actions):
 #   MACOS_CERTIFICATE_P12        base64 of the Developer ID Application .p12
@@ -88,11 +88,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SIGNED: ${{ steps.cert.outputs.signed == 'true' }}
         run: |
-          NOTES="Cra ${CRA_VERSION} for macOS 14 and later (Apple silicon)."
-          FLAGS=()
-          if [ "$SIGNED" != "true" ]; then
-            FLAGS+=(--prerelease)
-            NOTES="$NOTES"$'\n\n'"This build is ad-hoc signed and not notarized. On first launch, right-click Cra and choose Open."
+          NOTES="$RUNNER_TEMP/notes.md"
+          echo "Cra ${CRA_VERSION} for macOS 14 and later (Apple silicon)." > "$NOTES"
+          echo >> "$NOTES"
+          # Unsigned builds stay regular releases: releases/latest (the website and
+          # scripts/install.sh) skips pre-releases.
+          if [ "$SIGNED" = "true" ]; then
+            echo "Download \`Cra.dmg\` below, open it and drag Cra to Applications." >> "$NOTES"
+          else
+            cat .github/release-notes-unsigned.md >> "$NOTES"
           fi
           gh release create "${{ github.ref_name }}" build/dist/* \
-            --title "Cra ${CRA_VERSION}" --notes "$NOTES" --verify-tag "${FLAGS[@]}"
+            --title "Cra ${CRA_VERSION}" --notes-file "$NOTES" --verify-tag

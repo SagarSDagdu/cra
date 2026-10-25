@@ -11,8 +11,8 @@ IDENTITY="${CRA_SIGN_IDENTITY:--}"
 DIST="build/dist"
 rm -rf "$DIST" && mkdir -p "$DIST"
 
-ZIP="$DIST/Cra-$VERSION.zip"
-DMG="$DIST/Cra-$VERSION.dmg"
+ZIP="$DIST/Cra.zip"
+DMG="$DIST/Cra.dmg"
 
 # Zip: ditto keeps resource forks and symlinks, which codesign requires.
 ditto -c -k --keepParent "$APP" "$ZIP"

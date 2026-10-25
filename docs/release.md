@@ -29,7 +29,25 @@ Everything is scripted; the only manual part is obtaining the certificate once.
    | `APPLE_APP_PASSWORD` | the app-specific password |
 
 Until these exist the Release workflow still runs: it publishes an ad-hoc build as a
-pre-release with a note about right-clicking to open.
+regular release (pre-releases are invisible to `releases/latest`) with the install
+steps in `.github/release-notes-unsigned.md`.
+
+## Installing unsigned builds
+
+Gatekeeper only checks files carrying the quarantine flag, which browsers set and curl
+does not. So the friction-free path for an ad-hoc build is `scripts/install.sh`, run as
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/VictorKildahl/cra/main/scripts/install.sh | bash
+```
+
+It downloads `releases/latest/download/Cra.zip`, replaces the app in `/Applications`
+(or `~/Applications`), quitting a running Cra first, and opens it. Rerunning it updates.
+
+The DMG path needs one manual approval: open Cra, click Done on the "could not verify"
+dialog, then System Settings → Privacy & Security → Open Anyway. Right-click → Open no
+longer bypasses Gatekeeper since macOS 15. The README, release notes and the website's
+download page all carry both paths; keep them in step.
 
 ## Cutting a release
 
@@ -40,8 +58,9 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Artifacts land on the GitHub release: `Cra-0.1.0.dmg`, `Cra-0.1.0.zip`, `SHA256SUMS.txt`.
-The website's download button points at `releases/latest`.
+Artifacts land on the GitHub release: `Cra.dmg`, `Cra.zip`, `SHA256SUMS.txt`. The names
+carry no version so `releases/latest/download/Cra.dmg` always resolves; the website's
+download button and `scripts/install.sh` rely on that.
 
 ## Locally
 

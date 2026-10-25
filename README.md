@@ -7,6 +7,28 @@ searches open and archived tabs, auto-archiving, folders, and Chrome DevTools.
 
 Shell: Swift (AppKit + SwiftUI). Engine: Chromium Embedded Framework.
 
+## Install
+
+Needs macOS 14 or later on Apple silicon.
+
+**Easiest: paste this into Terminal** (Applications → Utilities → Terminal)
+
+    curl -fsSL https://raw.githubusercontent.com/VictorKildahl/cra/main/scripts/install.sh | bash
+
+It puts Cra in your Applications folder and opens it, with no security prompts. Run
+the same line again any time to update.
+
+**Or download [Cra.dmg](https://github.com/VictorKildahl/cra/releases/latest/download/Cra.dmg)**
+
+1. Open `Cra.dmg` and drag Cra to Applications.
+2. Open Cra. macOS says it could not verify the app. Click **Done**.
+3. Open **System Settings → Privacy & Security**, scroll down, and click **Open Anyway**
+   next to "Cra was blocked".
+4. Confirm with Touch ID or your password, then click **Open Anyway** once more.
+
+You only do this once. Cra is not notarized by Apple yet; every line of it is in this
+repository.
+
 ## Build
 
     scripts/build.sh          # fetches CEF on first run, builds build/Cra.app

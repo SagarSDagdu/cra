@@ -22,10 +22,10 @@ fi
 scripts/package.sh "$APP"
 
 if [ "$IDENTITY" != "-" ]; then
-  scripts/notarize.sh "build/dist/Cra-$CRA_VERSION.dmg"
+  scripts/notarize.sh "build/dist/Cra.dmg"
   # Re-zip the stapled app so the zip download carries the ticket too.
-  ditto -c -k --keepParent "$APP" "build/dist/Cra-$CRA_VERSION.zip"
-  (cd build/dist && shasum -a 256 "Cra-$CRA_VERSION.zip" "Cra-$CRA_VERSION.dmg" > SHA256SUMS.txt)
+  ditto -c -k --keepParent "$APP" "build/dist/Cra.zip"
+  (cd build/dist && shasum -a 256 Cra.zip Cra.dmg > SHA256SUMS.txt)
   spctl --assess --type execute --verbose=2 "$APP" && echo "Gatekeeper accepts $APP"
 else
   echo "Ad-hoc build: not notarized. Set CRA_SIGN_IDENTITY and notary credentials for a distributable build." >&2
