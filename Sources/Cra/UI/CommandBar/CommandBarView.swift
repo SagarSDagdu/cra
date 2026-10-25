@@ -22,7 +22,9 @@ struct CommandBarView: View {
             .opacity(shown ? 1 : 0)
             .scaleEffect(shown ? 1 : 0.985, anchor: .top)
             .onChange(of: controller.isOpen, initial: true) { _, open in
-                withAnimation(open ? .easeOut(duration: 0.12) : .easeIn(duration: 0.08)) { shown = open }
+                // Arc's bar appears and disappears within a single frame.
+                var t = Transaction(); t.disablesAnimations = true
+                withTransaction(t) { shown = open }
             }
     }
 

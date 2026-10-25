@@ -21,6 +21,8 @@ struct SidebarItemView: View {
             }
         } else if item.isTab {
             TabRow(item: item, depth: depth, palette: palette, section: section)
+        } else if item.isSplit {
+            SplitRow(item: item, depth: depth, palette: palette, section: section)
         }
     }
 }
@@ -58,11 +60,14 @@ struct TabRow: View {
     @Environment(\.sidebarActions) private var actions
     @State private var hover = false
     @State private var draft = ""
-    @State private var dropAfter: Bool?
     @FocusState private var renameFocused: Bool
 
     private var tab: TabData { item.tab! }
     private var selected: Bool { store.selectedTabID == item.id }
+    /// While tabs are ⌘/⇧-picked the highlight follows the picks, not the open tab.
+    private var highlighted: Bool { ui.multiSelection.isEmpty ? selected : ui.multiSelection.contains(item.id) }
+    /// Close acts on every picked tab when this row is one of them.
+    private var closeGroup: [UUID] { ui.multiSelection.contains(item.id) && ui.multiSelection.count > 1 ? Array(ui.multiSelection) : [item.id] }
     private var editing: Bool { ui.renamingID == item.id }
     private var loaded: Bool { ui.loadedTabIDs.contains(item.id) }
     private var pinned: Bool { section != .today }
@@ -76,6 +81,7 @@ struct TabRow: View {
     }
 
     var body: some View {
+        let session = ui
         HStack(spacing: 11) {
             FaviconView(key: tab.faviconKey, palette: palette)
                 .frame(width: CraMetrics.favicon)
@@ -113,8 +119,9 @@ struct TabRow: View {
                         actions.resetPinnedTab(item.id)
                     }
                 }
-                SidebarIconButton(symbol: "xmark", palette: palette, help: pinned ? "Close (keeps the pinned tab)" : "Archive (⌘W)", size: 22) {
-                    actions.closeTab(item.id)
+                SidebarIconButton(symbol: "xmark", palette: palette,
+                                  help: closeGroup.count > 1 ? "Close \(closeGroup.count) Tabs (⌘W)" : (pinned ? "Close (keeps the pinned tab)" : "Archive (⌘W)"), size: 22) {
+                    closeTabs(closeGroup)
                 }
             }
         }
@@ -123,17 +130,28 @@ struct TabRow: View {
         .frame(height: CraMetrics.rowHeight)
         .background(
             RoundedRectangle(cornerRadius: CraMetrics.rowCorner, style: .continuous)
-                .fill(selected ? palette.selectedFill : (hover ? palette.hoverFill : .clear))
-                .shadow(color: selected && !palette.isDark ? .black.opacity(0.06) : .clear, radius: 3, y: 1)
+                .fill(highlighted ? palette.selectedFill : (hover ? palette.hoverFill : .clear))
+                .shadow(color: highlighted && !palette.isDark ? .black.opacity(0.06) : .clear, radius: 3, y: 1)
         )
         .overlay { if ui.keyboardFocusID == item.id { FocusRing(radius: CraMetrics.rowCorner) } }
-        .overlay(alignment: .top) { if dropAfter == false { dropLine } }
-        .overlay(alignment: .bottom) { if dropAfter == true { dropLine } }
         .contentShape(Rectangle())
-        .onHover { hover = $0 }
-        .onTapGesture(count: 2) { ui.renamingID = item.id }
-        .onTapGesture { if !editing { ui.keyboardFocusID = nil; store.selectTab(item.id) } }
-        .draggable(SidebarDragItem(id: item.id)) {
+        .onHover { hover = $0; ui.pointerOverDraggable = $0 }
+        .onTapGesture {
+            let event = NSApp.currentEvent
+            let flags = event?.modifierFlags.intersection([.command, .shift]) ?? []
+            if !flags.isEmpty {
+                ui.pick(item.id, range: flags.contains(.shift), in: store)
+            } else if event?.clickCount == 2 {
+                ui.renamingID = item.id
+            } else {
+                // A click on the row (not the field) ends a rename, so it can never get stuck.
+                if editing { commitRename() }
+                ui.clearPicks(anchor: item.id)
+                ui.keyboardFocusID = nil
+                store.selectTab(item.id)
+            }
+        }
+        .draggable(SidebarDragItem.begin(item.id, session)) {
             HStack(spacing: 8) {
                 FaviconView(key: tab.faviconKey, palette: palette)
                 Text(item.displayTitle).font(.system(size: 14)).lineLimit(1)
@@ -141,19 +159,9 @@ struct TabRow: View {
             .padding(8)
             .background(RoundedRectangle(cornerRadius: 8).fill(.regularMaterial))
         }
-        .dropDestination(for: SidebarDragItem.self) { items, location in
-            guard let d = items.first, d.id != item.id, let parent = item.parentID,
-                  let idx = store.item(parent)?.children.firstIndex(of: item.id) else { return false }
-            let after = location.y > CraMetrics.rowHeight / 2
-            store.moveItem(d.id, to: parent, index: idx + (after ? 1 : 0))
-            return true
-        } isTargeted: { targeted in dropAfter = targeted ? true : nil }
         .contextMenu { contextMenu }
         .help(tab.url)
-    }
-
-    private var dropLine: some View {
-        Rectangle().fill(palette.textPrimary.opacity(0.5)).frame(height: 2).padding(.horizontal, 6)
+        .modifier(SidebarDropPreview(id: item.id, palette: palette, depth: depth))
     }
 
     private func commitRename() {
@@ -162,8 +170,27 @@ struct TabRow: View {
         ui.renamingID = nil
     }
 
+    private func closeTabs(_ ids: [UUID]) {
+        // The open tab goes last so closing it doesn't hop through tabs about to close.
+        let ordered = ids.filter { $0 != store.selectedTabID } + ids.filter { $0 == store.selectedTabID }
+        withAnimation(.snappy(duration: 0.22, extraBounce: 0)) {
+            for id in ordered { actions.closeTab(id) }
+            ui.multiSelection.subtract(ids)
+        }
+    }
+
     @ViewBuilder
     private var contextMenu: some View {
+        if closeGroup.count > 1 {
+            Button("Close \(closeGroup.count) Tabs") { closeTabs(closeGroup) }
+            Button("Deselect All") { ui.clearPicks() }
+        } else {
+            singleTabMenu
+        }
+    }
+
+    @ViewBuilder
+    private var singleTabMenu: some View {
         if pinned {
             Button("Unpin Tab") { store.unpinTab(item.id) }
         } else {
@@ -223,18 +250,22 @@ struct FolderRow: View {
     @Environment(SidebarUIState.self) private var ui
     @State private var hover = false
     @State private var draft = ""
-    @State private var targeted = false
     @FocusState private var renameFocused: Bool
 
     private var expanded: Bool { store.isExpanded(item.id) }
     private var editing: Bool { ui.renamingID == item.id }
 
     var body: some View {
+        let session = ui
         HStack(spacing: 11) {
-            Image(systemName: expanded ? "folder" : "folder.fill")
-                .font(.system(size: 15, weight: .regular))
-                .foregroundStyle(palette.folderTint)
-                .frame(width: CraMetrics.favicon)
+            ZStack {
+                if !expanded {
+                    Image(systemName: "folder.fill").foregroundStyle(palette.folderFill)
+                }
+                Image(systemName: "folder").foregroundStyle(palette.folderTint)
+            }
+            .font(.system(size: 15, weight: .regular))
+            .frame(width: CraMetrics.favicon)
             if editing {
                 TextField("", text: $draft)
                     .textFieldStyle(.plain)
@@ -259,25 +290,18 @@ struct FolderRow: View {
         }
         .padding(.leading, 8 + CGFloat(depth) * CraMetrics.indent)
         .frame(height: CraMetrics.rowHeight)
-        .background(RoundedRectangle(cornerRadius: CraMetrics.rowCorner, style: .continuous).fill(targeted ? palette.selectedFill : (hover ? palette.hoverFill : .clear)))
+        .background(RoundedRectangle(cornerRadius: CraMetrics.rowCorner, style: .continuous).fill(hover ? palette.hoverFill : .clear))
         .contentShape(Rectangle())
-        .onHover { hover = $0 }
-        .onTapGesture(count: 2) { ui.renamingID = item.id }
-        .onTapGesture { if !editing { withAnimation(.snappy(duration: 0.22, extraBounce: 0)) { store.setExpanded(item.id, !expanded) } } }
-        .draggable(SidebarDragItem(id: item.id))
-        .dropDestination(for: SidebarDragItem.self) { items, location in
-            guard let d = items.first, d.id != item.id else { return false }
-            let h = CraMetrics.rowHeight
-            if location.y < h * 0.25, let parent = item.parentID, let idx = store.item(parent)?.children.firstIndex(of: item.id) {
-                store.moveItem(d.id, to: parent, index: idx)
-            } else if location.y > h * 0.75, let parent = item.parentID, let idx = store.item(parent)?.children.firstIndex(of: item.id) {
-                store.moveItem(d.id, to: parent, index: idx + 1)
-            } else {
-                store.moveItem(d.id, to: item.id, index: nil)
-                store.setExpanded(item.id, true)
-            }
-            return true
-        } isTargeted: { targeted = $0 }
+        .onHover { hover = $0; ui.pointerOverDraggable = $0 }
+        // Every click toggles, however fast they come: double-click-to-rename made
+        // quick open/close clicks start a rename that then swallowed the clicks.
+        // Rename stays in the context menu. No count: 2 gesture either: it makes
+        // SwiftUI hold every single click for the double-click interval.
+        .onTapGesture {
+            if editing { commitRename() }
+            withAnimation(.snappy(duration: 0.22, extraBounce: 0)) { store.setExpanded(item.id, !expanded) }
+        }
+        .draggable(SidebarDragItem.begin(item.id, session))
         .contextMenu {
             Button("Rename…") { ui.renamingID = item.id }
             Button("New Folder Inside") {
@@ -288,6 +312,7 @@ struct FolderRow: View {
             Divider()
             Button("Delete Folder (archives tabs)") { store.deleteFolder(item.id) }
         }
+        .modifier(SidebarDropPreview(id: item.id, palette: palette))
     }
 
     private func commitRename() {

@@ -1,0 +1,189 @@
+import AppKit
+import Compression
+
+// Firefox and Firefox-based browsers (Zen): bookmarks from places.sqlite and
+// open tabs from the session store (mozLz4). Saved logins come in only through
+// Firefox's own export (about:logins ▸ Export Passwords…), read with
+// PasswordCSV like Safari's exported Passwords.csv.
+
+enum FirefoxImporter {
+    /// The default profile from profiles.ini: the [Install…] section's Default,
+    /// else the [Profile…] marked Default=1, else the first.
+    static func defaultProfile(root: URL) -> URL? {
+        guard let ini = try? String(contentsOf: root.appendingPathComponent("profiles.ini"), encoding: .utf8) else { return nil }
+        var sections: [(name: String, values: [String: String])] = []
+        for raw in ini.split(whereSeparator: \.isNewline) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[") { sections.append((String(line.dropFirst().dropLast()), [:])) }
+            else if let eq = line.firstIndex(of: "="), !sections.isEmpty {
+                sections[sections.count - 1].values[String(line[..<eq])] = String(line[line.index(after: eq)...])
+            }
+        }
+        func resolve(_ path: String, relative: Bool) -> URL? {
+            let u = relative ? root.appendingPathComponent(path, isDirectory: true) : URL(fileURLWithPath: path, isDirectory: true)
+            return FileManager.default.fileExists(atPath: u.appendingPathComponent("places.sqlite").path) ? u : nil
+        }
+        if let install = sections.first(where: { $0.name.hasPrefix("Install") }), let p = install.values["Default"],
+           let u = resolve(p, relative: !p.hasPrefix("/")) { return u }
+        let profiles = sections.filter { $0.name.hasPrefix("Profile") }
+            .sorted { ($0.values["Default"] == "1") && !($1.values["Default"] == "1") }
+        for s in profiles {
+            if let p = s.values["Path"], let u = resolve(p, relative: s.values["IsRelative"] != "0") { return u }
+        }
+        return nil
+    }
+
+    static func plan(browser: String, root: URL) throws -> ImportPlan {
+        guard let profile = defaultProfile(root: root) else { throw ImportError.notFound(browser) }
+        var plan = ImportPlan(source: browser)
+        var space = ImportedSpace(title: browser, emoji: "🦊", theme: nil)
+        if let db = SQLiteSnapshot(copying: profile.appendingPathComponent("places.sqlite")) {
+            space.pinned = bookmarks(db)
+        }
+        space.today = openTabs(profile: profile)
+        if !space.pinned.isEmpty || !space.today.isEmpty { plan.spaces.append(space) }
+        return plan
+    }
+
+    /// The toolbar's bookmarks, then the menu and unsorted bookmarks as folders.
+    private static func bookmarks(_ db: SQLiteSnapshot) -> [ImportedItem] {
+        let rows = db.rows("""
+            SELECT b.id, b.type, b.parent, b.title, b.guid, b.dateAdded, p.url, p.title AS ptitle
+            FROM moz_bookmarks b LEFT JOIN moz_places p ON b.fk = p.id ORDER BY b.parent, b.position
+            """)
+        var children: [Int64: [[String: Any]]] = [:]
+        var idByGUID: [String: Int64] = [:]
+        for r in rows {
+            guard let id = r["id"] as? Int64 else { continue }
+            if let g = r["guid"] as? String { idByGUID[g] = id }
+            if let parent = r["parent"] as? Int64 { children[parent, default: []].append(r) }
+        }
+        func convert(_ r: [String: Any]) -> ImportedItem? {
+            let title = r["title"] as? String ?? ""
+            // dateAdded is µs since 1970.
+            let created = (r["dateAdded"] as? Int64).map { Date(timeIntervalSince1970: Double($0) / 1_000_000) } ?? Date()
+            switch r["type"] as? Int64 {
+            case 1:
+                guard let u = r["url"] as? String, u.hasPrefix("http") else { return nil }
+                return ImportedItem(customTitle: title.isEmpty ? nil : title, pageTitle: title.isEmpty ? (r["ptitle"] as? String ?? "") : title,
+                                    url: u, createdAt: created)
+            case 2:
+                guard let id = r["id"] as? Int64 else { return nil }
+                let kids = (children[id] ?? []).compactMap(convert)
+                return kids.isEmpty ? nil : ImportedItem(customTitle: title, pageTitle: title, url: nil, isFolder: true, children: kids, createdAt: created)
+            default:
+                return nil
+            }
+        }
+        func items(_ guid: String) -> [ImportedItem] { idByGUID[guid].map { (children[$0] ?? []).compactMap(convert) } ?? [] }
+        var out = items("toolbar_____")
+        for (guid, name) in [("menu________", "Bookmarks Menu"), ("unfiled_____", "Other Bookmarks")] {
+            let kids = items(guid)
+            if !kids.isEmpty { out.append(ImportedItem(customTitle: name, pageTitle: name, url: nil, isFolder: true, children: kids)) }
+        }
+        return out
+    }
+
+    /// The current tab of every open window, from recovery.jsonlz4 while
+    /// Firefox runs or sessionstore.jsonlz4 after it quit.
+    static func openTabs(profile: URL) -> [ImportedItem] {
+        let candidates = ["sessionstore-backups/recovery.jsonlz4", "sessionstore.jsonlz4", "sessionstore-backups/previous.jsonlz4"]
+        guard let data = candidates.lazy.compactMap({ try? Data(contentsOf: profile.appendingPathComponent($0)) }).first,
+              let json = mozLz4(data),
+              let root = try? JSONSerialization.jsonObject(with: json) as? [String: Any] else { return [] }
+        var out: [ImportedItem] = []
+        for w in root["windows"] as? [[String: Any]] ?? [] {
+            for t in w["tabs"] as? [[String: Any]] ?? [] {
+                guard let entries = t["entries"] as? [[String: Any]], !entries.isEmpty else { continue }
+                let index = min(max((t["index"] as? Int ?? entries.count) - 1, 0), entries.count - 1)
+                guard let u = entries[index]["url"] as? String, u.hasPrefix("http") else { continue }
+                out.append(ImportedItem(pageTitle: entries[index]["title"] as? String ?? "", url: u))
+            }
+        }
+        return out
+    }
+
+    /// "mozLz40\0", uint32 decompressed size, one raw LZ4 block.
+    static func mozLz4(_ data: Data) -> Data? {
+        guard data.count > 12, data.prefix(8) == Data("mozLz40\0".utf8) else { return nil }
+        let size = data.subdata(in: 8..<12).withUnsafeBytes { Int($0.loadUnaligned(as: UInt32.self).littleEndian) }
+        guard size > 0, size < 512 << 20 else { return nil }
+        var out = Data(count: size)
+        let src = data.subdata(in: 12..<data.count)
+        let n = out.withUnsafeMutableBytes { o in src.withUnsafeBytes { s in
+            compression_decode_buffer(o.bindMemory(to: UInt8.self).baseAddress!, size, s.bindMemory(to: UInt8.self).baseAddress!, src.count, nil, COMPRESSION_LZ4_RAW)
+        } }
+        return n == size ? out : nil
+    }
+
+    /// The largest icon per host from favicons.sqlite.
+    static func favicons(root: URL, hosts: [String]) -> [String: NSImage] {
+        guard let profile = defaultProfile(root: root),
+              let db = SQLiteSnapshot(copying: profile.appendingPathComponent("favicons.sqlite")) else { return [:] }
+        var out: [String: NSImage] = [:]
+        for host in hosts {
+            let h = host.replacingOccurrences(of: "'", with: "")
+            let rows = db.rows("""
+                SELECT i.data FROM moz_icons i JOIN moz_icons_to_pages ip ON ip.icon_id = i.id JOIN moz_pages_w_icons p ON p.id = ip.page_id
+                WHERE p.page_url LIKE 'https://\(h)/%' OR p.page_url LIKE 'https://www.\(h)/%' ORDER BY i.width DESC LIMIT 1
+                """)
+            if let data = rows.first?["data"] as? Data, let img = NSImage(data: data) { out[host] = img }
+        }
+        return out
+    }
+
+    static func topSites(root: URL, limit: Int) -> [TopSite] {
+        guard let profile = defaultProfile(root: root),
+              let db = SQLiteSnapshot(copying: profile.appendingPathComponent("places.sqlite")) else { return [] }
+        var byHost: [String: TopSite] = [:]
+        for r in db.rows("SELECT url, title, visit_count FROM moz_places WHERE hidden = 0 AND visit_count > 0 ORDER BY frecency DESC LIMIT 400") {
+            guard let u = r["url"] as? String, let site = TopSite(url: u, title: r["title"] as? String ?? "", visits: Int(r["visit_count"] as? Int64 ?? 0)) else { continue }
+            byHost[site.host, default: TopSite(host: site.host, url: site.url, title: site.title, visits: 0)].visits += site.visits
+        }
+        return Array(byHost.values.sorted { $0.visits > $1.visits }.prefix(limit))
+    }
+}
+
+/// Exported password files: Firefox (url, username, password, …) and Safari
+/// (Title, URL, Username, Password, Notes, OTPAuth). Columns are found by name.
+enum PasswordCSV {
+    static func logins(in text: String) -> [ImportedLogin] {
+        var rows = parse(text)
+        guard !rows.isEmpty else { return [] }
+        let header = rows.removeFirst().map { $0.lowercased().trimmingCharacters(in: .whitespaces) }
+        guard let urlCol = header.firstIndex(where: { $0 == "url" || $0 == "origin" }),
+              let userCol = header.firstIndex(where: { $0 == "username" || $0 == "login" }),
+              let passCol = header.firstIndex(of: "password") else { return [] }
+        return rows.compactMap { r in
+            guard r.count > max(urlCol, userCol, passCol) else { return nil }
+            return ImportedLogin(url: r[urlCol], username: r[userCol], password: r[passCol])
+        }
+    }
+
+    /// RFC 4180: quoted fields may hold commas, quotes ("") and newlines.
+    static func parse(_ text: String) -> [[String]] {
+        var rows: [[String]] = [], row: [String] = [], field = ""
+        var quoted = false
+        var it = Array(text.unicodeScalars).makeIterator()
+        var pending: Unicode.Scalar?
+        while let c = pending ?? it.next() {
+            pending = nil
+            if quoted {
+                if c == "\"" {
+                    if let n = it.next() { if n == "\"" { field.unicodeScalars.append("\"") } else { quoted = false; pending = n } }
+                    else { quoted = false }
+                } else { field.unicodeScalars.append(c) }
+            } else if c == "\"" { quoted = true }
+            else if c == "," { row.append(field); field = "" }
+            else if c == "\n" || c == "\r" {
+                if c == "\r", let n = it.next(), n != "\n" { pending = n }
+                row.append(field); field = ""
+                if row.contains(where: { !$0.isEmpty }) { rows.append(row) }
+                row = []
+            } else { field.unicodeScalars.append(c) }
+        }
+        row.append(field)
+        if row.contains(where: { !$0.isEmpty }) { rows.append(row) }
+        return rows
+    }
+}

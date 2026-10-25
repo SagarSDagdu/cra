@@ -1,0 +1,43 @@
+Cra blocklist: third-party notices
+==================================
+
+domains.txt is the content-blocking list behind Settings > Privacy > "Block
+third-party ads and trackers". It is the union of the two lists below, reduced
+to bare domains (hosts-file syntax, comments, localhost entries and invalid
+names removed) and with entries dropped when a parent domain is already listed,
+because Cra blocks a listed domain together with its subdomains. Fetched
+2026-10-25.
+
+1. AdAway default blocklist
+   Source:  https://github.com/AdAway/adaway.github.io/blob/master/hosts.txt
+            (file at commit 7b5368f03b35ec74e3984a8958494c6b88aa256b)
+   Authors: Kicelo, Dominik Schuermann and the AdAway contributors
+   License: Creative Commons Attribution 3.0 Unported (CC BY 3.0)
+            https://creativecommons.org/licenses/by/3.0/
+   Changes: converted to a plain domain list and merged with list 2 as
+            described above.
+
+2. Anudeep's Blacklist (adservers.txt)
+   Source:  https://github.com/anudeepND/blacklist/blob/master/adservers.txt
+            (file at commit 5179d7e164f3ec5b7ebb368071303fadc53e59e8)
+   License: MIT License
+
+   Copyright (c) 2018 Anudeep ND <anudeep@protonmail.com>
+
+   Permission is hereby granted, free of charge, to any person obtaining a copy
+   of this software and associated documentation files (the "Software"), to deal
+   in the Software without restriction, including without limitation the rights
+   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   copies of the Software, and to permit persons to whom the Software is
+   furnished to do so, subject to the following conditions:
+
+   The above copyright notice and this permission notice shall be included in all
+   copies or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   SOFTWARE.

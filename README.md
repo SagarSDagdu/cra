@@ -33,6 +33,7 @@ repository.
 
     scripts/build.sh          # fetches CEF on first run, builds build/Cra.app
     scripts/run.sh            # build if needed, then open
+    scripts/dev.sh            # dev loop: debug CraDev.app, rebuilds + relaunches on save (~4 s)
 
 Requirements: Xcode 16+, CMake (`brew install cmake`).
 
@@ -62,23 +63,22 @@ testing without touching the keyboard):
     open "cra://open?url=https://example.com&background=1"
     open "cra://dismiss"                    # close sheets, command bar, find bar
 
+## Little Windows (Arc's Little Arc)
+
+Links from other apps open in a Little Window: a small, sidebar-less window with one
+search pill and an "Open in <Space> ⌘O" button. The page is not in the sidebar; closing
+the window (⌘W) archives it to the Library, ⌘O (or the chevron menu) moves it into a space
+as a Today tab, keeping the live page. ⌥⌘N opens an empty one. Settings → Tabs turns the
+link routing off; `open "cra://open?url=…&little=1"` opens one from a shell.
+
 ## Import
 
-Cra menu → Import from Arc or Dia…, or Settings → Import. Reads Arc's
-StorableSidebar.json / StorableArchiveItems.json and Dia's profile containers +
-bookmarks. Spaces with the same name merge; tabs already present are skipped.
+Cra menu → Import from Arc or Dia…, or Settings → Import. Imports from Arc, Dia,
+Chrome, Brave, Edge, Opera, Opera GX, Vivaldi, Chromium, Firefox, Zen and Safari: Arc's
+StorableSidebar.json / StorableArchiveItems.json, Dia's profile containers, and
+bookmarks, history, extensions, passwords and cookies from the other browsers.
+Spaces with the same name merge; tabs already present are skipped.
 Headless: `open "cra://import?source=arc&archive=1&settings=1"`.
-
-## Account (Convex)
-
-Backend in `backend/convex` (team victor-kildahl, project cra): dev
-`helpful-stoat-265`, prod `artful-albatross-857` (eu-west-1). The app uses prod;
-set `CRA_CONVEX_DEV=1` to use dev. Email/password and Google sign-in (the Google
-OAuth client needs `https://<deployment>.convex.site/google-callback` as an
-authorized redirect URI). Settings sync on change; the sidebar is backed up
-every 10 minutes while signed in (Settings → Account → Restore).
-
-Deploy changes to both deployments: `cd backend && npx convex dev --once && npx convex deploy -y`.
 
 ## Keyboard
 
@@ -89,7 +89,8 @@ when no tab) · ⇧⌘W close window · ⇧⌘T restore closed tab · ⌘S sideb
 tab · ⇧⌘K clear Today · ⌘[ / ⌘] back/forward · ⌘Y history · ⇧⌘L library ·
 ⇧⌘J downloads · ⌥⌘I DevTools · ⌥⌘J console · ⌥⌘U source · ⌘F find.
 Like Chrome, pages get first chance at unreserved shortcuts (⌘F in Docs works).
-Shortcuts can be changed in `~/Library/Application Support/Cra/keybindings.json`.
+Every shortcut can be changed in Settings → Shortcuts; overrides are saved to
+`~/Library/Application Support/Cra/keybindings.json`.
 
 ## Rendering calibration hook
 
@@ -122,3 +123,11 @@ URL (nav buttons at its left) to the full monospace URL with the developer icons
 nav buttons move into the sidebar. Every shortcut can be changed in Settings → Shortcuts
 (click the shortcut, press new keys; Esc cancels, ⌫ removes; conflicts are flagged).
 Overrides live in `keybindings.json` in the app's support folder.
+
+## Picture in Picture
+
+View ▸ Picture in Picture (or "pip" in the command bar, or the context menu on a video) pops the
+page's video out into Arc's floating window: bare 16:9, 6 pt corners, top-right, draggable and
+resizable from its edges. Hovering it shows close, back to tab, play/pause and ±15 s buttons. Leaving a tab whose video is playing pops it
+out automatically (Settings ▸ Tabs, "Enable Picture in Picture when you leave a video tab"), and
+coming back to the tab brings the video home. `open "cra://action/pictureInPicture"` toggles it.

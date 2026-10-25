@@ -9,6 +9,8 @@ final class TabRuntime {
     let browser: CraBrowser
     var progress: Double = 0
     var themeColor: String = ""
+    /// What the page paints behind its content ("#RRGGBB", "" until reported).
+    var backgroundColor: String = ""
     /// Cra popped this tab's video out because the user left the tab (Arc's
     /// auto Picture in Picture); coming back brings the video home.
     var autoPictureInPicture = false
@@ -30,6 +32,8 @@ protocol BrowserManagerDelegate: AnyObject {
     func browserManagerDevToolsHost(for tabID: UUID) -> NSView?
     /// A DevTools pane appeared or closed; the shell decides whether to show the dock.
     func browserManagerDevToolsChanged()
+    /// Chrome's docked frontend moved its page placeholder (streamed while its splitter is dragged).
+    func browserManagerDevToolsPageBoundsChanged()
     /// Chrome-style hosting: page windows appeared/changed; the shell re-attaches and orders them.
     func browserManagerPageWindowsChanged(focus: Bool)
     func browserManagerHandleKey(_ event: NSEvent) -> Bool
@@ -46,7 +50,12 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
     let container: NSView
     weak var delegate: BrowserManagerDelegate?
     private(set) var runtimes: [UUID: TabRuntime] = [:]
+    /// The focused pane's tab (the one toolbar actions and DevTools apply to).
     private(set) var visibleTabID: UUID?
+    /// Every tab on screen, in pane order (one entry outside split view).
+    private(set) var visibleTabIDs: [UUID] = []
+    /// Split view: the view a tab's Alloy-hosted Chromium view should live in.
+    var paneHost: ((UUID) -> NSView?)?
     private var byBrowser: [ObjectIdentifier: UUID] = [:]
 
     init(store: SidebarStore, favicons: FaviconCache, container: NSView) {
@@ -61,8 +70,9 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
     @discardableResult
     func ensureRuntime(for tabID: UUID) -> TabRuntime? {
         if let r = runtimes[tabID] { return r }
-        guard let item = store.item(tabID), let tab = item.tab else { return nil }
-        let browser = CraBrowser(frame: container.bounds, url: tab.url.isEmpty ? "about:blank" : tab.url, delegate: self)
+        // An empty split pane has no page yet (Arc shows the tinted card and the command bar).
+        guard let item = store.item(tabID), let tab = item.tab, !item.isEmptyTab else { return nil }
+        let browser = CraBrowser(frame: container.bounds, url: tab.url, delegate: self)
         return register(browser: browser, tabID: tabID)
     }
 
@@ -101,18 +111,40 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
     }
 
     func show(_ tabID: UUID?, focus: Bool) {
-        if let previous = visibleTabID, previous != tabID { leaveTab(previous) }
-        if let tabID, let rt = ensureRuntime(for: tabID) {
-            returnToTab(rt)
-            for (id, other) in runtimes where id != tabID { other.browser.containerView.isHidden = true }
-            rt.browser.containerView.frame = container.bounds
-            rt.browser.containerView.isHidden = false
-            visibleTabID = tabID
-            if focus { rt.browser.setFocused(true) }
-        } else {
-            for (_, other) in runtimes { other.browser.containerView.isHidden = true }
-            visibleTabID = nil
+        show(tabID.map { [$0] } ?? [], focused: tabID, focus: focus)
+    }
+
+    /// Show several tabs at once (split view); `focused` gets keyboard focus.
+    func show(_ tabIDs: [UUID], focused: UUID?, focus: Bool) {
+        let newSet = Set(tabIDs)
+        for previous in visibleTabIDs where !newSet.contains(previous) { leaveTab(previous) }
+        let wasVisible = Set(visibleTabIDs)
+        var shown: [UUID] = []
+        for id in tabIDs {
+            guard let rt = ensureRuntime(for: id) else { shown.append(id); continue }
+            if !wasVisible.contains(id) { returnToTab(rt) }
+            let v = rt.browser.containerView
+            // Alloy hosting only: the Chromium view moves into its pane. Chrome-style
+            // pages live in their own windows; re-parenting their view makes Chrome
+            // spawn stock windows.
+            if rt.browser.hostWindow == nil, let host = paneHost?(id), v.superview !== host {
+                v.removeFromSuperview()
+                host.addSubview(v)
+            }
+            v.frame = v.superview?.bounds ?? container.bounds
+            v.isHidden = false
+            shown.append(id)
         }
+        for (id, other) in runtimes where !newSet.contains(id) {
+            other.browser.containerView.isHidden = true
+            if other.browser.hostWindow == nil, other.browser.containerView.superview !== container {
+                other.browser.containerView.removeFromSuperview()
+                container.addSubview(other.browser.containerView)
+            }
+        }
+        visibleTabIDs = shown
+        visibleTabID = focused.flatMap { newSet.contains($0) ? $0 : nil } ?? shown.first
+        if focus, let f = visibleTabID, let rt = runtimes[f] { rt.browser.setFocused(true) }
         syncDevToolsVisibility()
         delegate?.browserManagerPageWindowsChanged(focus: focus)
     }
@@ -124,6 +156,7 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
     func unload(_ tabID: UUID) {
         guard let rt = runtimes[tabID] else { return }
         if visibleTabID == tabID { visibleTabID = nil }
+        visibleTabIDs.removeAll { $0 == tabID }
         rt.browser.containerView.isHidden = true
         rt.browser.close()
     }
@@ -136,7 +169,10 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
     func closeAll() { for id in Array(runtimes.keys) { unload(id) } }
 
     func layoutVisible() {
-        visibleRuntime?.browser.containerView.frame = container.bounds
+        for id in visibleTabIDs {
+            guard let v = runtimes[id]?.browser.containerView else { continue }
+            v.frame = v.superview?.bounds ?? container.bounds
+        }
     }
 
     private func tabID(of browser: CraBrowser) -> UUID? { byBrowser[ObjectIdentifier(browser)] }
@@ -149,18 +185,45 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
     private func leaveTab(_ tabID: UUID) {
         guard store.settings.autoPictureInPicture, let rt = runtimes[tabID], !rt.browser.isInPictureInPicture else { return }
         rt.pendingAutoPictureInPicture = true
-        rt.browser.requestPictureInPictureAutomatic(true)
+        rt.browser.requestPictureInPicture(automatic: true)
     }
 
-    /// Back on the tab: a video Cra popped out automatically comes home (Chrome
-    /// and Arc do the same); one the user popped out stays floating.
+    func browser(_ browser: CraBrowser, didChangePictureInPicturePlayback playing: Bool) {
+        PictureInPictureChrome.shared.isPlaying = playing
+    }
+
+    /// Picture in Picture's "back to tab": select the tab, bring its window up
+    /// and put the video back in the page (also when the tab was already selected).
+    private func bringToFront(_ tabID: UUID) {
+        store.selectTab(tabID)
+        container.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        runtimes[tabID]?.browser.exitPictureInPicture()
+    }
+
+    /// Back on the tab: the video comes home. Arc closes its Picture in Picture
+    /// window whenever the tab it came from is in front again, however it was
+    /// opened (observed on 1.168: the window went away the moment its source
+    /// window became key).
     private func returnToTab(_ rt: TabRuntime) {
         rt.pendingAutoPictureInPicture = false
-        if rt.autoPictureInPicture { rt.browser.exitPictureInPicture() }
+        if rt.browser.isInPictureInPicture { rt.browser.exitPictureInPicture() }
     }
 
     func browser(_ browser: CraBrowser, didChangePictureInPicture active: Bool) {
         guard let id = tabID(of: browser), let rt = runtimes[id] else { return }
+        if active {
+            // The floating window's hover controls act on this tab.
+            PictureInPictureChrome.shared.actions = PictureInPictureActions(
+                backToTab: { [weak self] in self?.bringToFront(id) },
+                togglePlayback: { [weak browser] in browser?.togglePictureInPicturePlayback() },
+                skip: { [weak browser] s in browser?.skipPictureInPicture(by: s) },
+                close: { [weak browser] in browser?.exitPictureInPicture() })
+            PictureInPictureChrome.shared.isPlaying = browser.isPictureInPicturePlaying
+            PictureInPictureChrome.shared.videoEntered()
+        } else {
+            PictureInPictureChrome.shared.videoLeft()
+        }
         if active {
             rt.autoPictureInPicture = rt.pendingAutoPictureInPicture
             rt.pendingAutoPictureInPicture = false
@@ -219,6 +282,12 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
         delegate?.browserManagerDidUpdate(id)
     }
 
+    func browser(_ browser: CraBrowser, didReportBackgroundColor hex: String) {
+        guard let id = tabID(of: browser), let rt = runtimes[id], rt.backgroundColor != hex else { return }
+        rt.backgroundColor = hex
+        delegate?.browserManagerDidUpdate(id)
+    }
+
     func browser(_ browser: CraBrowser, didChangeStatusMessage message: String) {
         delegate?.browserManager(statusMessage: message)
     }
@@ -273,6 +342,35 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
     func browserDidCloseDevTools(_ browser: CraBrowser) {
         guard let id = tabID(of: browser) else { return }
         devToolsViews[id] = nil
+        devToolsPlaceholders[id] = nil
+        devToolsDockedState[id] = nil
+        delegate?.browserManagerDevToolsChanged()
+    }
+
+    /// Chrome's docked frontend reported where the page goes: `bounds` are points with a
+    /// top-left origin inside a DevTools window whose content measured `frontendSize`.
+    struct DevToolsPlaceholder: Equatable {
+        var bounds: NSRect
+        var frontendSize: NSSize
+    }
+    private(set) var devToolsPlaceholders: [UUID: DevToolsPlaceholder] = [:]
+    /// False once the user undocked Chrome's frontend into its own window.
+    private(set) var devToolsDockedState: [UUID: Bool] = [:]
+
+    func browser(_ browser: CraBrowser, devToolsPageBounds bounds: NSRect) {
+        guard let id = tabID(of: browser) else { return }
+        // Undocked frontends still report bounds (device mode); only setIsDocked changes the dock state.
+        guard devToolsDockedState[id] != false else { return }
+        let size = devToolsViews[id]?.window?.contentView?.bounds.size ?? NSSize(width: bounds.maxX, height: bounds.maxY)
+        devToolsPlaceholders[id] = DevToolsPlaceholder(bounds: bounds, frontendSize: size)
+        delegate?.browserManagerDevToolsPageBoundsChanged()
+    }
+
+    func browser(_ browser: CraBrowser, devToolsDocked docked: Bool) {
+        guard let id = tabID(of: browser) else { return }
+        if !docked { devToolsPlaceholders[id] = nil }
+        guard devToolsDockedState[id] != docked else { return }
+        devToolsDockedState[id] = docked
         delegate?.browserManagerDevToolsChanged()
     }
 
@@ -323,6 +421,7 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
         byBrowser[ObjectIdentifier(browser)] = nil
         if runtimes[id]?.browser === browser { runtimes[id] = nil }
         if visibleTabID == id { visibleTabID = nil }
+        visibleTabIDs.removeAll { $0 == id }
         delegate?.browserManagerDidUpdate(id)
     }
 }

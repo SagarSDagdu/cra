@@ -26,7 +26,9 @@
 #include "include/cef_parser.h"
 #include "include/cef_permission_handler.h"
 #include "include/cef_request_handler.h"
+#include "include/cef_resource_request_handler.h"
 #include "include/cef_version.h"
+#include "CraContentBlocker.h"
 #include "include/wrapper/cef_helpers.h"
 #include "include/wrapper/cef_library_loader.h"
 
@@ -42,6 +44,7 @@ static NSMutableArray<CraBrowser*>* g_pendingCreation = nil;
 static void (^g_relaunchHandler)(NSArray<NSString*>*) = nil;
 static BOOL g_alreadyRunning = NO;
 static NSHashTable<CraBrowser*>* g_allBrowsers = nil;
+static void (^g_strayPageHandler)(NSString*) = nil;
 
 static NSString* NSStringFromCef(const CefString& s) {
     std::string utf8 = s.ToString();
@@ -72,6 +75,14 @@ enum CraMenuCommand {
 
 class CraClient;
 
+// Live CraClient instances. The bridge is built without RTTI, so a popup's client
+// (which can also be a DevToolsClient) is checked against this set before casting.
+#include <set>
+static std::set<const void*>& CraClientRegistry() { static std::set<const void*> s; return s; }
+static CraClient* AsCraClient(CefClient* c) {
+    return c && CraClientRegistry().count(static_cast<const void*>(c)) ? reinterpret_cast<CraClient*>(c) : nullptr;
+}
+
 @interface CraBrowser ()
 @property (nonatomic, strong) NSView* containerView;
 @property (nonatomic, copy) NSString* currentURL;
@@ -82,8 +93,11 @@ class CraClient;
 @property (nonatomic) BOOL isCreated;
 @property (nonatomic) BOOL isClosed;
 @property (nonatomic) BOOL isInPictureInPicture;
+@property (nonatomic) BOOL isPictureInPicturePlaying;
 - (void)requestPictureInPictureInFrame:(CefRefPtr<CefFrame>)frame automatic:(BOOL)automatic x:(int)x y:(int)y;
 - (void)adoptBrowser:(CefRefPtr<CefBrowser>)browser;
+- (void)devToolsBrowserCreated:(CefRefPtr<CefBrowser>)browser;
+- (void)devToolsBrowserClosed;
 - (void)browserClosed;
 - (CefRefPtr<CefBrowser>)cefBrowser;
 - (CefRefPtr<CefClient>)cefClient;
@@ -95,9 +109,113 @@ class CraClient;
 
 // MARK: - CEF app
 
+// Browsers Chromium creates through its own UI rather than through Cra: an
+// extension's chrome.tabs.create / chrome.windows.create, or the welcome page an
+// extension opens once it is installed. CEF gives them GetDefaultClient(); without
+// one they appear in a stock Chrome window with a tab strip. Cra takes the URL as
+// one of its own tabs and closes Chrome's browser before it is shown.
+class StrayBrowserClient : public CefClient, public CefLifeSpanHandler, public CefRequestHandler {
+public:
+    CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
+    CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
+
+    void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
+        if (!g_strayPageHandler) return;
+        NSView* view = (__bridge NSView*)browser->GetHost()->GetWindowHandle();
+        [view.window orderOut:nil];
+    }
+
+    bool OnBeforeBrowse(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, CefRefPtr<CefRequest> request,
+                        bool user_gesture, bool is_redirect) override {
+        if (!g_strayPageHandler || !frame->IsMain()) return false;
+        NSString* url = NSStringFromCef(request->GetURL());
+        if (url.length == 0 || [url isEqualToString:@"about:blank"]) return false;
+        void (^handler)(NSString*) = g_strayPageHandler;
+        dispatch_async(dispatch_get_main_queue(), ^{ handler(url); });
+        browser->GetHost()->CloseBrowser(true);
+        return true;
+    }
+
+private:
+    IMPLEMENT_REFCOUNTING(StrayBrowserClient);
+};
+
+// MARK: - Browser-level DevTools pipe
+
+// With --remote-debugging-pipe Chromium reads protocol messages from fd 3 and
+// writes replies to fd 4, NUL-terminated. CEF runs the browser in this process,
+// so Cra holds the other ends: a trusted client with no port open to anyone else.
+static int g_cdpWriteFD = -1;
+static dispatch_source_t g_cdpReadSource;
+static NSMutableData* g_cdpBuffer;
+static NSMutableDictionary<NSNumber*, void (^)(NSString*, NSString*)>* g_cdpPending;
+static int g_cdpNextID;
+static void (^g_cdpEventHandler)(NSString*, NSString*, NSString*);
+
+static NSString* CraJSONString(id object) {
+    return [[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:object ?: @{} options:0 error:nil]
+                                 encoding:NSUTF8StringEncoding];
+}
+
+static void CraCDPPipeDeliver(NSData* chunk) {
+    NSDictionary* msg = [NSJSONSerialization JSONObjectWithData:chunk options:0 error:nil];
+    NSNumber* key = [msg[@"id"] isKindOfClass:NSNumber.class] ? msg[@"id"] : nil;
+    if (!key) {
+        if (g_cdpEventHandler && [msg[@"method"] isKindOfClass:NSString.class])
+            g_cdpEventHandler(msg[@"method"], CraJSONString(msg[@"params"]), msg[@"sessionId"]);
+        return;
+    }
+    void (^done)(NSString*, NSString*) = g_cdpPending[key];
+    [g_cdpPending removeObjectForKey:key];
+    if (!done) return;
+    NSString* json = CraJSONString(msg[@"error"] ?: msg[@"result"]);
+    msg[@"error"] ? done(nil, json) : done(json, nil);
+}
+
+/// Creates the pipe pair on fds 3/4. NO (and no pipe) when either fd is already in use.
+static bool CraCDPPipeSetUp() {
+    if (g_cdpWriteFD >= 0) return true;
+    if (fcntl(3, F_GETFD) != -1 || fcntl(4, F_GETFD) != -1) return false;
+    int toChrome[2], fromChrome[2];
+    if (pipe(toChrome) != 0) return false;
+    if (pipe(fromChrome) != 0) { close(toChrome[0]); close(toChrome[1]); return false; }
+    // Park every end above 10 first: pipe() itself may have handed out 3 or 4.
+    int ourWrite = fcntl(toChrome[1], F_DUPFD_CLOEXEC, 10), ourRead = fcntl(fromChrome[0], F_DUPFD_CLOEXEC, 10);
+    int chromeRead = fcntl(toChrome[0], F_DUPFD, 10), chromeWrite = fcntl(fromChrome[1], F_DUPFD, 10);
+    for (int fd : {toChrome[0], toChrome[1], fromChrome[0], fromChrome[1]}) close(fd);
+    dup2(chromeRead, 3);
+    dup2(chromeWrite, 4);
+    close(chromeRead);
+    close(chromeWrite);
+    g_cdpWriteFD = ourWrite;
+    g_cdpBuffer = [NSMutableData data];
+    g_cdpPending = [NSMutableDictionary dictionary];
+    g_cdpReadSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, ourRead, 0, dispatch_get_main_queue());
+    dispatch_source_set_event_handler(g_cdpReadSource, ^{
+        char buf[65536];
+        ssize_t n = read(ourRead, buf, sizeof buf);
+        if (n <= 0) { dispatch_source_cancel(g_cdpReadSource); return; }
+        [g_cdpBuffer appendBytes:buf length:(NSUInteger)n];
+        for (;;) {
+            NSRange nul = [g_cdpBuffer rangeOfData:[NSData dataWithBytes:"" length:1] options:0
+                                             range:NSMakeRange(0, g_cdpBuffer.length)];
+            if (nul.location == NSNotFound) break;
+            CraCDPPipeDeliver([g_cdpBuffer subdataWithRange:NSMakeRange(0, nul.location)]);
+            [g_cdpBuffer replaceBytesInRange:NSMakeRange(0, nul.location + 1) withBytes:NULL length:0];
+        }
+    });
+    dispatch_resume(g_cdpReadSource);
+    return true;
+}
+
 class CraApp : public CefApp, public CefBrowserProcessHandler {
 public:
     CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
+
+    CefRefPtr<CefClient> GetDefaultClient() override {
+        if (!stray_) stray_ = new StrayBrowserClient();
+        return stray_;
+    }
 
     void OnBeforeCommandLineProcessing(const CefString& process_type,
                                        CefRefPtr<CefCommandLine> command_line) override {
@@ -113,7 +231,10 @@ public:
         command_line->AppendSwitch("no-first-run");
         // Unpacked Chrome extensions (Chrome-style browsers only): one folder per extension.
         if (process_type.empty()) {
-            NSString* dir = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/Cra/Extensions"];
+            // Same folder as ExtensionStore (AppPaths.supportDir/Extensions).
+            NSString* dataDir = NSProcessInfo.processInfo.environment[@"CRA_DATA_DIR"]
+                ?: [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/Cra"];
+            NSString* dir = [dataDir stringByAppendingPathComponent:@"Extensions"];
             NSMutableArray<NSString*>* paths = [NSMutableArray array];
             for (NSString* name in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:nil]) {
                 NSString* p = [dir stringByAppendingPathComponent:name];
@@ -122,6 +243,12 @@ public:
             if (paths.count) command_line->AppendSwitchWithValue("load-extension", CefStringFromNS([paths componentsJoinedByString:@","]));
         }
         command_line->AppendSwitchWithValue("autoplay-policy", "document-user-activation-required");
+        // Browser-level DevTools protocol over a private pipe (fd 3/4, no port): the trusted
+        // client Chrome requires for Extensions.triggerAction (toolbar extension buttons).
+        if (CraCDPPipeSetUp()) {
+            command_line->AppendSwitch("remote-debugging-pipe");
+            command_line->AppendSwitch("enable-unsafe-extension-debugging");
+        }
     }
 
     // Another Cra process started (LaunchServices, `open -n`). Chromium's
@@ -154,6 +281,7 @@ public:
     }
 
 private:
+    CefRefPtr<StrayBrowserClient> stray_;
     IMPLEMENT_REFCOUNTING(CraApp);
 };
 
@@ -185,59 +313,163 @@ private:
     IMPLEMENT_REFCOUNTING(FaviconCallback);
 };
 
-// MARK: - DevTools client (minimal, just keeps the live count honest)
+// MARK: - DevTools client
 
-class DevToolsClient : public CefClient, public CefLifeSpanHandler, public CefLoadHandler, public CefDisplayHandler {
+// Diagnostic log for the DevTools life cycle: `defaults write dk.kildahl.cra devToolsLog -bool YES`,
+// then read $TMPDIR/cra-devtools.log.
+static void CraDevToolsLog(NSString* fmt, ...) NS_FORMAT_FUNCTION(1, 2);
+static void CraDevToolsLog(NSString* fmt, ...) {
+    static BOOL enabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"devToolsLog"];
+    if (!enabled) return;
+    va_list ap;
+    va_start(ap, fmt);
+    NSString* s = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    NSString* path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"cra-devtools.log"];
+    NSString* line = [NSString stringWithFormat:@"%.3f %@\n", [NSDate date].timeIntervalSince1970, s];
+    FILE* f = fopen(path.fileSystemRepresentation, "a");
+    if (f) { fputs(line.UTF8String, f); fclose(f); }
+}
+
+// Chrome's DevTools the way Arc (plain Chromium) shows it: the frontend runs with
+// can_dock=true, draws the dock/page split and the device toolbar itself, and tells
+// the embedder where the page goes (InspectorFrontendHost.setInspectedPageBounds).
+// CEF opens Chrome-style DevTools as an undockable popup, so the popup is reloaded
+// once with can_dock=true and the frontend's embedder calls are mirrored to the
+// shell as console messages; the shell then lays the page window over the
+// placeholder exactly like Chrome's BrowserView does.
+static const char kCraDevToolsHooks[] =
+    "(function(){var h=window.InspectorFrontendHost;if(!h||h.__cra)return;h.__cra=1;"
+    "function find(root,sel){var r=root.querySelector(sel);if(r)return r;var all=root.querySelectorAll('*');"
+    "for(var i=0;i<all.length;i++){if(all[i].shadowRoot){var f=find(all[i].shadowRoot,sel);if(f)return f;}}return null;}"
+    "function make(){var b=document.createElement('button');b.id='cra-close';b.title='Close DevTools';b.setAttribute('aria-label','Close DevTools');"
+    "b.style.cssText='all:unset;box-sizing:border-box;cursor:pointer;width:26px;height:26px;margin:0 2px;display:inline-flex;align-items:center;justify-content:center;border-radius:4px;color:var(--icon-default,#9aa0a6)';"
+    "b.innerHTML='<svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\"><path d=\"M2 2l10 10M12 2L2 12\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" fill=\"none\"/></svg>';"
+    "b.onmouseenter=function(){b.style.background='var(--sys-color-state-hover-on-subtle,rgba(128,128,128,.25))';};"
+    "b.onmouseleave=function(){b.style.background='';};b.onclick=function(){console.log('__cra_devtools_close');};return b;}"
+    "var timer=null;"
+    "function installClose(){if(timer)return;var n=0;timer=setInterval(function(){"
+    "if(find(document,'#cra-close')){clearInterval(timer);timer=null;return;}"
+    "var bar=find(document,'.tabbed-pane-right-toolbar');"
+    "if(bar&&bar.parentNode){var b=make();b.style.alignSelf='center';b.style.margin='0 4px 0 2px';b.style.order='9999';bar.parentNode.appendChild(b);clearInterval(timer);timer=null;return;}"
+    "if(++n>60){clearInterval(timer);timer=null;var f=make();f.style.position='fixed';f.style.top='1px';f.style.right='4px';f.style.zIndex='2147483647';document.body.appendChild(f);}},150);}"
+    "function removeClose(){if(timer){clearInterval(timer);timer=null;}var b=find(document,'#cra-close');if(b)b.remove();}"
+    "h.closeWindow=function(){console.log('__cra_devtools_close');};"
+    "if(!/[?&]can_dock=/.test(location.search)){installClose();return;}"
+    "var sent=false;"
+    "h.setInspectedPageBounds=function(b){sent=true;try{console.log('__cra_devtools_bounds:'+JSON.stringify({x:b.x,y:b.y,width:b.width,height:b.height}));}catch(e){}};"
+    // Chrome never hears about docking: the shell owns the layout. The frontend only
+    // needs its acknowledgement (DockController waits for it before relayout). Docked, the
+    // frontend shows its own close button; undocked, the window's title bar has one.
+    "h.setIsDocked=function(d,cb){console.log('__cra_devtools_docked:'+(d?1:0));removeClose();"
+    "if(cb)setTimeout(function(){cb();},0);};"
+    // Docked frontends re-send the placeholder on resize; an undocked one stays silent.
+    "window.dispatchEvent(new Event('resize'));"
+    "requestAnimationFrame(function(){requestAnimationFrame(function(){setTimeout(function(){if(!sent)console.log('__cra_devtools_docked:0');},80);});});"
+    "})();";
+
+class DevToolsClient : public CefClient, public CefLifeSpanHandler, public CefLoadHandler, public CefDisplayHandler,
+                       public CefRequestHandler {
 public:
     DevToolsClient(NSRect frame, CraBrowser* owner, NSView* host) : frame_(frame), owner_(owner), host_(host) {}
     CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
     CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
     CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
+    CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
 
-    // Docked mode. CEF runs the frontend with can_dock=false (Chrome's docked
-    // variant reserves a page placeholder and loses the target in CEF), which
-    // hides Chrome's close button, so a close button is added to the main
-    // toolbar; it and closeWindow() come back to us as a console message.
+    bool OnBeforeBrowse(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, CefRefPtr<CefRequest> request,
+                        bool user_gesture, bool is_redirect) override {
+        if (frame->IsMain()) CraDevToolsLog(@"OnBeforeBrowse %s", request->GetURL().ToString().c_str());
+        return false;
+    }
+    // The frontend's own helper pages (device_mode_emulation_frame.html when undocked)
+    // would become stray CEF windows; Chrome never shows them either.
+    bool OnBeforePopup(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int popup_id,
+                       const CefString& target_url, const CefString& target_frame_name,
+                       WindowOpenDisposition target_disposition, bool user_gesture,
+                       const CefPopupFeatures& popupFeatures, CefWindowInfo& windowInfo,
+                       CefRefPtr<CefClient>& client, CefBrowserSettings& settings,
+                       CefRefPtr<CefDictionaryValue>& extra_info, bool* no_javascript_access) override {
+        std::string url = target_url.ToString();
+        CraDevToolsLog(@"DevTools popup %s", url.c_str());
+        if (url.rfind("devtools://", 0) == 0 || url.empty() || url == "about:blank") return true;
+        if (CraBrowser* o = owner_) [o.delegate browser:o requestsNewTabWithURL:[NSString stringWithUTF8String:url.c_str()] inBackground:NO];
+        return true;
+    }
+    void OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, TransitionType transition_type) override {
+        if (frame->IsMain()) CraDevToolsLog(@"OnLoadStart %s", frame->GetURL().ToString().c_str());
+    }
     void OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int httpStatusCode) override {
-        if (!host_ || !frame->IsMain()) return;
+        if (!frame->IsMain()) return;
+        CraDevToolsLog(@"OnLoadEnd %s", frame->GetURL().ToString().c_str());
+        if (host_) Prepare(browser, frame);
+    }
+
+    // Docked mode: make a Chrome-style frontend dockable (one reload), then hook it.
+    // Alloy frontends (can_dock=false, no close button) only get the close button.
+    void Prepare(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame) {
         std::string url = frame->GetURL().ToString();
         if (url.rfind("devtools://", 0) != 0) return;
-        std::string js =
-            "(function(){var h=window.InspectorFrontendHost;if(h){h.closeWindow=function(){console.log('__cra_devtools_close');};}"
-            "function find(root,sel){var r=root.querySelector(sel);if(r)return r;var all=root.querySelectorAll('*');"
-            "for(var i=0;i<all.length;i++){if(all[i].shadowRoot){var f=find(all[i].shadowRoot,sel);if(f)return f;}}return null;}"
-            "function make(){var b=document.createElement('button');b.id='cra-close';b.title='Close DevTools';b.setAttribute('aria-label','Close DevTools');"
-            "b.style.cssText='all:unset;box-sizing:border-box;cursor:pointer;width:26px;height:26px;margin:0 2px;display:inline-flex;align-items:center;justify-content:center;border-radius:4px;color:var(--icon-default,#9aa0a6)';"
-            "b.innerHTML='<svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\"><path d=\"M2 2l10 10M12 2L2 12\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linecap=\"round\" fill=\"none\"/></svg>';"
-            "b.onmouseenter=function(){b.style.background='var(--sys-color-state-hover-on-subtle,rgba(128,128,128,.25))';};"
-            "b.onmouseleave=function(){b.style.background='';};b.onclick=function(){console.log('__cra_devtools_close');};return b;}"
-            "function install(){if(find(document,'#cra-close'))return true;var bar=find(document,'.tabbed-pane-right-toolbar');"
-            "if(!bar||!bar.parentNode)return false;var b=make();b.style.alignSelf='center';b.style.margin='0 4px 0 2px';b.style.order='9999';"
-            "bar.parentNode.appendChild(b);return true;}"
-            "var n=0;var t=setInterval(function(){if(install()){clearInterval(t);return;}if(++n>60){clearInterval(t);"
-            "var b=make();b.style.position='fixed';b.style.top='1px';b.style.right='4px';b.style.zIndex='2147483647';document.body.appendChild(b);}},150);})();";
-        frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+        // Only the main frontend; helper pages it opens (device_mode_emulation_frame.html
+        // when undocked) must not report dock state or page bounds.
+        if (url.find("/devtools_app.html") == std::string::npos && url.find("/inspector.html") == std::string::npos) return;
+        if (browser->GetHost()->HasView() && url.find("can_dock=") == std::string::npos && !reloaded_) {
+            reloaded_ = true;
+            std::string docked = url + (url.find('?') == std::string::npos ? "?" : "&") + "can_dock=true";
+            CraDevToolsLog(@"reloading as dockable: %s", docked.c_str());
+            frame->LoadURL(docked);
+            return;
+        }
+        frame->ExecuteJavaScript(kCraDevToolsHooks, frame->GetURL(), 0);
     }
 
     bool OnConsoleMessage(CefRefPtr<CefBrowser> browser, cef_log_severity_t level, const CefString& message,
                           const CefString& source, int line) override {
-        if (message.ToString() == "__cra_devtools_close") {
+        static const std::string kClose = "__cra_devtools_close";
+        static const std::string kBounds = "__cra_devtools_bounds:";
+        static const std::string kDocked = "__cra_devtools_docked:";
+        std::string m = message.ToString();
+        if (m == kClose) {
             if (CraBrowser* o = owner_) [o closeDevTools];
+            return true;
+        }
+        if (m.rfind(kBounds, 0) == 0) {
+            NSData* data = [[NSString stringWithUTF8String:m.c_str() + kBounds.size()] dataUsingEncoding:NSUTF8StringEncoding];
+            id d = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+            if ([d isKindOfClass:[NSDictionary class]]) {
+                NSRect r = NSMakeRect([d[@"x"] doubleValue], [d[@"y"] doubleValue], [d[@"width"] doubleValue], [d[@"height"] doubleValue]);
+                CraDevToolsLog(@"bounds %@", NSStringFromRect(r));
+                if (CraBrowser* o = owner_) [o.delegate browser:o devToolsPageBounds:r];
+            }
+            return true;
+        }
+        if (m.rfind("__cra_dbg:", 0) == 0) { CraDevToolsLog(@"%s", m.c_str()); return true; }
+        if (m.rfind(kDocked, 0) == 0) {
+            BOOL docked = m.size() > kDocked.size() && m[kDocked.size()] == '1';
+            CraDevToolsLog(@"docked=%d", docked);
+            if (CraBrowser* o = owner_) [o.delegate browser:o devToolsDocked:docked];
             return true;
         }
         return false;
     }
     void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
         g_liveBrowsers++;
+        if (CraBrowser* o = owner_) [o devToolsBrowserCreated:browser];
         NSView* view = (__bridge NSView*)browser->GetHost()->GetWindowHandle();
         if (host_) {
-            // Docked mode: CEF owns a hidden Alloy window; the shell attaches it
-            // as a child window over the dock area. (A child *browser* for
-            // DevTools trips a CHECK in CEF 154, and re-parenting the view is
-            // unsafe because CEF closes `view.window` when DevTools closes.)
-            // Views-hosted (Chrome-style) DevTools are reported by
-            // CraDevToolsWindowDelegate once their window exists.
-            if (browser->GetHost()->HasView()) return;
+            if (browser->GetHost()->HasView()) {
+                // Chrome-style (Views) DevTools: CraDevToolsWindowDelegate reports the
+                // window once it exists. The frontend may already be loaded by now.
+                CefRefPtr<CefFrame> main = browser->GetMainFrame();
+                CraDevToolsLog(@"OnAfterCreated (Views) url=%s loading=%d", main ? main->GetURL().ToString().c_str() : "",
+                               browser->IsLoading());
+                if (main && !browser->IsLoading()) Prepare(browser, main);
+                return;
+            }
+            // Alloy: CEF owns a hidden window; the shell attaches it as a child window
+            // over the dock area. (A child *browser* for DevTools trips a CHECK in CEF
+            // 154, and re-parenting the view is unsafe because CEF closes `view.window`
+            // when DevTools closes.)
             if (CraBrowser* o = owner_) [o.delegate browser:o didCreateDevToolsView:view];
             return;
         }
@@ -251,14 +483,60 @@ public:
     bool DoClose(CefRefPtr<CefBrowser> browser) override { return false; }
     void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
         g_liveBrowsers--;
-        if (CraBrowser* o = owner_) [o.delegate browserDidCloseDevTools:o];
+        CraDevToolsLog(@"OnBeforeClose");
+        if (CraBrowser* o = owner_) { [o devToolsBrowserClosed]; [o.delegate browserDidCloseDevTools:o]; }
         if (g_quitting && g_liveBrowsers <= 0) CefQuitMessageLoop();
     }
 private:
     NSRect frame_;
     __weak CraBrowser* owner_;
     NSView* host_;
+    bool reloaded_ = false;
     IMPLEMENT_REFCOUNTING(DevToolsClient);
+};
+
+// "rgb(r, g, b)" / "rgba(r, g, b, a)" from getComputedStyle as "#RRGGBB"; "" when
+// unparsable or mostly transparent.
+static NSString* HexFromCSSColor(const std::string& css) {
+    int r = 0, g = 0, b = 0; float a = 1;
+    if (sscanf(css.c_str(), "rgba(%d, %d, %d, %f)", &r, &g, &b, &a) == 4 || sscanf(css.c_str(), "rgb(%d, %d, %d)", &r, &g, &b) == 3) {
+        if (a > 0.5f) return [NSString stringWithFormat:@"#%02X%02X%02X", r, g, b];
+    }
+    return @"";
+}
+
+// What the page paints behind its content: the root's background, else the body's
+// (CSS propagates it to the canvas), else the canvas colour of the page's color
+// scheme. Answers through OnConsoleMessage ("__cra_bg:"); installed once per
+// document, re-run on load, after late stylesheets and when the OS appearance flips.
+static const char kBackgroundProbe[] =
+    "(function(){if(!window.__craBg){window.__craBg=function(){try{"
+    "var bg=function(e){var c=e?getComputedStyle(e).backgroundColor:'';return c&&c!=='transparent'&&c!=='rgba(0, 0, 0, 0)'?c:'';};"
+    "var c=bg(document.documentElement)||bg(document.body);"
+    "if(!c){var d=document.createElement('div');d.style.color='Canvas';document.documentElement.appendChild(d);c=getComputedStyle(d).color;d.remove();}"
+    "console.log('__cra_bg:'+c);}catch(e){}};"
+    "matchMedia('(prefers-color-scheme: dark)').addEventListener('change',function(){setTimeout(window.__craBg,50);});"
+    "setTimeout(window.__craBg,1500);}"
+    "window.__craBg();})();";
+
+// MARK: - Content blocking
+
+// Cancels third-party requests to listed ad and tracker domains (CraContentBlocker.h).
+// Runs on the IO thread; stateless, the list and the switch are global atomics.
+class CraContentBlockingHandler : public CefResourceRequestHandler {
+public:
+    ReturnValue OnBeforeResourceLoad(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                                     CefRefPtr<CefRequest> request, CefRefPtr<CefCallback> callback) override {
+        if (!browser || request->GetResourceType() == RT_MAIN_FRAME) return RV_CONTINUE;
+        CefRefPtr<CefFrame> top = browser->GetMainFrame();  // the tab's top-level page
+        if (!top) return RV_CONTINUE;
+        std::string pageHost = cra_blocker::WebHost(top->GetURL().ToString());
+        std::string requestHost = cra_blocker::WebHost(request->GetURL().ToString());
+        return cra_blocker::ShouldBlock(requestHost, pageHost) ? RV_CANCEL : RV_CONTINUE;
+    }
+
+private:
+    IMPLEMENT_REFCOUNTING(CraContentBlockingHandler);
 };
 
 // MARK: - Browser client
@@ -275,7 +553,8 @@ class CraClient : public CefClient,
                   public CefPermissionHandler {
 public:
     CraBrowser* owner() { return owner_; }
-    explicit CraClient(CraBrowser* owner) : owner_(owner) {}
+    explicit CraClient(CraBrowser* owner) : owner_(owner) { CraClientRegistry().insert(static_cast<const void*>(static_cast<CefClient*>(this))); }
+    ~CraClient() override { CraClientRegistry().erase(static_cast<const void*>(static_cast<CefClient*>(this))); }
 
     CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
     CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
@@ -350,9 +629,12 @@ public:
         // Every frame reports Picture in Picture changes (the events don't bubble, hence capture).
         frame->ExecuteJavaScript(
             "(function(){if(window.__craPip)return;window.__craPip=1;"
-            "document.addEventListener('enterpictureinpicture',function(){console.log('__cra_pip:1');},true);"
-            "document.addEventListener('leavepictureinpicture',function(){console.log('__cra_pip:0');},true);"
-            "if(document.pictureInPictureElement)console.log('__cra_pip:1');})();",
+            "var cur=null;function playing(v){console.log('__cra_pip:play'+(v.paused||v.ended?0:1));}"
+            "function watch(v){cur=v;playing(v);v.addEventListener('play',function(){if(cur===v)playing(v);});"
+            "v.addEventListener('pause',function(){if(cur===v)playing(v);});v.addEventListener('ended',function(){if(cur===v)playing(v);});}"
+            "document.addEventListener('enterpictureinpicture',function(e){console.log('__cra_pip:1');watch(e.target);},true);"
+            "document.addEventListener('leavepictureinpicture',function(){cur=null;console.log('__cra_pip:0');},true);"
+            "if(document.pictureInPictureElement){console.log('__cra_pip:1');watch(document.pictureInPictureElement);}})();",
             frame->GetURL(), 0);
         if (!frame->IsMain()) return;
         CraBrowser* o = owner_;
@@ -363,14 +645,14 @@ public:
         frame->ExecuteJavaScript(
             "(function(){function probe(){try{var c='';var ms=document.querySelectorAll('meta[name=\"theme-color\"]');"
             "for(var i=0;i<ms.length;i++){if(!ms[i].getAttribute('media')){c=ms[i].getAttribute('content')||'';if(c)break;}}"
-            "if(!c){c='__none__';}"
-            "if(!c){var b=getComputedStyle(document.body).backgroundColor;if(b&&b!=='rgba(0, 0, 0, 0)'&&b!=='transparent'){c=b;}}"
-            "if(!c){var h=getComputedStyle(document.documentElement).backgroundColor;if(h&&h!=='rgba(0, 0, 0, 0)'){c=h;}}"
-            "if(c==='__none__'){console.log('__cra_theme:none');return;}"
+            "if(!c&&document.body){var b=getComputedStyle(document.body).backgroundColor;if(b&&b!=='rgba(0, 0, 0, 0)'&&b!=='transparent'){c=b;}}"
+            "if(!c){var h=getComputedStyle(document.documentElement).backgroundColor;if(h&&h!=='rgba(0, 0, 0, 0)'&&h!=='transparent'){c=h;}}"
+            "if(!c){c='rgb(255, 255, 255)';}"
             "var d=document.createElement('div');d.style.color=c;document.body.appendChild(d);"
             "var rgb=getComputedStyle(d).color;d.remove();console.log('__cra_theme:'+rgb);}catch(e){}}"
             "probe();setTimeout(probe,1500);})();",
             frame->GetURL(), 0);
+        frame->ExecuteJavaScript(kBackgroundProbe, frame->GetURL(), 0);
     }
 
     bool OnConsoleMessage(CefRefPtr<CefBrowser> browser, cef_log_severity_t level, const CefString& message,
@@ -384,12 +666,26 @@ public:
                 BOOL active = (v == "1");
                 if (o.isInPictureInPicture != active) {
                     o.isInPictureInPicture = active;
+                    if (!active) o.isPictureInPicturePlaying = NO;
                     if ([o.delegate respondsToSelector:@selector(browser:didChangePictureInPicture:)])
                         [o.delegate browser:o didChangePictureInPicture:active];
                 }
+            } else if (v == "play1" || v == "play0") {
+                BOOL playing = (v == "play1");
+                o.isPictureInPicturePlaying = playing;
+                if ([o.delegate respondsToSelector:@selector(browser:didChangePictureInPicturePlayback:)])
+                    [o.delegate browser:o didChangePictureInPicturePlayback:playing];
             } else if (v.compare(0, 3, "err") == 0) {
                 NSLog(@"CraCEF: Picture in Picture %s", v.c_str());
             }
+            return true;
+        }
+        const std::string bgPrefix = "__cra_bg:";
+        if (m.compare(0, bgPrefix.size(), bgPrefix) == 0) {
+            CraBrowser* o = owner_;
+            NSString* hex = HexFromCSSColor(m.substr(bgPrefix.size()));
+            if (o && hex.length && [o.delegate respondsToSelector:@selector(browser:didReportBackgroundColor:)])
+                [o.delegate browser:o didReportBackgroundColor:hex];
             return true;
         }
         const std::string prefix = "__cra_theme:";
@@ -397,12 +693,7 @@ public:
         CraBrowser* o = owner_;
         if (!o) return true;
         std::string rgb = m.substr(prefix.size());  // "rgb(r, g, b)", "rgba(…)" or "none"
-        int r = 0, g = 0, b = 0; float a = 1;
-        NSString* hex = @"";
-        if (rgb == "none") hex = @"none";
-        if (sscanf(rgb.c_str(), "rgba(%d, %d, %d, %f)", &r, &g, &b, &a) == 4 || sscanf(rgb.c_str(), "rgb(%d, %d, %d)", &r, &g, &b) == 3) {
-            if (a > 0.5f) hex = [NSString stringWithFormat:@"#%02X%02X%02X", r, g, b];
-        }
+        NSString* hex = rgb == "none" ? @"none" : HexFromCSSColor(rgb);
         [o.delegate browser:o didReportThemeColor:hex];
         return true;  // keep it out of the console
     }
@@ -470,6 +761,16 @@ public:
     }
 
     // Request -------------------------------------------------------------
+
+    // Content blocking (IO thread). Top-level navigations and downloads always load;
+    // with blocking off no handler is attached at all.
+    CefRefPtr<CefResourceRequestHandler> GetResourceRequestHandler(
+        CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, CefRefPtr<CefRequest> request, bool is_navigation,
+        bool is_download, const CefString& request_initiator, bool& disable_default_handling) override {
+        if (!cra_blocker::Enabled().load(std::memory_order_relaxed) || is_download) return nullptr;
+        if (is_navigation && frame && frame->IsMain()) return nullptr;
+        return blocker_;
+    }
 
     bool OnOpenURLFromTab(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, const CefString& target_url,
                           WindowOpenDisposition target_disposition, bool user_gesture) override {
@@ -651,6 +952,7 @@ public:
 private:
     __weak CraBrowser* owner_;
     std::string last_icon_url_;
+    CefRefPtr<CefResourceRequestHandler> blocker_ = new CraContentBlockingHandler();
     IMPLEMENT_REFCOUNTING(CraClient);
 };
 
@@ -670,6 +972,10 @@ public:
     }
     bool IsFrameless(CefRefPtr<CefWindow> window) override { return true; }
     bool WithStandardWindowButtons(CefRefPtr<CefWindow> window) override { return false; }
+    // Docked, the shell sizes it; a resizable window's edge zone (a few points outside
+    // its frame) would swallow drags meant for the frontend's splitter. Undocking makes
+    // it resizable again (MainWindowController.detachDevToolsWindow).
+    bool CanResize(CefRefPtr<CefWindow> window) override { return false; }
     cef_runtime_style_t GetWindowRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
     CefRect GetInitialBounds(CefRefPtr<CefWindow> window) override { return CefRect(0, 0, 10, 10); }
 private:
@@ -680,14 +986,19 @@ private:
 
 class CraChromeViewDelegate : public CefBrowserViewDelegate {
 public:
-    explicit CraChromeViewDelegate(CraBrowser* owner) : owner_(owner) {}
-    ChromeToolbarType GetChromeToolbarType(CefRefPtr<CefBrowserView> browser_view) override { return CEF_CTT_NONE; }
+    explicit CraChromeViewDelegate(CraBrowser* owner, bool devtools = false) : owner_(owner), devtools_(devtools) {}
+    // Pages carry Chrome's toolbar, hidden (CraChromeWindowDelegate): extension popups need
+    // its extensions container as their anchor, and Extensions.triggerAction crashes without
+    // one. CRA_NO_CHROME_TOOLBAR=1 turns it off (toolbar extension buttons then do nothing).
+    ChromeToolbarType GetChromeToolbarType(CefRefPtr<CefBrowserView> browser_view) override {
+        return devtools_ || getenv("CRA_NO_CHROME_TOOLBAR") ? CEF_CTT_NONE : CEF_CTT_NORMAL;
+    }
     cef_runtime_style_t GetBrowserRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
     CefRefPtr<CefBrowserViewDelegate> GetDelegateForPopupBrowserView(CefRefPtr<CefBrowserView> browser_view,
                                                                      const CefBrowserSettings& settings,
                                                                      CefRefPtr<CefClient> client, bool is_devtools) override {
-        if (is_devtools) return new CraChromeViewDelegate(owner_);
-        CraClient* cc = static_cast<CraClient*>(client.get());
+        if (is_devtools) return new CraChromeViewDelegate(owner_, true);
+        CraClient* cc = AsCraClient(client.get());
         return new CraChromeViewDelegate(cc ? cc->owner() : nil);
     }
     bool OnPopupBrowserViewCreated(CefRefPtr<CefBrowserView> browser_view, CefRefPtr<CefBrowserView> popup_browser_view,
@@ -701,7 +1012,8 @@ public:
             return true;
         }
         CefRefPtr<CefBrowser> b = popup_browser_view->GetBrowser();
-        CraClient* cc = b ? static_cast<CraClient*>(b->GetHost()->GetClient().get()) : nullptr;
+        CraClient* cc = b ? AsCraClient(b->GetHost()->GetClient().get()) : nullptr;
+        if (!cc) CraDevToolsLog(@"popup with a non-page client (url %s): CEF default window", b ? b->GetMainFrame()->GetURL().ToString().c_str() : "");
         CraBrowser* host = cc ? cc->owner() : nil;
         if (!host) return false;
         [host hostPopupBrowserView:popup_browser_view];
@@ -709,6 +1021,7 @@ public:
     }
 private:
     __weak CraBrowser* owner_;
+    bool devtools_;
     IMPLEMENT_REFCOUNTING(CraChromeViewDelegate);
 };
 
@@ -717,12 +1030,16 @@ public:
     CraChromeWindowDelegate(CraBrowser* owner, CefRefPtr<CefBrowserView> view) : owner_(owner), view_(view) {}
     void OnWindowCreated(CefRefPtr<CefWindow> window) override {
         window->AddChildView(view_);
+        if (CefRefPtr<CefView> toolbar = view_->GetChromeToolbar()) toolbar->SetVisible(false);
         window->Show();
         NSView* v = (__bridge NSView*)window->GetWindowHandle();
         if (CraBrowser* o = owner_) [o hostWindowCreated:v.window];
     }
     bool IsFrameless(CefRefPtr<CefWindow> window) override { return true; }
     bool WithStandardWindowButtons(CefRefPtr<CefWindow> window) override { return false; }
+    // The shell sizes page windows; a resizable one grabs drags just outside its edge
+    // (the DevTools splitter, the sidebar edge) and resizes itself instead.
+    bool CanResize(CefRefPtr<CefWindow> window) override { return false; }
     cef_runtime_style_t GetWindowRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
     CefRect GetInitialBounds(CefRefPtr<CefWindow> window) override { return CefRect(0, 0, 10, 10); }
 private:
@@ -731,7 +1048,29 @@ private:
     IMPLEMENT_REFCOUNTING(CraChromeWindowDelegate);
 };
 
+/// Routes DevTools protocol results back to the completion blocks of
+/// -sendDevToolsMethod: (one observer per browser, registered on first use).
+class CraDevToolsObserver : public CefDevToolsMessageObserver {
+   public:
+    NSMutableDictionary<NSNumber*, void (^)(NSString*, NSString*)>* pending = [NSMutableDictionary dictionary];
+    void OnDevToolsMethodResult(CefRefPtr<CefBrowser>, int message_id, bool success, const void* result,
+                                size_t result_size) override {
+        NSString* json = [[NSString alloc] initWithBytes:result length:result_size encoding:NSUTF8StringEncoding] ?: @"";
+        NSNumber* key = @(message_id);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            void (^done)(NSString*, NSString*) = pending[key];
+            [pending removeObjectForKey:key];
+            if (done) success ? done(json, nil) : done(nil, json);
+        });
+    }
+    IMPLEMENT_REFCOUNTING(CraDevToolsObserver);
+};
+
 @implementation CraBrowser {
+    CefRefPtr<CraDevToolsObserver> _cdpObserver;
+    CefRefPtr<CefRegistration> _cdpRegistration;
+    int _cdpNextID;
+    CefRefPtr<CefBrowser> _devToolsBrowser;
     CefRefPtr<CefBrowser> _browser;
     CefRefPtr<CraClient> _client;
     NSString* _pendingURL;
@@ -871,6 +1210,14 @@ private:
 
 - (void)showDevTools { [self showDevToolsInspectingPoint:NSZeroPoint]; }
 - (void)closeDevTools { if (_browser) _browser->GetHost()->CloseDevTools(); }
+- (void)devToolsBrowserCreated:(CefRefPtr<CefBrowser>)browser { _devToolsBrowser = browser; }
+- (void)devToolsBrowserClosed { _devToolsBrowser = nullptr; }
+- (void)executeJavaScript:(NSString*)script inDevTools:(BOOL)inDevTools {
+    if (!inDevTools) { [self executeJavaScript:script]; return; }
+    if (!_devToolsBrowser) return;
+    CefRefPtr<CefFrame> f = _devToolsBrowser->GetMainFrame();
+    if (f) f->ExecuteJavaScript(CefStringFromNS(script), f->GetURL(), 0);
+}
 
 - (double)zoomLevel { return _browser ? _browser->GetHost()->GetZoomLevel() : 0; }
 - (void)setZoomLevel:(double)level { if (_browser) _browser->GetHost()->SetZoomLevel(level); }
@@ -907,14 +1254,41 @@ static NSString* PictureInPictureScript(BOOL automatic, int x, int y) {
         "}catch(e){console.log('__cra_pip:err '+e);}})(%d,%d,%d);", automatic ? 1 : 0, x, y];
 }
 
+// Chromium's own NSView for the page (RenderWidgetHostViewCocoa), the one
+// AppKit hands real key presses to. CefBrowserHost::SendKeyEvent does not
+// reach the page in Chrome-style hosting, so the nudge goes straight to it.
+static NSView* FindRenderWidgetHostView(NSView* root) {
+    if (!root) return nil;
+    if ([NSStringFromClass([root class]) hasPrefix:@"RenderWidgetHostViewCocoa"]) return root;
+    for (NSView* v in root.subviews) {
+        if (NSView* found = FindRenderWidgetHostView(v)) return found;
+    }
+    return nil;
+}
+
 - (void)nudgeUserActivation {
     if (!_browser) return;
+    NSView* root = self.hostWindow ? self.hostWindow.contentView : _containerView;
+    NSView* target = FindRenderWidgetHostView(root);
+    if (target) {
+        NSTimeInterval now = [NSProcessInfo processInfo].systemUptime;
+        NSInteger win = target.window.windowNumber;
+        NSEvent* down = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:now
+                                      windowNumber:win context:nil characters:@"\uF716" charactersIgnoringModifiers:@"\uF716"
+                                         isARepeat:NO keyCode:0x50];
+        NSEvent* up = [NSEvent keyEventWithType:NSEventTypeKeyUp location:NSZeroPoint modifierFlags:0 timestamp:now + 0.01
+                                    windowNumber:win context:nil characters:@"\uF716" charactersIgnoringModifiers:@"\uF716"
+                                       isARepeat:NO keyCode:0x50];
+        [target keyDown:down];
+        [target keyUp:up];
+        return;
+    }
     CefKeyEvent key;
     key.windows_key_code = 0x82;  // VK_F19
     key.native_key_code = 0x50;   // kVK_F19
     key.modifiers = 0;
-    key.character = 0;
-    key.unmodified_character = 0;
+    key.character = 0xF716;
+    key.unmodified_character = 0xF716;
     key.is_system_key = 0;
     key.type = KEYEVENT_RAWKEYDOWN;
     _browser->GetHost()->SendKeyEvent(key);
@@ -950,6 +1324,31 @@ static NSString* PictureInPictureScript(BOOL automatic, int x, int y) {
     [self requestPictureInPictureInFrame:nullptr automatic:automatic x:-1 y:-1];
 }
 
+- (void)skipPictureInPictureBy:(double)seconds {
+    if (!_browser) return;
+    NSString* js = [NSString stringWithFormat:@"(function(){var v=document.pictureInPictureElement;if(!v)return;"
+                    "var t=v.currentTime+(%f);if(isFinite(v.duration))t=Math.min(t,v.duration);v.currentTime=Math.max(0,t);})();", seconds];
+    std::vector<CefString> ids;
+    _browser->GetFrameIdentifiers(ids);
+    for (const auto& id : ids) {
+        CefRefPtr<CefFrame> f = _browser->GetFrameByIdentifier(id);
+        if (f && f->IsValid()) f->ExecuteJavaScript(CefStringFromNS(js), f->GetURL(), 0);
+    }
+}
+
+- (void)togglePictureInPicturePlayback {
+    if (!_browser) return;
+    std::vector<CefString> ids;
+    _browser->GetFrameIdentifiers(ids);
+    for (const auto& id : ids) {
+        CefRefPtr<CefFrame> f = _browser->GetFrameByIdentifier(id);
+        if (f && f->IsValid()) {
+            f->ExecuteJavaScript("(function(){var v=document.pictureInPictureElement;if(!v)return;"
+                                 "if(v.paused||v.ended){v.play().catch(function(){});}else{v.pause();}})();", f->GetURL(), 0);
+        }
+    }
+}
+
 - (void)exitPictureInPicture {
     if (!_browser) return;
     std::vector<CefString> ids;
@@ -966,6 +1365,27 @@ static NSString* PictureInPictureScript(BOOL automatic, int x, int y) {
 - (void)viewSource { if (_browser) _browser->GetMainFrame()->ViewSource(); }
 - (void)executeJavaScript:(NSString*)script {
     if (_browser) _browser->GetMainFrame()->ExecuteJavaScript(CefStringFromNS(script), _browser->GetMainFrame()->GetURL(), 0);
+}
+- (void)probeBackgroundColor {
+    if (_browser) _browser->GetMainFrame()->ExecuteJavaScript(kBackgroundProbe, _browser->GetMainFrame()->GetURL(), 0);
+}
+- (void)sendDevToolsMethod:(NSString*)method params:(NSString*)params
+                completion:(void (^)(NSString* _Nullable, NSString* _Nullable))completion {
+    if (!_browser) { completion(nil, @"no browser"); return; }
+    if (!_cdpObserver) {
+        _cdpObserver = new CraDevToolsObserver();
+        _cdpRegistration = _browser->GetHost()->AddDevToolsMessageObserver(_cdpObserver);
+    }
+    int messageID = ++_cdpNextID + 100000;  // clear of ids Chromium's own clients use
+    _cdpObserver->pending[@(messageID)] = [completion copy];
+    // Method names are plain identifiers ("Domain.method"), so no escaping is needed.
+    NSString* message = [NSString stringWithFormat:@"{\"id\":%d,\"method\":\"%@\",\"params\":%@}", messageID, method,
+                         params.length ? params : @"{}"];
+    NSData* data = [message dataUsingEncoding:NSUTF8StringEncoding];
+    if (!_browser->GetHost()->SendDevToolsMessage(data.bytes, data.length)) {
+        [_cdpObserver->pending removeObjectForKey:@(messageID)];
+        completion(nil, @"SendDevToolsMessage failed");
+    }
 }
 - (void)notifyMoveOrResizeStarted { if (_browser) _browser->GetHost()->NotifyMoveOrResizeStarted(); }
 
@@ -1013,10 +1433,62 @@ private:
     IMPLEMENT_REFCOUNTING(SpikeWindowDelegate);
 };
 
+// Chrome's crash recovery: when the previous run did not quit cleanly (killed,
+// crashed), the profile is left with profile.exit_type = "Crashed" and the
+// Chrome runtime restores the last session (Default/Sessions) into a stock
+// Chrome window (title bar, location bar) the moment the first browser is
+// created. Cra restores its own tabs, so the saved session is dropped and the
+// profile marked clean before Chromium reads it.
+static void MarkProfileExitedCleanly(NSString* cachePath) {
+    NSString* sessions = [cachePath stringByAppendingPathComponent:@"Default/Sessions"];
+    [[NSFileManager defaultManager] removeItemAtPath:sessions error:nil];
+    NSString* prefs = [cachePath stringByAppendingPathComponent:@"Default/Preferences"];
+    NSData* data = [NSData dataWithContentsOfFile:prefs];
+    if (!data) return;
+    NSError* error = nil;
+    id root = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:&error];
+    if (![root isKindOfClass:[NSMutableDictionary class]]) return;
+    NSMutableDictionary* profile = root[@"profile"];
+    if (![profile isKindOfClass:[NSMutableDictionary class]]) return;
+    if ([profile[@"exit_type"] isEqual:@"Normal"] && [profile[@"exited_cleanly"] boolValue]) return;
+    profile[@"exit_type"] = @"Normal";
+    profile[@"exited_cleanly"] = @YES;
+    NSData* out = [NSJSONSerialization dataWithJSONObject:root options:0 error:&error];
+    if (out) [out writeToFile:prefs atomically:YES];
+}
+
 @implementation CraCEFRuntime
 
 + (void)setChromeHosting:(BOOL)enabled { g_chromeHosting = enabled; }
 + (BOOL)chromeHosting { return g_chromeHosting; }
+
++ (void)setContentBlockingEnabled:(BOOL)enabled { cra_blocker::Enabled().store(enabled); }
++ (BOOL)contentBlockingEnabled { return cra_blocker::Enabled().load(); }
++ (void)setBlockedDomains:(NSArray<NSString*>*)domains {
+    auto* set = new cra_blocker::DomainSet();
+    set->reserve(domains.count);
+    for (NSString* d in domains) cra_blocker::AddListLine(*set, d.UTF8String ?: "");
+    cra_blocker::Publish(set);
+}
++ (void)loadBlockedDomainsFromFile:(NSString*)path completion:(void (^)(NSInteger))completion {
+    void (^done)(NSInteger) = [completion copy];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSData* data = [NSData dataWithContentsOfFile:path];
+        NSInteger count = 0;
+        if (data.length) {
+            cra_blocker::DomainSet* set =
+                cra_blocker::ParseList(std::string_view(static_cast<const char*>(data.bytes), data.length));
+            count = (NSInteger)set->size();
+            cra_blocker::Publish(set);
+        }
+        if (done) dispatch_async(dispatch_get_main_queue(), ^{ done(count); });
+    });
+}
++ (NSInteger)blockedDomainCount { return (NSInteger)cra_blocker::Count(); }
++ (BOOL)shouldBlockRequestURL:(NSString*)requestURL onPageURL:(NSString*)pageURL {
+    return cra_blocker::ShouldBlock(cra_blocker::WebHost(requestURL.UTF8String ?: ""),
+                                    cra_blocker::WebHost(pageURL.UTF8String ?: ""));
+}
 
 + (void)spikeChromeWindowWithURL:(NSString*)url handler:(void (^)(NSWindow*))handler {
     g_spikeWindowHandler = [handler copy];
@@ -1051,6 +1523,7 @@ private:
     settings.log_severity = LOGSEVERITY_WARNING;
     settings.background_color = CefColorSetARGB(255, 255, 255, 255);
 
+    MarkProfileExitedCleanly(cachePath);
     CefRefPtr<CraApp> app(new CraApp());
     if (!CefInitialize(mainArgs, settings, app.get(), nullptr)) {
         int code = CefGetExitCode();
@@ -1063,6 +1536,7 @@ private:
 
 + (BOOL)anotherInstanceWasNotified { return g_alreadyRunning; }
 + (void)setRelaunchHandler:(void (^)(NSArray<NSString*>*))handler { g_relaunchHandler = [handler copy]; }
++ (void)setStrayPageHandler:(void (^)(NSString*))handler { g_strayPageHandler = [handler copy]; }
 
 + (void)runMessageLoop { CefRunMessageLoop(); }
 + (void)quitMessageLoop { CefQuitMessageLoop(); }
@@ -1084,6 +1558,31 @@ private:
             CHROME_VERSION_BUILD, CHROME_VERSION_PATCH];
 }
 + (NSString*)cefVersion { return @CEF_VERSION; }
++ (BOOL)hasBrowserDevTools { return g_cdpWriteFD >= 0; }
++ (void)setBrowserDevToolsEventHandler:(void (^)(NSString*, NSString*, NSString* _Nullable))handler {
+    g_cdpEventHandler = [handler copy];
+}
++ (void)sendBrowserDevToolsMethod:(NSString*)method params:(NSString*)params
+                       completion:(void (^)(NSString* _Nullable, NSString* _Nullable))completion {
+    [self sendBrowserDevToolsMethod:method params:params sessionID:nil completion:completion];
+}
++ (void)sendBrowserDevToolsMethod:(NSString*)method params:(NSString*)params sessionID:(NSString*)sessionID
+                       completion:(void (^)(NSString* _Nullable, NSString* _Nullable))completion {
+    if (g_cdpWriteFD < 0) { completion(nil, @"no DevTools pipe"); return; }
+    int messageID = ++g_cdpNextID;
+    g_cdpPending[@(messageID)] = [completion copy];
+    NSString* session = sessionID.length ? [NSString stringWithFormat:@",\"sessionId\":\"%@\"", sessionID] : @"";
+    NSString* message = [NSString stringWithFormat:@"{\"id\":%d,\"method\":\"%@\",\"params\":%@%@}", messageID, method,
+                         params.length ? params : @"{}", session];
+    NSMutableData* data = [[message dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    [data appendBytes:"" length:1];
+    const char* bytes = (const char*)data.bytes;
+    for (size_t sent = 0; sent < data.length;) {
+        ssize_t n = write(g_cdpWriteFD, bytes + sent, data.length - sent);
+        if (n <= 0) { [g_cdpPending removeObjectForKey:@(messageID)]; completion(nil, @"pipe write failed"); return; }
+        sent += (size_t)n;
+    }
+}
 
 @end
 

@@ -7,18 +7,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     let store = SidebarStore()
     let bindings = KeyBindingRegistry()
     let favicons = FaviconCache()
-    let account = AccountStore()
     lazy var engine = SuggestionEngine(store: store, bindings: bindings)
 
     private(set) var main: MainWindowController!
     private var bootstrapped = false
     private var pendingURLs: [String] = []
     private var autoArchiveTimer: Timer?
-    private var backupTimer: Timer?
     private var settingsWindow: NSWindow?
+    private var settingsController: SettingsWindowController?
+    private var isRelaunching = false
     private var archiveWindow: NSWindow?
-    private var accountWindow: NSWindow?
-    private var lastPushedSettings: AppSettings?
+    private lazy var extensionsMenu = ExtensionsMenu(app: self)
     /// Arc's Little Arc windows: small, sidebar-less, disposable (see LittleWindowController).
     private(set) var littleWindows: [LittleWindowController] = []
 
@@ -28,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         "newTab", "newWindow", "closeTab", "closeWindow", "reopenClosedTab", "editURL", "toggleSidebar", "toggleToolbar",
         "nextTab", "previousTab", "recentTab", "nextSpace", "previousSpace", "devTools", "jsConsole", "inspectElement",
         "viewArchive", "openLibrary", "settings", "clearToday", "newLittleWindow", "promoteLittleWindow",
+        "addSplitView", "closeSplitPane",
     ] + (1...9).flatMap { ["item\($0)", "space\($0)"] })
 
     // MARK: Lifecycle
@@ -40,72 +40,112 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         NSApp.setActivationPolicy(.regular)
         installURLEventHandler()
         CraCEFRuntime.setChromeHosting(store.settings.chromeEngine)
+        startContentBlocking()
         buildMenus()
         NotificationCenter.default.addObserver(forName: .craKeyBindingsChanged, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.buildMenus() }
         }
         main = MainWindowController(app: self)
-        main.showWindow(nil)
+        // First launch: the default browser step and the import are the onboarding and
+        // the browser window appears once they are done (Dia does the same).
+        if needsOnboarding { main.showImport(firstRun: true) } else { main.showWindow(nil) }
+        installKeyFallbackMonitor()
+        installCommandFileWatcher()
         store.runAutoArchive()
         autoArchiveTimer = Timer.scheduledTimer(withTimeInterval: 1800, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.store.runAutoArchive() }
         }
-        backupTimer = Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.backupIfSignedIn() }
-        }
         NSApp.activate(ignoringOtherApps: true)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.installURLEventHandler() }
+        // Extension welcome pages and chrome.tabs.create land in Cra, not in a Chrome window.
+        // --load-extension extensions count as freshly installed on every launch, so their
+        // onInstalled welcome pages come back each time: right after launch, drop them unless
+        // an extension is new since the last launch (then open each page once).
+        let launchedAt = Date()
+        let welcomedFile = AppPaths.file("extensions-welcomed.json")
+        let welcomed = Set((try? JSONDecoder().decode([String].self, from: Data(contentsOf: welcomedFile))) ?? [])
+        let installed = ExtensionStore.shared.entries.map(\.extensionID)
+        let hasNewExtension = !Set(installed).isSubset(of: welcomed)
+        try? JSONEncoder().encode(installed.sorted()).write(to: welcomedFile, options: .atomic)
+        CraCEFRuntime.setStrayPageHandler { [weak self] url in
+            Task { @MainActor in
+                guard let self else { return }
+                if Date().timeIntervalSince(launchedAt) < 10,
+                   !hasNewExtension || self.store.allTabs().contains(where: { $0.tab?.url == url }) {
+                    NSLog("Cra: dropped start-up page from an extension: %@", url)
+                    return
+                }
+                self.store.createTab(url: url, select: true)
+                self.main.showWindow(nil)
+            }
+        }
         CraCEFRuntime.setRelaunchHandler { [weak self] urls in
             Task { @MainActor in
                 guard let self else { return }
-                self.main.showWindow(nil)
-                NSApp.activate(ignoringOtherApps: true)
+                // Each URL decides what to raise: a Little Window keeps the main
+                // window where it is (Arc), cra://action/… keeps the key window.
+                if urls.isEmpty { self.main.showWindow(nil); NSApp.activate(ignoringOtherApps: true) }
                 for u in urls { self.openExternalURL(u) }
             }
         }
         let urls = pendingURLs
         pendingURLs = []
         for u in urls { openExternalURL(u) }
-
-        Task { await account.restore(); await pullSettingsIfNewer() }
-        observeSettingsForSync()
-        maybeOfferImport()
     }
 
-    private func maybeOfferImport() {
-        guard !store.settings.hasSeenImportPrompt, ArcImporter.isAvailable || DiaImporter.isAvailable, store.allTabs().count <= 2 else { return }
-        store.settings.hasSeenImportPrompt = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.main.showImport() }
+    /// A fresh install runs Dia's onboarding (cover, default browser, privacy,
+    /// import, pinned tabs, personalization, outro).
+    private var needsOnboarding: Bool {
+        !store.settings.hasSeenImportPrompt && store.allTabs().count <= 2
     }
 
-    private func observeSettingsForSync() {
-        withObservationTracking {
-            _ = store.settings
+    /// End of the import flow. Onboarding counts as done only here, so quitting halfway
+    /// shows it again on the next launch.
+    func importFinished(_ outcome: ImportOutcome, firstRun: Bool) {
+        if firstRun { store.settings.hasSeenImportPrompt = true }
+        if let id = outcome.focusSpaceID { store.focusSpace(id) }
+        // Chromium reads --load-extension only at start-up, and imported passwords
+        // and cookies go into its databases before it starts (CredentialImport).
+        if outcome.needsRelaunch { relaunch(); return }
+        main.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Saves, quits and starts again once this process is gone (the CEF profile is
+    /// single-instance). A CRA_DATA_DIR instance is re-executed directly so it keeps
+    /// its environment; an installed one goes through LaunchServices.
+    func relaunch() {
+        store.saveAll()
+        let custom = ProcessInfo.processInfo.environment["CRA_DATA_DIR"] != nil
+        let target = custom ? (Bundle.main.executablePath ?? "") : Bundle.main.bundlePath
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; sleep 0.3; " + (custom ? "exec \"$2\"" : "exec /usr/bin/open \"$2\""),
+                       "cra-relaunch", String(ProcessInfo.processInfo.processIdentifier), target]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { main.showWindow(nil); return }
+        isRelaunching = true
+        NSApp.terminate(nil)
+    }
+
+    /// Third-party ad and tracker blocking (Settings > Privacy, Dia's onboarding
+    /// checkbox). The bundled list (resources/blocklist) is parsed off the main thread;
+    /// the switch follows the setting live, no restart.
+    private func startContentBlocking() {
+        if let path = Bundle.main.path(forResource: "domains", ofType: "txt", inDirectory: "blocklist") {
+            CraCEFRuntime.loadBlockedDomains(fromFile: path, completion: nil)
+        }
+        observeContentBlocking()
+    }
+
+    private func observeContentBlocking() {
+        let enabled = withObservationTracking {
+            store.settings.blockAdsAndTrackers
         } onChange: { [weak self] in
-            Task { @MainActor in
-                guard let self else { return }
-                if self.account.isSignedIn, self.lastPushedSettings != self.store.settings {
-                    self.lastPushedSettings = self.store.settings
-                    self.account.pushSettings(self.store.settings)
-                }
-                self.observeSettingsForSync()
-            }
+            Task { @MainActor in self?.observeContentBlocking() }
         }
-    }
-
-    private func pullSettingsIfNewer() async {
-        guard account.isSignedIn, let remote = await account.pullSettings() else { return }
-        var merged = remote
-        merged.hasSeenImportPrompt = store.settings.hasSeenImportPrompt || remote.hasSeenImportPrompt
-        if merged != store.settings {
-            lastPushedSettings = merged
-            store.settings = merged
-        }
-    }
-
-    private func backupIfSignedIn() async {
-        guard account.isSignedIn else { return }
-        await account.backupSidebar(store.document, tabCount: store.allTabs().count)
+        CraCEFRuntime.setContentBlockingEnabled(enabled)
     }
 
     private func installURLEventHandler() {
@@ -127,11 +167,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if main?.raiseImport() == true { return true }
         main?.showWindow(nil)
         return true
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Dia: Advanced ▸ "Warn before quitting". Engine relaunches skip it.
+        if store.settings.warnBeforeQuitting, !isRelaunching, !confirmQuit() { return .terminateCancel }
         // Little Windows are not in the sidebar; keep their pages in the Library.
         for w in littleWindows { w.archivePage() }
         store.saveAll()
@@ -139,6 +182,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     func applicationWillShutdown() { store.saveAll() }
+
+    private func confirmQuit() -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Quit Cra?"
+        alert.informativeText = "All windows and tabs will close. They come back when Cra starts again."
+        alert.addButton(withTitle: "Quit")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
 
     func openExternalURL(_ url: String) {
         if let u = URL(string: url), u.scheme == "cra" {
@@ -160,8 +212,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// The little window that owns the key window (the window itself, or its
     /// Chrome-style page window, which is a child).
     var keyLittleWindow: LittleWindowController? {
-        guard let key = NSApp.keyWindow else { return nil }
-        return littleWindows.first { $0.window === key || $0.window === key.parent }
+        if let key = NSApp.keyWindow {
+            return littleWindows.first { $0.window === key || $0.window === key.parent }
+        }
+        // No key window while the app is inactive (e.g. during a cra:// handoff from a
+        // second launch): the frontmost window stands in for it.
+        guard let front = NSApp.orderedWindows.first(where: { $0.isVisible && !($0 is NSPanel) }) else { return nil }
+        return littleWindows.first { $0.window === front || $0.window === front.parent }
     }
 
     /// Creates a little window without showing it (`url` nil = popup host).
@@ -183,11 +240,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     func closeLittleWindows() {
-        for w in littleWindows { w.window?.performClose(nil) }
+        for w in littleWindows { w.closeWindow() }
     }
 
     /// cra://commandbar?query=…&mode=edit, cra://action/<id>, cra://open?url=…,
-    /// cra://dismiss, cra://auth-callback?data=… (Google sign-in return).
+    /// cra://dismiss.
     /// Arc marks a tab chosen from the keyboard with its yellow/black focus ring.
     private func markKeyboardFocus() { main.sidebarUI.keyboardFocusID = store.selectedTabID }
 
@@ -205,6 +262,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if let text = q("query") { main.commandBar.setQuery(text) }
         case "action":
             perform(String(u.path.dropFirst()))
+        case "navigate":
+            // Load a URL in the focused tab / split pane (scripting).
+            if let url = q("url") { main.loadInSelectedTab(url) }
         case "open":
             if let url = q("url"), q("little") == "1" {
                 openLittleWindow(url: url)
@@ -223,7 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             let codes: [String: UInt16] = ["a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9, "b": 11, "q": 12, "w": 13,
                                            "e": 14, "r": 15, "y": 16, "t": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "=": 24, "9": 25,
                                            "7": 26, "-": 27, "8": 28, "0": 29, "]": 30, "o": 31, "u": 32, "[": 33, "i": 34, "p": 35, "l": 37, "j": 38,
-                                           "k": 40, ";": 41, ",": 43, "/": 44, "n": 45, "m": 46, ".": 47, "\t": 48]
+                                           "k": 40, ";": 41, ",": 43, "/": 44, "n": 45, "m": 46, ".": 47, "\t": 48, "\r": 36, "\u{1b}": 53]
             let code = codes[chars] ?? 0
             window.makeKeyAndOrderFront(nil)
             for type in [NSEvent.EventType.keyDown, .keyUp] {
@@ -244,6 +304,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case "debug":
             var dict: [String: String] = [:]
             for item in comps?.queryItems ?? [] { if let v = item.value { dict[item.name] = v } }
+            if let js = dict["devtoolsjs"] { main.debugRunInDevTools(js) }
+            if let id = dict["extensionAction"] { main.runExtensionAction(id); return }
+            if let method = dict["bcdp"] {
+                CraCEFRuntime.sendBrowserDevToolsMethod(method, params: dict["params"] ?? "{}") { result, error in
+                    NSLog("Cra bcdp %@ → %@", method, result ?? "error: \(error ?? "?")")
+                }
+                return
+            }
+            if let method = dict["cdp"] {
+                main.currentBrowser?.sendDevToolsMethod(method, params: dict["params"] ?? "{}") { result, error in
+                    NSLog("Cra cdp %@ → %@", method, result ?? "error: \(error ?? "?")")
+                }
+                return
+            }
             if let spikeURL = dict["chromeSpike"] {
                 CraCEFRuntime.spikeChromeWindow(withURL: spikeURL) { [weak self] w in
                     guard let self, let host = self.main.window else { return }
@@ -253,7 +327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     w.isMovable = false
                     w.hasShadow = false
                     host.addChildWindow(w, ordered: .above)
-                    let rect = self.main.shell.contentContainer.convert(self.main.shell.webContainer.frame, to: nil)
+                    let rect = self.main.shell.webContainer.convert(self.main.shell.webContainer.bounds, to: nil)
                     w.setFrame(host.convertToScreen(rect), display: true)
                     w.orderFront(nil)
                 }
@@ -261,12 +335,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
             if dict["windows"] != nil {
                 for w in NSApp.windows {
-                    NSLog("Cra windows: %@ '%@' frame=%@ parent=%@ visible=%d key=%d mask=%lu class=%@ children=%d",
-                          String(describing: w.windowController.map { type(of: $0) } ?? nil as AnyClass?), w.title, NSStringFromRect(w.frame),
-                          w.parent.map { NSStringFromRect($0.frame) } ?? "-", w.isVisible ? 1 : 0, w.isKeyWindow ? 1 : 0, w.styleMask.rawValue,
-                          NSStringFromClass(type(of: w)), w.childWindows?.count ?? 0)
+                    let line = "Cra windows: \(w.windowController.map { String(describing: type(of: $0)) } ?? "-") '\(w.title)' frame=\(NSStringFromRect(w.frame)) parent=\(w.parent.map { NSStringFromRect($0.frame) } ?? "-") visible=\(w.isVisible) key=\(w.isKeyWindow) mask=\(w.styleMask.rawValue) class=\(NSStringFromClass(type(of: w))) children=\(w.childWindows?.count ?? 0) contentView=\(w.contentView.map { NSStringFromClass(type(of: $0)) } ?? "-")"
+                    NSLog("%@", line)
                 }
-                NSLog("Cra windows: little=%d tabs=%d runtimes=%d", littleWindows.count, store.allTabs().count, main.browsers.runtimes.count)
+                let summary = "Cra windows: little=\(littleWindows.count) tabs=\(store.allTabs().count) runtimes=\(main.browsers.runtimes.count) hosts=\(main.browsers.runtimes.values.map { $0.browser.hostWindow.map { NSStringFromRect($0.frame) } ?? "nil" })"
+                NSLog("%@", summary)
                 return
             }
             CraTuning.shared.apply(dict)
@@ -282,16 +355,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             main.dismissTransientUI()
             settingsWindow?.close()
             archiveWindow?.close()
-            accountWindow?.close()
-        case "auth-callback":
-            if account.handleAuthCallback(u) {
-                // Close the Google consent tab, if it is still around.
-                for t in store.allTabs() where (t.tab?.url ?? "").contains("/google-callback") || (t.tab?.url ?? "").contains("accounts.google.com") {
-                    store.archiveTab(t.id, reason: .manual)
-                }
-                Task { await pullSettingsIfNewer(); await account.refreshBackups() }
-                showAccountWindow()
-            }
         default:
             break
         }
@@ -312,14 +375,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             let on = store.selectedTab?.tab.map { store.settings.isDeveloperMode(url: $0.url) } ?? false
             item.title = on ? "Turn off Developer Mode for this Site" : "Turn on Developer Mode for this Site"
         case "pinTab": item.title = store.selectedTabID.map { store.isPinned($0) ? "Unpin Tab" : "Pin Tab" } ?? "Pin/Unpin Tab"
-        case "signIn": item.title = account.isSignedIn ? "Account…" : "Sign In…"
+        case "setDefaultBrowser":
+            SystemIntegration.shared.refresh()
+            return !SystemIntegration.shared.isDefaultBrowser
         case "pictureInPicture":
             item.title = main.currentBrowser?.isInPictureInPicture == true ? "Exit Picture in Picture" : "Picture in Picture"
         case "promoteLittleWindow": return keyLittleWindow?.hasPage ?? false
+        case "closeSplitPane", "separateFromSplit", "flipSplitOrientation":
+            return store.selectedTabID.flatMap { store.splitContaining($0) } != nil
+        case "addSplitView": return store.selectedTabID != nil
         case "closeLittleWindows": return !littleWindows.isEmpty
         default: break
         }
         return true
+    }
+
+    /// Testing aid: with CRA_COMMAND_FILE set, every line appended to that file
+    /// is handled like a cra:// URL (a second instance run with CRA_DATA_DIR
+    /// cannot receive cra:// URLs, which LaunchServices routes to the installed app).
+    private var commandFileOffset: UInt64 = 0
+    private var commandFileTimer: Timer?
+    private func installCommandFileWatcher() {
+        guard let path = ProcessInfo.processInfo.environment["CRA_COMMAND_FILE"], !path.isEmpty else { return }
+        FileManager.default.createFile(atPath: path, contents: nil)
+        commandFileOffset = (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? UInt64) ?? 0
+        commandFileTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, let h = FileHandle(forReadingAtPath: path) else { return }
+                defer { try? h.close() }
+                let size = (try? h.seekToEnd()) ?? 0
+                guard size > self.commandFileOffset else { return }
+                try? h.seek(toOffset: self.commandFileOffset)
+                let data = h.readDataToEndOfFile()
+                self.commandFileOffset = size
+                for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
+                    if let u = URL(string: line.trimmingCharacters(in: .whitespaces)) { self.handleInternalURL(u) }
+                }
+            }
+        }
+    }
+
+    /// Menu key equivalents match characters, so ⌃⇧= and friends fail on
+    /// layouts where "=" lives on another key (Danish: ⇧0). When the key
+    /// window is one of ours (sidebar focused, no page), fall back to the
+    /// physical-key matching in `Shortcut` for ⌘/⌃ shortcuts the menus missed.
+    private var keyFallbackMonitor: Any?
+    private func installKeyFallbackMonitor() {
+        guard keyFallbackMonitor == nil else { return }
+        keyFallbackMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            // Esc drops a ⌘/⇧-click tab selection before anything else sees it.
+            if event.keyCode == 53, let ui = self?.main.sidebarUI, !ui.multiSelection.isEmpty {
+                ui.clearPicks()
+                return nil
+            }
+            guard let self, event.modifierFlags.intersection([.command, .control]).isEmpty == false,
+                  let window = event.window, window.windowController is MainWindowController || window === self.main.window,
+                  let action = self.bindings.action(for: event) else { return event }
+            // Let the menu bar take it first (normal path); only act when it cannot.
+            if NSApp.mainMenu?.performKeyEquivalent(with: event) == true { return nil }
+            self.perform(action.id)
+            return nil
+        }
     }
 
     /// Reserved shortcuts (CEF OnPreKeyEvent).
@@ -360,9 +476,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case "closeWindow": main.window?.performClose(nil)
         case "reopenClosedTab": store.reopenLastArchived()
         case "copyURL":
-            if let url = current.flatMap({ store.item($0)?.tab?.url }) { copy(url) }
+            if let url = current.flatMap({ store.item($0)?.tab?.url }) {
+                copy(url)
+                main.sidebarUI.flashStatus("Copied Current URL", symbol: "link")
+            }
         case "copyURLMarkdown":
-            if let c = current, let it = store.item(c), let url = it.tab?.url { copy("[\(it.displayTitle)](\(url))") }
+            if let c = current, let it = store.item(c), let url = it.tab?.url {
+                copy("[\(it.displayTitle)](\(url))")
+                main.sidebarUI.flashStatus("Copied URL as Markdown", symbol: "link")
+            }
         case "print": main.currentBrowser?.print()
         case "capturePage": main.capturePage()
         case "find": main.showFindBar()
@@ -399,15 +521,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 main.browsers.runtime(for: c)?.browser.setAudioMuted(!t.muted)
             }
         case "clearToday": store.clearToday()
-        case "pictureInPicture": main.currentBrowser?.requestPictureInPictureAutomatic(false)
+        case "pictureInPicture": main.currentBrowser?.requestPictureInPicture(automatic: false)
         case "nextTab": main.cycleTab(1); markKeyboardFocus()
         case "previousTab": main.cycleTab(-1); markKeyboardFocus()
         case "recentTab": if let id = store.mostRecentOtherTab() { store.selectTab(id); markKeyboardFocus() }
         case "nextSpace": store.focusSpace(offset: 1)
         case "previousSpace": store.focusSpace(offset: -1)
+        case "addSplitView": main.addSplitPane()
+        case "closeSplitPane": if let c = current { main.closeSplitPane(c) }
+        case "separateFromSplit": if let c = current { main.separatePane(c) }
+        case "flipSplitOrientation": if let c = current, let s = store.splitContaining(c) { store.flipSplitOrientation(s.id) }
+        case "nextSplitPane": main.cycleSplitPane(1)
+        case "previousSplitPane": main.cycleSplitPane(-1)
         case "settings": showSettingsWindow()
-        case "signIn": showAccountWindow()
         case "importData": main.showImport()
+        case "setDefaultBrowser": Task { await SystemIntegration.shared.makeDefaultBrowser() }
         default:
             if id.hasPrefix("item"), let n = Int(id.dropFirst(4)) {
                 let tabs = store.visibleTabs(in: store.focusedSpaceID)
@@ -439,45 +567,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if a.runModal() == .alertFirstButtonReturn { store.deleteSpace(space.id) }
     }
 
-    func startGoogleSignIn() {
-        Task {
-            guard let url = await account.googleSignInURL() else {
-                account.lastError = "Google sign-in is not configured on the server."
-                return
-            }
-            store.createTab(url: url.absoluteString, select: true)
-            main.showWindow(nil)
-        }
-    }
-
     // MARK: Windows
 
     func showSettingsWindow() {
-        if settingsWindow == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 640), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            w.title = "Settings"
-            w.contentView = NSHostingView(rootView: SettingsView(onImport: { [weak self] in self?.main.showImport() }, onOpenURL: { [weak self] url in guard let self else { return }; _ = self.store.createTab(url: url, select: true); self.settingsWindow?.close() },
-                                                                onAccount: { [weak self] in self?.showAccountWindow() })
-                .environment(store).environment(bindings).environment(account))
-            w.isReleasedWhenClosed = false
-            w.center()
-            settingsWindow = w
+        if settingsController == nil {
+            let actions = SettingsActions(
+                importData: { [weak self] in self?.main.showImport() },
+                openURL: { [weak self] url in guard let self else { return }; _ = self.store.createTab(url: url, select: true); self.settingsWindow?.close() })
+            let c = SettingsWindowController(store: store, bindings: bindings, actions: actions)
+            settingsController = c
+            settingsWindow = c.window
         }
         settingsWindow?.makeKeyAndOrderFront(nil)
-    }
-
-    func showAccountWindow() {
-        if accountWindow == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 360), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            w.title = "Cra Account"
-            w.contentView = NSHostingView(rootView: AccountView(onGoogle: { [weak self] in self?.startGoogleSignIn() },
-                                                               onRestore: { [weak self] doc in self?.store.replaceDocument(doc) })
-                .environment(account).environment(store))
-            w.isReleasedWhenClosed = false
-            w.center()
-            accountWindow = w
-        }
-        accountWindow?.makeKeyAndOrderFront(nil)
     }
 
     func showArchiveWindow() {
@@ -523,7 +624,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         appMenu.addItem(withTitle: "About Cra", action: #selector(showAbout), keyEquivalent: "").target = self
         appMenu.addItem(.separator())
         appMenu.addItem(item("settings"))
-        appMenu.addItem(item("signIn"))
+        let setDefault = item("setDefaultBrowser")
+        if setDefault.keyEquivalent.isEmpty { setDefault.keyEquivalent = "♡"; setDefault.keyEquivalentModifierMask = .command }
+        appMenu.addItem(setDefault)
+        appMenu.addItem(.separator())
         appMenu.addItem(item("importData"))
         appMenu.addItem(.separator())
         appMenu.addItem(std("Hide Cra", #selector(NSApplication.hide(_:)), "h"))
@@ -567,6 +671,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         view.addItem(.separator())
         view.addItem(item("pictureInPicture"))
         view.addItem(.separator())
+        for id in ["addSplitView", "closeSplitPane", "separateFromSplit", "flipSplitOrientation"] { view.addItem(item(id)) }
+        view.addItem(.separator())
         let dev = NSMenu(title: "Developer")
         for id in ["viewSource", "devTools", "inspectElement", "jsConsole"] { dev.addItem(item(id)) }
         dev.addItem(.separator())
@@ -595,6 +701,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let archive = NSMenu(title: "Archive")
         archive.addItem(item("goBack")); archive.addItem(item("goForward")); archive.addItem(item("viewArchive"))
         menubar.addItem(submenu: archive, title: "Archive")
+
+        // Dia: Extensions sits just before Window.
+        menubar.addItem(submenu: extensionsMenu.makeMenu(), title: "Extensions")
 
         let window = NSMenu(title: "Window")
         window.addItem(std("Minimize Window", #selector(NSWindow.performMiniaturize(_:)), "m"))

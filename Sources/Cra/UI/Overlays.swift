@@ -110,6 +110,8 @@ struct ToastStack: View {
 struct EmptyContentView: View {
     let space: Space
     var body: some View {
+        // Fill under the titlebar too: the safe-area edge otherwise cuts through the toolbar.
         (space.theme.palette.isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.03))
+            .ignoresSafeArea()
     }
 }

@@ -8,6 +8,14 @@ MainActor.assumeIsolated {
     let delegate = AppDelegate()
     app.delegate = delegate
 
+    // Passwords and cookies staged by the import go into the profile while no
+    // Chromium has it open: before initializing, and only when no other Cra runs.
+    let me = ProcessInfo.processInfo.processIdentifier
+    if CredentialImport.hasPending,
+       !NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "").contains(where: { $0.processIdentifier != me }) {
+        CredentialImport.applyPending(profileDir: AppPaths.chromiumCache.appendingPathComponent("Default", isDirectory: true))
+    }
+
     let useChromeStyle = ProcessInfo.processInfo.environment["CRA_CHROME_STYLE"] == "1"
     let started = CraCEFRuntime.initialize(withCachePath: AppPaths.chromiumCache.path,
                                            userAgentProduct: "",

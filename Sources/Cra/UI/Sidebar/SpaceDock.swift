@@ -9,7 +9,7 @@ struct SpaceDock: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            SidebarIconButton(symbol: "archivebox", palette: palette, help: "Library (⇧⌘L)") { actions.showArchive() }
+            LibraryButton(palette: palette) { actions.showArchive() }
             Spacer(minLength: 0)
             HStack(spacing: 6) {
                 ForEach(store.orderedSpaces) { space in
@@ -56,5 +56,42 @@ struct SpaceDockButton: View {
                 Divider()
                 Button("Delete Space…") { store.focusSpace(space.id); actions.performAction("deleteSpace") }
             }
+    }
+}
+
+
+/// Arc's Library glyph: a filled box with a small confetti puff (cloud, dot,
+/// triangle) rising from it. Same hit area and hover fill as `SidebarIconButton`.
+struct LibraryButton: View {
+    let palette: SpacePalette
+    let action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        let ink = palette.isDark ? Color.white.opacity(0.55) : Color.black.opacity(0.26)
+        Button(action: action) {
+            ZStack(alignment: .top) {
+                // Arc's box has no lid line: a 13×10 rounded box with a light slot near the top.
+                RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                    .frame(width: 14, height: 11)
+                    .overlay(alignment: .top) {
+                        Capsule().fill(palette.isDark ? Color.black.opacity(0.5) : Color.white.opacity(0.7))
+                            .frame(width: 5, height: 1.6).padding(.top, 2.4)
+                    }
+                    .offset(y: 8)
+                HStack(alignment: .bottom, spacing: 1) {
+                    Image(systemName: "cloud.fill").font(.system(size: 7, weight: .bold))
+                    Circle().frame(width: 2, height: 2).offset(y: -4)
+                    Image(systemName: "triangle.fill").font(.system(size: 4, weight: .bold)).offset(y: -1)
+                }
+                .offset(x: 2, y: -1)
+            }
+            .foregroundStyle(ink)
+            .frame(width: 28, height: 28)
+            .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(hover ? palette.hoverFill : .clear))
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help("Library (⇧⌘L)")
     }
 }

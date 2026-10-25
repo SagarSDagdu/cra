@@ -131,7 +131,7 @@ final class SidebarStore {
         var out: [SidebarItem] = []
         func walk(_ id: UUID) {
             for c in children(of: id) {
-                if c.isTab { out.append(c) } else if c.isFolder { walk(c.id) }
+                if c.isTab { out.append(c) } else if c.isFolder || c.isSplit { walk(c.id) }
             }
         }
         walk(id)
@@ -139,6 +139,21 @@ final class SidebarStore {
     }
 
     func allTabs() -> [SidebarItem] { items.values.filter { $0.isTab } }
+
+    /// Tab rows of a space's pinned and today lists in sidebar order, open
+    /// folders included (what a ⇧-click range spans).
+    func listedTabIDs(in spaceID: UUID) -> [UUID] {
+        guard let space = spaces[spaceID] else { return [] }
+        var out: [UUID] = []
+        func walk(_ id: UUID) {
+            for c in children(of: id) {
+                if c.isTab { out.append(c.id) } else if c.isFolder, isExpanded(c.id) { walk(c.id) }
+            }
+        }
+        walk(space.pinnedContainerID)
+        walk(space.todayContainerID)
+        return out
+    }
 
     /// Favorites + pinned + today for a space, in sidebar order. This is what
     /// ⌘1…⌘9 index into (Arc: "Go to Sidebar Item N").
@@ -217,6 +232,13 @@ final class SidebarStore {
         updated.isUnread = false
         if var t = updated.tab { t.timeLastActiveAt = Date(); updated.data = .tab(t) }
         items[id] = updated
+        // Selecting a pane focuses it inside its split (Arc: focusItemID).
+        if let p = it.parentID, var split = items[p], var s = split.split {
+            s.focusTabID = id
+            s.timeLastActiveAt = Date()
+            split.data = .split(s)
+            items[p] = split
+        }
         var dates = ranking.recentlySwitchedToTabs[id] ?? []
         dates.append(Date())
         if dates.count > 10 { dates.removeFirst(dates.count - 10) }
@@ -317,20 +339,6 @@ final class SidebarStore {
 
     func touchAfterImport() { touch() }
 
-    /// Replace the whole sidebar with a backup (cloud restore).
-    func replaceDocument(_ doc: SidebarDocument) {
-        spaces = [:]
-        for s in doc.spaces { spaces[s.id] = s }
-        spaceOrder = doc.spaceOrder.filter { spaces[$0] != nil }
-        items = [:]
-        for it in doc.items { items[it.id] = it }
-        favoritesContainerID = doc.favoritesContainerID
-        repair()
-        prefs.focusedSpaceID = spaceOrder.first
-        prefs.selectedTabPerSpace = [:]
-        touch()
-    }
-
     var document: SidebarDocument {
         SidebarDocument(version: 1, spaceOrder: spaceOrder, spaces: orderedSpaces, favoritesContainerID: favoritesContainerID, items: Array(items.values))
     }
@@ -368,6 +376,11 @@ final class SidebarStore {
     /// today list unpacks it.
     func moveItem(_ id: UUID, to newParent: UUID, index: Int?) {
         guard var it = items[id], items[newParent] != nil, id != newParent, !isDescendant(newParent, of: id) else { return }
+        // Only tabs live inside a split; dropping onto a split adds a pane.
+        if items[newParent]?.isSplit == true {
+            if it.isTab { addToSplit(newParent, tabID: id, at: index) }
+            return
+        }
         let fromParent = it.parentID
         let oldIndex = fromParent.flatMap { items[$0]?.children.firstIndex(of: id) }
         if it.isFolder, case .today = rootContainerKind(newParent) ?? .favorites {
@@ -401,10 +414,211 @@ final class SidebarStore {
             it.data = .tab(t)
         }
         items[id] = it
+        if let from = fromParent, from != newParent { collapseSplitIfNeeded(from) }
         touch()
     }
 
     private func rootContainerKind(_ id: UUID) -> ContainerKind? { rootContainer(of: id) }
+
+    // MARK: Split view (Arc: SidebarSplitViewData + WindowAction.SplitViewAction)
+
+    /// The split item a tab is a pane of, if any.
+    func splitContaining(_ tabID: UUID) -> SidebarItem? {
+        guard let p = items[tabID]?.parentID, let parent = items[p], parent.isSplit else { return nil }
+        return parent
+    }
+
+    /// The panes shown when `tabID` is selected: its split's children in pane
+    /// order, or just the tab itself.
+    func paneTabIDs(for tabID: UUID) -> [UUID] {
+        if let split = splitContaining(tabID) { return split.children.filter { items[$0]?.isTab == true } }
+        return [tabID]
+    }
+
+    /// Panes shown in a space right now (the selected tab's split).
+    func visiblePaneTabIDs(in spaceID: UUID) -> [UUID] {
+        guard let sel = selectedTabID(in: spaceID) else { return [] }
+        return paneTabIDs(for: sel)
+    }
+
+    /// Put tabs into a new split, panes in the given order, at the place of
+    /// `anchorID` (default: the first tab) in the sidebar.
+    @discardableResult
+    func createSplit(with tabIDs: [UUID], at anchorID: UUID? = nil) -> SidebarItem? {
+        let tabs = tabIDs.compactMap { items[$0] }.filter { $0.isTab }
+        guard let first = anchorID.flatMap({ a in tabs.first { $0.id == a } }) ?? tabs.first else { return nil }
+        if let existing = splitContaining(first.id) {
+            for t in tabs where t.id != first.id { addToSplit(existing.id, tabID: t.id, at: nil) }
+            return items[existing.id]
+        }
+        // Observed in Arc 1.170: splitting a favorite or pinned tab leaves it in
+        // place and builds the split in Today from a copy of the page; a Today
+        // tab moves into the split at its own slot.
+        var parentID = first.parentID ?? focusedSpace.todayContainerID
+        var at = items[parentID]?.children.firstIndex(of: first.id) ?? 0
+        if isPinned(first.id) {
+            parentID = (spaceID(ofItem: first.id).flatMap { spaces[$0] } ?? focusedSpace).todayContainerID
+            at = 0
+        }
+        var split = SidebarItem.split(parent: parentID)
+        var s = SplitData()
+        s.timeLastActiveAt = Date()
+        split.data = .split(s)
+        items[split.id] = split
+        var p = items[parentID]!
+        p.children.insert(split.id, at: min(at, p.children.count))
+        items[parentID] = p
+        var paneIDs: [UUID] = []
+        var anchorPane: UUID?
+        for t in tabs {
+            let paneID: UUID
+            if isPinned(t.id), let data = t.tab {
+                // Keep the pinned tab; the pane is a Today copy of its page.
+                var copy = SidebarItem.tab(data.url, title: data.savedTitle, parent: split.id)
+                copy.data = .tab({ var c = TabData(url: data.url, title: data.savedTitle); c.faviconKey = data.faviconKey; c.activeTabBeforeCreationID = t.id; return c }())
+                items[copy.id] = copy
+                paneID = copy.id
+            } else {
+                detach(t.id)
+                var moved = items[t.id]!
+                moved.parentID = split.id
+                items[t.id] = moved
+                paneID = t.id
+            }
+            items[split.id]!.children.append(paneID)
+            paneIDs.append(paneID)
+            if t.id == first.id { anchorPane = paneID }
+        }
+        if var sp = items[split.id], var sd = sp.split {
+            sd.focusTabID = anchorPane ?? paneIDs.first
+            sp.data = .split(sd)
+            items[split.id] = sp
+        }
+        touch()
+        return items[split.id]
+    }
+
+    /// The pane that stands for `tabID` in its split (the tab itself, or the
+    /// Today copy made for a pinned tab).
+    func paneID(for tabID: UUID, in split: SidebarItem) -> UUID? {
+        if split.children.contains(tabID) { return tabID }
+        return split.children.first { items[$0]?.tab?.activeTabBeforeCreationID == tabID }
+    }
+
+    /// Arc's "Add Split View": an empty page becomes a new pane next to `tabID`
+    /// (after it by default). Returns the new tab.
+    @discardableResult
+    func addEmptyPane(nextTo tabID: UUID, after: Bool = true, url: String = "") -> SidebarItem? {
+        guard let anchor = items[tabID], anchor.isTab else { return nil }
+        let split: SidebarItem
+        if let s = splitContaining(tabID) { split = s } else if let s = createSplit(with: [tabID]) { split = s } else { return nil }
+        guard let anchorPane = paneID(for: tabID, in: items[split.id] ?? split),
+              let idx = items[split.id]?.children.firstIndex(of: anchorPane) else { return nil }
+        var tab = SidebarItem.tab(url, title: "", parent: split.id)
+        tab.data = .tab({ var t = TabData(url: url, title: ""); t.activeTabBeforeCreationID = tabID; return t }())
+        items[tab.id] = tab
+        var sp = items[split.id]!
+        sp.children.insert(tab.id, at: after ? idx + 1 : idx)
+        items[split.id] = sp
+        selectTab(tab.id)
+        return tab
+    }
+
+    /// Add an existing tab as a pane of a split (Arc: onDropSidebarItem). A
+    /// pinned or favorite tab stays where it is; a Today copy becomes the pane.
+    func addToSplit(_ splitID: UUID, tabID: UUID, at index: Int?) {
+        guard var split = items[splitID], split.isSplit, var tab = items[tabID], tab.isTab, tab.parentID != splitID else {
+            if let i = index, let sp = items[splitID], sp.children.firstIndex(of: tabID) != nil { moveWithinSplit(splitID, tabID: tabID, to: i) }
+            return
+        }
+        let from = tab.parentID
+        var paneID = tabID
+        if isPinned(tabID), let data = tab.tab {
+            var copy = SidebarItem.tab(data.url, title: data.savedTitle, parent: splitID)
+            copy.data = .tab({ var c = TabData(url: data.url, title: data.savedTitle); c.faviconKey = data.faviconKey; c.activeTabBeforeCreationID = tabID; return c }())
+            items[copy.id] = copy
+            paneID = copy.id
+        } else {
+            detach(tabID)
+            tab.parentID = splitID
+            items[tabID] = tab
+        }
+        split = items[splitID]!
+        let at = min(max(0, index ?? split.children.count), split.children.count)
+        split.children.insert(paneID, at: at)
+        items[splitID] = split
+        if paneID == tabID, let from, from != splitID { collapseSplitIfNeeded(from) }
+        touch()
+    }
+
+    func moveWithinSplit(_ splitID: UUID, tabID: UUID, to index: Int) {
+        guard var split = items[splitID], let old = split.children.firstIndex(of: tabID) else { return }
+        split.children.remove(at: old)
+        var at = index
+        if old < at { at -= 1 }
+        split.children.insert(tabID, at: min(max(0, at), split.children.count))
+        items[splitID] = split
+        touch()
+    }
+
+    /// Take a pane out of its split: it goes right after the split in the
+    /// sidebar (Arc: "Separate Tab from Split"). A split with one pane left
+    /// dissolves.
+    func separateFromSplit(_ tabID: UUID) {
+        guard let split = splitContaining(tabID), let gp = split.parentID, var grand = items[gp],
+              let splitIndex = grand.children.firstIndex(of: split.id), var tab = items[tabID] else { return }
+        detach(tabID)
+        tab.parentID = gp
+        items[tabID] = tab
+        grand = items[gp]!
+        grand.children.insert(tabID, at: min(splitIndex + 1, grand.children.count))
+        items[gp] = grand
+        collapseSplitIfNeeded(split.id)
+        touch()
+    }
+
+    func separateAll(_ splitID: UUID) {
+        guard let split = items[splitID], split.isSplit else { return }
+        for id in split.children.reversed() { separateFromSplit(id) }
+    }
+
+    func setSplitWidthFactors(_ splitID: UUID, _ factors: [UUID: Double]) {
+        guard var split = items[splitID], var s = split.split else { return }
+        s.widthFactors = factors
+        split.data = .split(s)
+        items[splitID] = split
+        touch()
+    }
+
+    func flipSplitOrientation(_ splitID: UUID) {
+        guard var split = items[splitID], var s = split.split else { return }
+        s.orientation = s.orientation == .horizontal ? .vertical : .horizontal
+        split.data = .split(s)
+        items[splitID] = split
+        touch()
+    }
+
+    /// Zero or one pane left: the split goes away and the pane takes its slot.
+    private func collapseSplitIfNeeded(_ splitID: UUID) {
+        guard let split = items[splitID], split.isSplit, split.children.count <= 1 else { return }
+        let sid = spaceID(ofItem: splitID)
+        if let gp = split.parentID, var grand = items[gp] {
+            let at = grand.children.firstIndex(of: splitID) ?? grand.children.count
+            grand.children.removeAll { $0 == splitID }
+            for c in split.children {
+                if var child = items[c] {
+                    child.parentID = gp
+                    items[c] = child
+                    grand.children.insert(c, at: min(at, grand.children.count))
+                }
+            }
+            items[gp] = grand
+        }
+        items[splitID] = nil
+        if let sid, let sel = prefs.selectedTabPerSpace[sid], items[sel] == nil {
+            prefs.selectedTabPerSpace[sid] = split.children.first
+        }
+    }
 
     func pinTab(_ id: UUID) {
         guard let sid = spaceID(ofItem: id), let space = spaces[sid] else { return }
@@ -451,11 +665,27 @@ final class SidebarStore {
         return folder
     }
 
+    /// Drop a tab onto another: both go into a new folder at the target's
+    /// place. Folders only live in pinned sections, so a Today target puts
+    /// the folder at the end of its space's pinned list.
+    @discardableResult
+    func createFolder(combining targetID: UUID, with tabID: UUID, named name: String = "New Folder") -> SidebarItem? {
+        guard targetID != tabID, items[targetID]?.isTab == true, items[tabID]?.isTab == true,
+              let parent = items[targetID]?.parentID, let sid = spaceID(ofItem: targetID), let space = spaces[sid] else { return nil }
+        let inPinned = rootContainer(of: targetID) == .pinned(spaceID: sid)
+        let folder = createFolder(named: name, in: inPinned ? parent : space.pinnedContainerID,
+                                  index: inPinned ? items[parent]?.children.firstIndex(of: targetID) : nil)
+        moveItem(targetID, to: folder.id, index: nil)
+        moveItem(tabID, to: folder.id, index: nil)
+        return items[folder.id]
+    }
+
     func deleteFolder(_ id: UUID) {
         guard let f = items[id], f.isFolder else { return }
         for t in tabs(under: id) { archiveTab(t.id, reason: .manual) }
         // Nested folders left behind (now empty) go too.
         for c in children(of: id) where c.isFolder { deleteFolder(c.id) }
+        for c in children(of: id) where c.isSplit { items[c.id] = nil }
         detach(id)
         items[id] = nil
         touch()
@@ -473,13 +703,23 @@ final class SidebarStore {
         let sid = spaceID(ofItem: id)
         let wasSelected = sid.flatMap { selectedTabID(in: $0) } == id
         let pinned = isPinned(id)
+        let split = splitContaining(id)
         detach(id)
         items[id] = nil
-        archive.insert(ArchivedItem(archivedAt: Date(), reason: reason, sourceSpaceID: sid, wasPinned: pinned, item: it), at: 0)
-        if archive.count > 2000 { archive.removeLast(archive.count - 2000) }
-        if wasSelected, let sid {
-            prefs.selectedTabPerSpace[sid] = nextSelection(after: it, in: sid)
+        // Empty panes never had a page; nothing to keep in the Library.
+        if !it.isEmptyTab {
+            archive.insert(ArchivedItem(archivedAt: Date(), reason: reason, sourceSpaceID: sid, wasPinned: pinned, item: it), at: 0)
+            if archive.count > 2000 { archive.removeLast(archive.count - 2000) }
         }
+        if wasSelected, let sid {
+            // Closing a pane keeps the split on screen: focus a neighbour pane.
+            if let split, let remaining = items[split.id]?.children.first(where: { items[$0]?.isTab == true }) {
+                prefs.selectedTabPerSpace[sid] = remaining
+            } else {
+                prefs.selectedTabPerSpace[sid] = nextSelection(after: it, in: sid)
+            }
+        }
+        if let split { collapseSplitIfNeeded(split.id) }
         touch()
     }
 
@@ -545,6 +785,7 @@ final class SidebarStore {
     /// Today tabs idle longer than the threshold are archived (Arc:
     /// ArchiveState+AutoArchive, autoArchiveTimeThreshold).
     func runAutoArchive() {
+        guard settings.autoArchiveEnabled else { return }
         let cutoff = Date().addingTimeInterval(-settings.autoArchive.seconds)
         for space in orderedSpaces {
             let selected = selectedTabID(in: space.id)

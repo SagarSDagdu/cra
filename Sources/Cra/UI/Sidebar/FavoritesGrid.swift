@@ -62,10 +62,19 @@ struct FavoriteCell: View {
     private var selected: Bool { store.selectedTabID == item.id }
 
     var body: some View {
+        let session = ui
         ZStack {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(selected ? palette.selectedFill : (hover || targeted ? palette.hoverFill : palette.pillFill))
-            if ui.keyboardFocusID == item.id { FocusRing(radius: 10) }
+            // Arc 1.170: 13pt circular corners; the active tile is the hover fill
+            // with a 2pt darker rim, inactive tiles sit ~4.5% darker than the sidebar.
+            RoundedRectangle(cornerRadius: 13)
+                // Arc 1.170 over white: tile 207/194/166, hovered tile 197/184/158 (another ~4.5% black on top of the tile fill).
+                .fill(selected ? (palette.isDark ? Color.white.opacity(0.13) : Color.white.opacity(0.38))
+                      : (hover || targeted ? (palette.isDark ? Color.white.opacity(0.15) : Color.black.opacity(0.09)) : palette.pillFill))
+            if selected {
+                RoundedRectangle(cornerRadius: 13)
+                    .strokeBorder(palette.isDark ? Color.white.opacity(0.14) : Color.black.opacity(0.17), lineWidth: 2)
+            }
+            if ui.keyboardFocusID == item.id { FocusRing(radius: 13) }
             FaviconView(key: item.tab?.faviconKey, palette: palette, size: 20)
             if item.isUnread && !selected {
                 Circle().fill(palette.textPrimary.opacity(0.6)).frame(width: 6, height: 6)
@@ -74,11 +83,11 @@ struct FavoriteCell: View {
             }
         }
         .frame(height: 47)
-        .contentShape(RoundedRectangle(cornerRadius: 10))
-        .onHover { hover = $0 }
+        .contentShape(RoundedRectangle(cornerRadius: 13))
+        .onHover { hover = $0; ui.pointerOverDraggable = $0 }
         .onTapGesture { ui.keyboardFocusID = nil; store.selectTab(item.id) }
         .help(item.displayTitle)
-        .draggable(SidebarDragItem(id: item.id))
+        .draggable(SidebarDragItem.begin(item.id, session))
         .dropDestination(for: SidebarDragItem.self) { items, location in
             guard let d = items.first, d.id != item.id,
                   let idx = store.item(store.favoritesContainerID)?.children.firstIndex(of: item.id) else { return false }

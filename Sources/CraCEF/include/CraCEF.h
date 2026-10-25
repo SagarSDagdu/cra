@@ -50,6 +50,11 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 - (void)browserDidCloseDevTools:(CraBrowser *)browser;
 /// Chrome-style hosting: the page's window exists (also for popups).
 - (void)browser:(CraBrowser *)browser didCreateHostWindow:(NSWindow *)window;
+/// Chrome's docked DevTools frontend placed the page: `bounds` are points with a
+/// top-left origin inside the DevTools window's content view (setInspectedPageBounds).
+- (void)browser:(CraBrowser *)browser devToolsPageBounds:(NSRect)bounds;
+/// Chrome's DevTools frontend docked (YES) or undocked into its own window (NO).
+- (void)browser:(CraBrowser *)browser devToolsDocked:(BOOL)docked;
 /// Reserved shortcuts, before the page sees the key. Return YES to consume.
 - (BOOL)browser:(CraBrowser *)browser handleKeyEvent:(NSEvent *)event;
 /// Keys the page did not handle (Chrome gives the page first chance at
@@ -65,6 +70,12 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 /// A video of this page entered or left Chromium's Picture in Picture window
 /// (whether the page, the user or Cra asked for it).
 - (void)browser:(CraBrowser *)browser didChangePictureInPicture:(BOOL)active;
+/// The video in the Picture in Picture window started or stopped playing.
+- (void)browser:(CraBrowser *)browser didChangePictureInPicturePlayback:(BOOL)playing;
+/// The colour the page paints behind its content (root/body background, else the
+/// canvas colour of its color scheme), as "#RRGGBB". The shell fills the area under
+/// the page window with it, so a page lagging behind a resize shows no white edge.
+- (void)browser:(CraBrowser *)browser didReportBackgroundColor:(NSString *)hex;
 @end
 
 @interface CraBrowser : NSObject
@@ -110,13 +121,28 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 /// window. Manual requests toggle (a second call brings the video back).
 /// `automatic` is the "leaving a video tab" case: only a playing video of some
 /// size qualifies, and nothing happens when there is none.
-- (void)requestPictureInPictureAutomatic:(BOOL)automatic;
+- (void)requestPictureInPictureAutomatic:(BOOL)automatic NS_SWIFT_NAME(requestPictureInPicture(automatic:));
 - (void)exitPictureInPicture;
 /// YES while a video of this page is in the Picture in Picture window.
 @property (nonatomic, readonly) BOOL isInPictureInPicture;
+/// YES while that video is playing.
+@property (nonatomic, readonly) BOOL isPictureInPicturePlaying;
+/// Play/pause the video in the Picture in Picture window.
+- (void)togglePictureInPicturePlayback;
+/// Seek the video in the Picture in Picture window by `seconds` (negative = back).
+- (void)skipPictureInPictureBy:(double)seconds NS_SWIFT_NAME(skipPictureInPicture(by:));
 - (void)print;
 - (void)viewSource;
 - (void)executeJavaScript:(NSString *)script;
+/// Asks the page for its background colour again (-browser:didReportBackgroundColor:);
+/// pages can switch themes without a load.
+- (void)probeBackgroundColor;
+/// Runs script in this browser's DevTools frontend, if open (debug aid behind cra://debug?devtoolsjs=).
+- (void)executeJavaScript:(NSString *)script inDevTools:(BOOL)inDevTools;
+/// Chrome DevTools Protocol call on this browser's own session (no DevTools window).
+/// `params` is a JSON object string; the completion gets the result JSON or an error.
+- (void)sendDevToolsMethod:(NSString *)method params:(NSString *)params
+                completion:(void (^)(NSString * _Nullable result, NSString * _Nullable error))completion;
 - (void)notifyMoveOrResizeStarted;
 /// Asynchronous. -browserDidClose: fires when Chromium is done.
 - (void)close;
@@ -130,6 +156,21 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 /// DevTools) instead of embedded Alloy views. Set before any browser exists.
 + (void)setChromeHosting:(BOOL)enabled;
 + (BOOL)chromeHosting;
+/// Third-party ad and tracker blocking: subresource and subframe requests whose host
+/// (or a parent domain) is on the blocked list are cancelled when they are third-party
+/// to the tab's top-level page. Main-frame navigations always load. Takes effect for
+/// the next request, any time, from any thread. Off until enabled.
++ (void)setContentBlockingEnabled:(BOOL)enabled;
++ (BOOL)contentBlockingEnabled;
+/// Replaces the blocked list (bare domains; a domain also covers its subdomains).
++ (void)setBlockedDomains:(NSArray<NSString *> *)domains;
+/// Reads and installs a list file off the main thread: one domain per line or
+/// hosts-file lines ("0.0.0.0 example.com"), # comments. The completion gets the
+/// domain count (0 when the file can't be read) on the main queue.
++ (void)loadBlockedDomainsFromFile:(NSString *)path completion:(nullable void (^)(NSInteger count))completion;
++ (NSInteger)blockedDomainCount;
+/// The blocking decision for a request made by a page, for diagnostics and tests.
++ (BOOL)shouldBlockRequestURL:(NSString *)requestURL onPageURL:(NSString *)pageURL;
 + (BOOL)initializeWithCachePath:(NSString *)cachePath
                  userAgentProduct:(NSString *)product
                           logPath:(NSString *)logPath
@@ -146,8 +187,22 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 + (BOOL)anotherInstanceWasNotified;
 /// Called in the running instance when another launch is handed over.
 + (void)setRelaunchHandler:(void (^)(NSArray<NSString *> *urls))handler;
+/// Pages Chromium opens on its own (an extension's chrome.tabs.create or
+/// windows.create, welcome pages after an extension loads). The handler gets
+/// the URL to open as a Cra tab; Chrome's own window for it is closed.
++ (void)setStrayPageHandler:(void (^)(NSString *url))handler;
 + (NSString *)chromiumVersion;
 + (NSString *)cefVersion;
+/// YES when the browser-level DevTools pipe is up (it needs fds 3/4 free at start-up).
++ (BOOL)hasBrowserDevTools;
+/// Browser-level DevTools protocol call (Target.*, Extensions.*) over the private pipe.
++ (void)sendBrowserDevToolsMethod:(NSString *)method params:(NSString *)params
+                       completion:(void (^)(NSString * _Nullable result, NSString * _Nullable error))completion;
+/// Same, inside an attached target's session (Target.attachToTarget with flatten).
++ (void)sendBrowserDevToolsMethod:(NSString *)method params:(NSString *)params sessionID:(nullable NSString *)sessionID
+                       completion:(void (^)(NSString * _Nullable result, NSString * _Nullable error))completion;
+/// Protocol events from the pipe: method, params JSON, and the session they belong to.
++ (void)setBrowserDevToolsEventHandler:(nullable void (^)(NSString *method, NSString *params, NSString * _Nullable sessionID))handler;
 @end
 
 /// NSApplication subclass CEF requires (CefAppProtocol). Set as

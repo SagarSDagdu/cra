@@ -42,10 +42,37 @@ struct TabData: Codable, Equatable {
     }
 }
 
+/// Arc's SidebarSplitViewData: a split is a sidebar item whose children are
+/// the pane tabs (in pane order). Widths are stored as factors per child.
+struct SplitData: Codable, Equatable {
+    var widthFactors: [UUID: Double] = [:]
+    var orientation: SplitOrientation = .horizontal
+    /// The pane that has keyboard focus (Arc: focusItemID).
+    var focusTabID: UUID?
+    var timeLastActiveAt: Date?
+
+    init() {}
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        widthFactors = try c.decodeIfPresent([UUID: Double].self, forKey: .widthFactors) ?? [:]
+        orientation = try c.decodeIfPresent(SplitOrientation.self, forKey: .orientation) ?? .horizontal
+        focusTabID = try c.decodeIfPresent(UUID.self, forKey: .focusTabID)
+        timeLastActiveAt = try c.decodeIfPresent(Date.self, forKey: .timeLastActiveAt)
+    }
+}
+
+enum SplitOrientation: String, Codable {
+    /// Panes side by side (Arc's default).
+    case horizontal
+    /// Panes stacked top to bottom.
+    case vertical
+}
+
 enum ItemData: Codable, Equatable {
     case tab(TabData)
     case folder
     case container(ContainerKind)
+    case split(SplitData)
 }
 
 struct SidebarItem: Identifiable, Codable, Equatable {
@@ -64,6 +91,13 @@ struct SidebarItem: Identifiable, Codable, Equatable {
     }
     var isTab: Bool { tab != nil }
     var isFolder: Bool { if case .folder = data { return true }; return false }
+    var split: SplitData? {
+        if case .split(let s) = data { return s }
+        return nil
+    }
+    var isSplit: Bool { split != nil }
+    /// A tab with no page yet: Arc's empty split pane ("Search or Enter URL…").
+    var isEmptyTab: Bool { tab.map { $0.url.isEmpty || $0.url == "about:blank" } ?? false }
     var container: ContainerKind? {
         if case .container(let c) = data { return c }
         return nil
@@ -74,11 +108,18 @@ struct SidebarItem: Identifiable, Codable, Equatable {
     var displayTitle: String {
         if let t = title, !t.isEmpty { return t }
         if let tab {
+            if isEmptyTab { return "New Tab" }
             if !tab.savedTitle.isEmpty { return tab.savedTitle }
             if let host = URL(string: tab.url)?.host { return host }
             return tab.url
         }
+        if isSplit { return "Split View" }
         return "Untitled"
+    }
+
+    static func split(parent: UUID?) -> SidebarItem {
+        SidebarItem(id: UUID(), parentID: parent, title: nil, children: [], isUnread: false,
+                    createdAt: Date(), data: .split(SplitData()))
     }
 
     static func tab(_ url: String, title: String = "", parent: UUID?) -> SidebarItem {
@@ -276,6 +317,16 @@ struct AppSettings: Codable, Equatable {
     var openExternalLinksInLittleWindow: Bool = true
     /// Arc: "Enable Picture in Picture when you leave a video tab".
     var autoPictureInPicture: Bool = true
+    /// Dia's onboarding privacy choice "Block third-party ads and trackers": requests
+    /// to listed ad and tracker domains are cancelled unless they are first-party.
+    var blockAdsAndTrackers: Bool = true
+    /// Dia's Tabs ▸ "Haptic feedback when reordering tabs" (tabReorderingHapticsEnabled).
+    var hapticFeedbackOnReorder: Bool = true
+    /// Dia's Advanced ▸ "Warn before quitting" (shouldWarnBeforeQuitting, off by default).
+    var warnBeforeQuitting: Bool = false
+    /// Dia's Tabs ▸ "Clean up tabs I haven't used in:" checkbox; `autoArchive` keeps the
+    /// threshold while this is off.
+    var autoArchiveEnabled: Bool = true
 
     init() {}
 
@@ -331,7 +382,11 @@ extension AppSettings {
         developerHosts = try c.decodeIfPresent(Set<String>.self, forKey: .developerHosts) ?? []
         chromeEngine = try c.decodeIfPresent(Bool.self, forKey: .chromeEngine) ?? true
         autoPictureInPicture = try c.decodeIfPresent(Bool.self, forKey: .autoPictureInPicture) ?? true
+        blockAdsAndTrackers = try c.decodeIfPresent(Bool.self, forKey: .blockAdsAndTrackers) ?? true
         openExternalLinksInLittleWindow = try c.decodeIfPresent(Bool.self, forKey: .openExternalLinksInLittleWindow) ?? true
+        hapticFeedbackOnReorder = try c.decodeIfPresent(Bool.self, forKey: .hapticFeedbackOnReorder) ?? true
+        warnBeforeQuitting = try c.decodeIfPresent(Bool.self, forKey: .warnBeforeQuitting) ?? false
+        autoArchiveEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoArchiveEnabled) ?? true
     }
 }
 
