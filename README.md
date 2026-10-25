@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="brand/cra-segments-icon.svg" alt="Cra logo" width="128" height="128">
+</p>
+
 # Cra
 
 A native macOS browser built on Chromium (CEF), shaped after the parts of Arc
