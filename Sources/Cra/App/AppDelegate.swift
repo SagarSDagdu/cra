@@ -750,10 +750,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     @objc private func showAbout() {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? ""
+        let build = info?["CFBundleVersion"] as? String ?? ""
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "Cra",
-            .applicationVersion: "0.2",
-            .version: "Chromium \(CraCEFRuntime.chromiumVersion())",
+            .applicationVersion: version,
+            .version: "\(build) · Chromium \(CraCEFRuntime.chromiumVersion())",
         ])
     }
 }

@@ -177,7 +177,7 @@ closes.
 A TCC prompt left behind by a Cra instance launched from the agent's shell blocked every
 GUI helper spawned from that shell (they never reached `applicationDidFinishLaunching`),
 which silently invalidated three colour runs; `killall UserNotificationCenter` cleared it.
-Run the app from ~/Applications (scripts/build.sh installs there) so no prompt appears.
+Run the app from outside ~/Documents (`CRA_INSTALL_DIR=<dir> scripts/build.sh` copies it there) so no prompt appears.
 Animations were verified with `screencapture -V` recordings and a per-frame difference
 tool: space switch 11 consecutive 60 Hz frames, sidebar hide 10 frames with a fast start
 and soft landing, command bar fade-in 7 frames; the 80 ms fade-out still lands in one frame.

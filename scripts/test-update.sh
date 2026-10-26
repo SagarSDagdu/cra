@@ -58,15 +58,15 @@ IDLE=""
 [ "$MODE" = idle ] && IDLE=20
 
 if [ "$MODE" != again ] || [ ! -d "$DIR/old.app" ]; then
-  echo "Building Cra 0.9.0 (old) and 0.9.1 (new)…"
+  echo "Building Cra 0.0.1 (old) and 0.0.2 (new)…"
   mkdir -p "$DIR"
-  CRA_VERSION=0.9.0 CRA_BUILD=1000 CRA_INSTALL_DIR="$DIR/install" scripts/build.sh debug > "$DIR/build.log" 2>&1
+  CRA_VERSION=0.0.1 CRA_BUILD=1000 scripts/build.sh debug > "$DIR/build.log" 2>&1
   rm -rf "$DIR/old.app" && ditto build/Cra.app "$DIR/old.app"
-  CRA_VERSION=0.9.1 CRA_BUILD=1001 CRA_INSTALL_DIR="$DIR/install" scripts/build.sh debug >> "$DIR/build.log" 2>&1
+  CRA_VERSION=0.0.2 CRA_BUILD=1001 scripts/build.sh debug >> "$DIR/build.log" 2>&1
   make_copy build/Cra.app "$DIR/new"
   rm -rf "$DIR/feed" && mkdir -p "$DIR/feed"
   ditto -c -k --keepParent "$DIR/new/CraTest.app" "$DIR/feed/Cra.zip"
-  printf '<h3>Cra 0.9.1</h3><ul><li>A test update served from your Mac.</li><li>Nothing here is real.</li></ul>' > "$DIR/notes.html"
+  printf '<h3>Cra 0.0.2</h3><ul><li>A test update served from your Mac.</li><li>Nothing here is real.</li></ul>' > "$DIR/notes.html"
   CRA_UPDATE_URL="http://127.0.0.1:$PORT/Cra.zip" scripts/appcast.sh "$DIR/feed/Cra.zip" "$DIR/new/CraTest.app" "$DIR/notes.html"
 fi
 
@@ -85,15 +85,15 @@ open "$DIR/run/CraTest.app"
 
 cat <<EOF
 
-CraTest 0.9.0 is open (a separate test copy; your own Cra is untouched).
-Within a few seconds it finds 0.9.1 on the local feed.
+CraTest 0.0.1 is open (a separate test copy; your own Cra is untouched).
+Within a few seconds it finds 0.0.2 on the local feed.
 EOF
 case "$MODE" in
   manual) echo "  - The sidebar shows \"New Cra Version Available\". Click it, or Cra ▸ Check for Updates…, then Download." ;;
-  idle)   echo "  - The sidebar shows \"An update is ready!\". Leave the mouse and keyboard alone for 20 s: CraTest restarts into 0.9.1 by itself." ;;
-  *)      echo "  - The sidebar shows \"An update is ready!\". Click it to restart into 0.9.1, or quit CraTest to install on quit." ;;
+  idle)   echo "  - The sidebar shows \"An update is ready!\". Leave the mouse and keyboard alone for 20 s: CraTest restarts into 0.0.2 by itself." ;;
+  *)      echo "  - The sidebar shows \"An update is ready!\". Click it to restart into 0.0.2, or quit CraTest to install on quit." ;;
 esac
 cat <<EOF
   - After the update the sidebar says "Cra Updated!"; Cra ▸ Check for Updates… then says you're up to date.
-Run again with "again" to start over from 0.9.0, and "stop" when you're done.
+Run again with "again" to start over from 0.0.1, and "stop" when you're done.
 EOF

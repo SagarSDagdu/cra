@@ -4,11 +4,15 @@
 #   scripts/build.sh debug      debug build
 #   CRA_SIGN_IDENTITY="Developer ID Application: …" scripts/build.sh
 #                               distributable build (see docs/release.md)
+#   CRA_INSTALL_DIR=<dir> scripts/build.sh
+#                               also copies the app to <dir>/Cra.app
+# Dev builds are version 0.0.0-dev and stay unregistered with LaunchServices, so
+# opening Cra (or a cra:// link) always picks the installed release.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 CONFIG="${1:-release}"
-VERSION="${CRA_VERSION:-0.1.0}"
+VERSION="${CRA_VERSION:-0.0.0-dev}"
 BUILD_NUMBER="${CRA_BUILD:-$(date +%Y%m%d%H%M)}"
 
 scripts/fetch-cef.sh
@@ -88,15 +92,15 @@ mkdir -p "$FINAL_APP"
 rsync -a --delete "$APP/" "$FINAL_APP/"
 "$LSREGISTER" -u "$APP" >/dev/null 2>&1 || true
 rm -rf "$STAGE"
-"$LSREGISTER" -f "$FINAL_APP" || true
+"$LSREGISTER" -u "$FINAL_APP" >/dev/null 2>&1 || true
 echo "Built $FINAL_APP"
 
-# Install outside ~/Documents: an app that runs from Documents makes macOS ask for
-# folder access and blocks the main thread until answered. The installed copy is the
-# one LaunchServices opens for cra:// URLs.
-INSTALL_APP="${CRA_INSTALL_DIR:-$HOME/Applications}/Cra.app"
-mkdir -p "$(dirname "$INSTALL_APP")"
-rsync -a --delete "$FINAL_APP/" "$INSTALL_APP/"
-"$LSREGISTER" -u "$FINAL_APP" >/dev/null 2>&1 || true
-"$LSREGISTER" -f "$INSTALL_APP" >/dev/null 2>&1 || true
-echo "Installed $INSTALL_APP"
+# Optional copy outside ~/Documents (an app that runs from Documents makes macOS ask
+# for folder access and blocks the main thread until answered).
+if [ -n "${CRA_INSTALL_DIR:-}" ]; then
+  INSTALL_APP="$CRA_INSTALL_DIR/Cra.app"
+  mkdir -p "$CRA_INSTALL_DIR"
+  rsync -a --delete "$FINAL_APP/" "$INSTALL_APP/"
+  "$LSREGISTER" -u "$INSTALL_APP" >/dev/null 2>&1 || true
+  echo "Installed $INSTALL_APP"
+fi
