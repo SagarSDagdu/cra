@@ -16,6 +16,10 @@ final class CommandBarController {
     var fieldText = ""
     var fieldTextVersion = 0
     var allowCompletion = true
+    /// Text shown in the field while arrowing through rows (Chrome/Arc fill the
+    /// field with the selected row); nil shows what was typed. Bump version to apply.
+    var previewText: String?
+    var previewVersion = 0
     /// Layout hints set by the window controller before opening.
     var panelWidth: CGFloat = CraMetrics.commandBarWidth
     var attached = false
@@ -47,6 +51,7 @@ final class CommandBarController {
         fieldTextVersion += 1
         allowCompletion = false
         selectedIndex = 0
+        previewText = nil
         result = engine.suggestions(for: query, mode: mode, currentTabID: store.selectedTabID)
         isOpen = true
     }
@@ -64,12 +69,32 @@ final class CommandBarController {
         result = engine.suggestions(for: newQuery, mode: mode, currentTabID: store.selectedTabID)
         if !allowCompletion { result.inlineCompletion = nil }
         selectedIndex = 0
+        previewText = nil
     }
 
     func moveSelection(by delta: Int) {
         guard !result.items.isEmpty else { return }
         let n = result.items.count
         selectedIndex = ((selectedIndex + delta) % n + n) % n
+        // The top row is what was typed (plus its inline completion).
+        previewText = selectedIndex == 0 ? nil : fillText(for: result.items[selectedIndex])
+        previewVersion += 1
+    }
+
+    /// What the field shows for a selected row: the address for pages, the
+    /// query for searches, the name for commands.
+    private func fillText(for s: Suggestion) -> String {
+        if s.id == "typed" { return query }
+        switch s.kind {
+        case .search, .command, .switchSpace, .moveToSpace, .moveToFolder:
+            return s.title
+        case .switchToTab, .archived, .history, .navigate, .topDomain:
+            guard let url = s.url else { return s.title }
+            var t = url
+            for p in ["https://www.", "http://www.", "https://", "http://"] where t.hasPrefix(p) { t = String(t.dropFirst(p.count)); break }
+            if t.hasSuffix("/") { t.removeLast() }
+            return t
+        }
     }
 
     /// Accept the inline completion (Tab / →).

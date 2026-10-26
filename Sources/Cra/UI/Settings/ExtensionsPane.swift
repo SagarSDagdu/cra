@@ -15,7 +15,7 @@ struct ExtensionsPane: View {
             SettingsCard {
                 if extensions.entries.isEmpty {
                     SettingsCardRow {
-                        Text("No extensions installed. Add an unpacked extension folder (the kind Chrome’s “Load unpacked” takes).")
+                        Text("No extensions installed. Add one from the Chrome Web Store, or an unpacked extension folder (the kind Chrome’s “Load unpacked” takes).")
                             .font(.system(size: 13)).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     } trailing: { EmptyView() }
@@ -30,7 +30,11 @@ struct ExtensionsPane: View {
                             }
                         }
                     } trailing: {
-                        Button("Remove") { extensions.remove(e) }
+                        if e.managedByChrome {
+                            Button("Remove…") { actions.openURL("chrome://extensions/?id=\(e.extensionID)") }
+                        } else {
+                            Button("Remove") { extensions.remove(e) }
+                        }
                     }
                 }
             }

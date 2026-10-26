@@ -69,8 +69,11 @@ struct CommandBarView: View {
     }
 
     @ViewBuilder private var leadingIcon: some View {
-        if let s = controller.result.items.first, let key = s.faviconKey, s.id != "typed", let img = favicons.image(forKey: key),
-           controller.result.inlineCompletion != nil || controller.mode == .editURL {
+        // Follows the row the arrows moved to; otherwise the completing top match.
+        let previewing = controller.previewText != nil && controller.result.items.indices.contains(controller.selectedIndex)
+        let row = previewing ? controller.result.items[controller.selectedIndex] : controller.result.items.first
+        if let s = row, let key = s.faviconKey, s.id != "typed", let img = favicons.image(forKey: key),
+           previewing || controller.result.inlineCompletion != nil || controller.mode == .editURL {
             Image(nsImage: img).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
                 .frame(width: 20, height: 20).clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         } else {

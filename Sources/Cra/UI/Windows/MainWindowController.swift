@@ -515,10 +515,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         // Chromium's content view is flipped, so its layer's MinY edge is the top.
         let bottomLeft: CACornerMask = cv.isFlipped ? .layerMinXMaxYCorner : .layerMinXMinYCorner
         let bottomRight: CACornerMask = cv.isFlipped ? .layerMaxXMaxYCorner : .layerMaxXMinYCorner
+        let topLeft: CACornerMask = cv.isFlipped ? .layerMinXMinYCorner : .layerMinXMaxYCorner
+        let topRight: CACornerMask = cv.isFlipped ? .layerMaxXMinYCorner : .layerMaxXMaxYCorner
         var corners: CACornerMask = []
-        if abs(page.minY - body.minY) < 0.5 {
+        // A fullscreen card is square.
+        if !shell.contentFullscreen, abs(page.minY - body.minY) < 0.5 {
             if abs(page.minX - body.minX) < 0.5 { corners.insert(bottomLeft) }
             if abs(page.maxX - body.maxX) < 0.5 { corners.insert(bottomRight) }
+        }
+        // Without the toolbar the page's top edge is the card's top edge too.
+        if !shell.contentFullscreen, !shell.showToolbar, abs(page.maxY - body.maxY) < 0.5 {
+            if abs(page.minX - body.minX) < 0.5 { corners.insert(topLeft) }
+            if abs(page.maxX - body.maxX) < 0.5 { corners.insert(topRight) }
         }
         if layer.maskedCorners != corners { layer.maskedCorners = corners }
     }

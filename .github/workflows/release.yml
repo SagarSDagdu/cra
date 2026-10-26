@@ -49,7 +49,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: vendor/cef
-          key: cef-${{ runner.arch }}-${{ steps.cef.outputs.version }}
+          key: cef-${{ runner.arch }}-${{ steps.cef.outputs.version }}-${{ hashFiles('scripts/fetch-cef.sh') }}
 
       - name: Import signing certificate
         id: cert

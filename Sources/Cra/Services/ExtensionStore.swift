@@ -3,7 +3,8 @@ import CryptoKit
 import Observation
 
 /// Unpacked Chrome extensions, one folder each, loaded at start-up with
-/// --load-extension by the Chrome-style page windows.
+/// --load-extension by the Chrome-style page windows, plus the ones Chrome installed
+/// into Cra's profile itself (Chrome Web Store, chrome://extensions "Load unpacked").
 @MainActor
 @Observable
 final class ExtensionStore {
@@ -21,6 +22,9 @@ final class ExtensionStore {
         var popupPath: String?
         /// options_ui.page or options_page, relative to the folder.
         var optionsPath: String?
+        /// Installed by Chrome into the profile (Web Store); Chrome owns the folder and
+        /// loads changes at once, so removing goes through chrome://extensions.
+        var managedByChrome = false
     }
 
     /// The menu bar's Extensions menu and the toolbar read this one.
@@ -58,21 +62,31 @@ final class ExtensionStore {
         let fm = FileManager.default
         try? fm.createDirectory(at: ExtensionStore.directory, withIntermediateDirectories: true)
         let names = (try? fm.contentsOfDirectory(atPath: ExtensionStore.directory.path)) ?? []
-        entries = names.sorted().compactMap { name in
-            let dir = ExtensionStore.directory.appendingPathComponent(name, isDirectory: true)
-            guard let data = try? Data(contentsOf: dir.appendingPathComponent("manifest.json")),
-                  let m = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-            func str(_ k: String) -> String { (m[k] as? String) ?? "" }
-            var title = ExtensionImporter.localized(str("name"), manifest: m, folder: dir)
-            if title.hasPrefix("__MSG_") { title = name }
-            let action = (m["action"] ?? m["browser_action"] ?? m["page_action"]) as? [String: Any]
-            let options = (m["options_ui"] as? [String: Any])?["page"] as? String ?? m["options_page"] as? String
-            return Entry(id: name, name: title.isEmpty ? name : title, version: str("version"), description: str("description"), url: dir,
-                         extensionID: Self.chromiumID(key: m["key"] as? String, folder: dir),
-                         icon: ExtensionImporter.icon(manifest: m, folder: dir, minPixels: 16),
-                         popupPath: (action?["default_popup"] as? String).flatMap { $0.isEmpty ? nil : $0 }, optionsPath: options)
+        var list = names.sorted().compactMap { name in
+            Self.entry(id: name, folder: ExtensionStore.directory.appendingPathComponent(name, isDirectory: true), extensionID: nil)
         }
+        let loaded = Set(list.map(\.extensionID))
+        for e in ExtensionImporter.extensions(inUserData: AppPaths.chromiumCache) where e.isEnabled && !loaded.contains(e.id) {
+            guard var entry = Self.entry(id: e.id, folder: e.folder, extensionID: e.id) else { continue }
+            entry.managedByChrome = true
+            list.append(entry)
+        }
+        entries = list
         pinnedIDs.removeAll { id in !entries.contains { $0.extensionID == id } }
+    }
+
+    private static func entry(id: String, folder dir: URL, extensionID: String?) -> Entry? {
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent("manifest.json")),
+              let m = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        func str(_ k: String) -> String { (m[k] as? String) ?? "" }
+        var title = ExtensionImporter.localized(str("name"), manifest: m, folder: dir)
+        if title.hasPrefix("__MSG_") { title = id }
+        let action = (m["action"] ?? m["browser_action"] ?? m["page_action"]) as? [String: Any]
+        let options = (m["options_ui"] as? [String: Any])?["page"] as? String ?? m["options_page"] as? String
+        return Entry(id: id, name: title.isEmpty ? id : title, version: str("version"), description: str("description"), url: dir,
+                     extensionID: extensionID ?? chromiumID(key: m["key"] as? String, folder: dir),
+                     icon: ExtensionImporter.icon(manifest: m, folder: dir, minPixels: 16),
+                     popupPath: (action?["default_popup"] as? String).flatMap { $0.isEmpty ? nil : $0 }, optionsPath: options)
     }
 
     /// Chromium's ID: the first 128 bits of SHA-256 over the manifest key (or the

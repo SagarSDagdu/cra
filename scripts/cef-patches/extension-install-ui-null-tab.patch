@@ -1,0 +1,36 @@
+diff --git a/chrome/browser/ui/extensions/extension_install_ui_desktop.cc b/chrome/browser/ui/extensions/extension_install_ui_desktop.cc
+index c9e2a59c3e..8d9c8d47ec 100644
+--- a/chrome/browser/ui/extensions/extension_install_ui_desktop.cc
++++ b/chrome/browser/ui/extensions/extension_install_ui_desktop.cc
+@@ -141,11 +141,19 @@ void ExtensionInstallUIDesktop::OnInstallSuccess(
+     SkBitmap icon_to_use = icon ? *icon : SkBitmap();
+     extensions::TriggerPostInstallDialog(
+         profile(), extension, icon_to_use,
++        // Cra: resolve the tab when the install finishes, and tolerate none. An
++        // embedder (CEF) can leave the browser found above without an active tab,
++        // and the browser may be gone by the time the install completes.
+         base::BindOnce(
+-            [](BrowserWindowInterface* bwi) {
+-              return bwi->GetActiveTabInterface()->GetContents();
++            [](Profile* profile) -> content::WebContents* {
++              BrowserWindowInterface* bwi =
++                  ProfileBrowserCollection::GetForProfile(profile)
++                      ->GetLastActiveBrowser();
++              tabs::TabInterface* tab =
++                  bwi ? bwi->GetActiveTabInterface() : nullptr;
++              return tab ? tab->GetContents() : nullptr;
+             },
+-            browser_window),
++            current_profile),
+         base::BindOnce(
+             [](const extensions::ExtensionId& extension_id,
+                base::WeakPtr<content::WebContents> web_contents) {
+@@ -160,7 +168,7 @@ void ExtensionInstallUIDesktop::OnInstallSuccess(
+               }
+               BrowserView* browser_view =
+                   BrowserView::GetBrowserViewForBrowser(browser_interface);
+-              if (!browser_view->toolbar()) {
++              if (!browser_view || !browser_view->toolbar()) {
+                 return;
+               }
+               ExtensionsToolbarDesktop* extensions_toolbar =

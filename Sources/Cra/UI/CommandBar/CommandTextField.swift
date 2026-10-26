@@ -42,7 +42,13 @@ struct CommandTextField: NSViewRepresentable {
                 field.currentEditor()?.selectAll(nil)
             }
         }
-        if let c = controller.result.inlineCompletion, controller.allowCompletion, coord.pendingCompletion != c {
+        if coord.appliedPreview != controller.previewVersion {
+            coord.appliedPreview = controller.previewVersion
+            coord.showPreview(controller.previewText)
+        }
+        if controller.previewText != nil {
+            // Arrowed onto a row; the field shows that row, not a completion.
+        } else if let c = controller.result.inlineCompletion, controller.allowCompletion, coord.pendingCompletion != c {
             coord.applyCompletion(c)
         } else if controller.result.inlineCompletion == nil {
             coord.pendingCompletion = nil
@@ -56,6 +62,7 @@ struct CommandTextField: NSViewRepresentable {
         let controller: CommandBarController
         weak var field: NSTextField?
         var appliedVersion = 0
+        var appliedPreview = 0
         var lastTyped = ""
         var suppressChange = false
         var pendingCompletion: String?
@@ -71,6 +78,18 @@ struct CommandTextField: NSViewRepresentable {
             suppressChange = true
             field.stringValue = typed + remainder
             editor.selectedRange = NSRange(location: (typed as NSString).length, length: (remainder as NSString).length)
+            suppressChange = false
+        }
+
+        /// Show the arrowed-to row's text, or restore what was typed.
+        func showPreview(_ text: String?) {
+            guard let field else { return }
+            let shown = text ?? controller.query
+            suppressChange = true
+            field.stringValue = shown
+            lastTyped = shown
+            pendingCompletion = nil
+            field.currentEditor()?.selectedRange = NSRange(location: (shown as NSString).length, length: 0)
             suppressChange = false
         }
 

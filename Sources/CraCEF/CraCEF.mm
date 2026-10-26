@@ -929,6 +929,11 @@ public:
                                         CefRefPtr<CefMediaAccessCallback> callback) override {
         CraBrowser* o = owner_;
         if (!o || !o.delegate) return false;
+        // Screen sharing (getDisplayMedia) in a Chrome-style page goes to Chrome's own
+        // picker: tabs, windows or a screen, with "Also share tab audio". Granting it
+        // here would make CEF share the whole screen with system loopback audio instead.
+        if ((requested_permissions & (CEF_MEDIA_PERMISSION_DESKTOP_VIDEO_CAPTURE | CEF_MEDIA_PERMISSION_DESKTOP_AUDIO_CAPTURE)) &&
+            browser->GetHost()->GetRuntimeStyle() == CEF_RUNTIME_STYLE_CHROME) return false;
         NSUInteger kinds = 0;
         if (requested_permissions & (CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE | CEF_MEDIA_PERMISSION_DESKTOP_VIDEO_CAPTURE)) kinds |= 1;
         if (requested_permissions & (CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE | CEF_MEDIA_PERMISSION_DESKTOP_AUDIO_CAPTURE)) kinds |= 2;
@@ -1604,6 +1609,7 @@ static void MarkProfileExitedCleanly(NSString* cachePath) {
 
 @implementation CraApplication {
     BOOL _handlingSendEvent;
+    NSHashTable<NSEvent*>* _forwardedKeyEvents;
 }
 
 - (BOOL)isHandlingSendEvent { return _handlingSendEvent; }
@@ -1612,9 +1618,17 @@ static void MarkProfileExitedCleanly(NSString* cachePath) {
 // Chrome's rule: when a web view has focus, ⌘-shortcuts go to the page
 // first and only reach the menu bar if the page leaves them alone (so ⌘F in
 // Google Docs or ⌘← in a text field keep working). Reserved shortcuts are
-// taken in OnPreKeyEvent, the rest in OnKeyEvent.
+// taken in OnPreKeyEvent, the rest in OnKeyEvent. Keys the page leaves alone
+// come back here from Chromium's CommandDispatcher (redispatchKeyEvent:), and
+// those must take the normal path so the menu bar sees them: ⌘C/⌘V/⌘X/⌘A/⌘Z
+// only exist as Edit menu items sent to the page's first responder.
 - (void)sendEvent:(NSEvent*)event {
     CefScopedSendingEvent sendingEventScoper;
+    if ([_forwardedKeyEvents containsObject:event]) {
+        [_forwardedKeyEvents removeObject:event];
+        [super sendEvent:event];
+        return;
+    }
     if (event.type == NSEventTypeKeyDown && (event.modifierFlags & NSEventModifierFlagCommand)) {
         NSWindow* key = self.keyWindow;
         NSResponder* fr = key.firstResponder;
@@ -1622,6 +1636,8 @@ static void MarkProfileExitedCleanly(NSString* cachePath) {
             NSView* v = (NSView*)fr;
             for (CraBrowser* b in [g_allBrowsers allObjects]) {
                 if ([v isDescendantOf:b.containerView] || (b.hostWindow && key == b.hostWindow)) {
+                    if (!_forwardedKeyEvents) _forwardedKeyEvents = [NSHashTable weakObjectsHashTable];
+                    [_forwardedKeyEvents addObject:event];
                     [key sendEvent:event];
                     return;
                 }

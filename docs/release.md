@@ -131,6 +131,24 @@ are the controls. Details and Arc's original are in `docs/arc-reverse-engineerin
   the automatic restart) against a local appcast made with `CRA_UPDATE_URL=… scripts/appcast.sh`.
 - Copies from before the updater (0.1.0, 0.1.1) update once by hand: rerun the install line.
 
+## The Chromium engine (CEF)
+
+Cra ships its own CEF build, not Spotify's prebuilt one: Spotify builds leave out
+H.264/AAC, so MP4 and HLS video (X, Instagram, Reddit, news sites) never plays. Codecs
+are a compile-time switch and FFmpeg is linked into the framework, so there is no way
+around building it.
+
+    scripts/build-cef.sh      # ~80 GB free, several hours; resumes where it stopped
+    scripts/publish-cef.sh    # uploads the archive as pre-release cef-<version>-codecsN
+
+`build-cef.sh` checks out the same CEF commit `fetch-cef.sh` pins, applies
+`scripts/cef-patches/*.patch` on top of CEF's own patches, and builds an official
+release with `proprietary_codecs=true ffmpeg_branding=Chrome`. `fetch-cef.sh` (and CI,
+keyed on its hash) downloads the published archive into `vendor/cef`, replacing a copy
+from a different source. To change the build without a CEF version bump, bump the
+`codecsN` suffix of `CEF_RELEASE` and publish again. Needs Xcode's Metal toolchain
+(`xcodebuild -downloadComponent MetalToolchain`).
+
 ## Later
 
 - **Homebrew.** A cask (`brew install --cask cra`) pointing at the DMG and

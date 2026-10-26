@@ -1,23 +1,40 @@
 #!/bin/bash
 # Downloads the pinned CEF binary distribution into vendor/cef and builds the
 # C++ wrapper library. Safe to re-run; skips what is already there.
+#
+# Cra ships its own CEF build (scripts/build-cef.sh: H.264/AAC plus the fixes in
+# scripts/cef-patches), published as a GitHub release asset by scripts/publish-cef.sh.
+# CEF_URL=https://cef-builds.spotifycdn.com/<name>.tar.bz2 fetches Spotify's stock
+# build instead (no H.264/AAC).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CEF_VERSION="${CEF_VERSION:-154.0.34+g14c5a08+chromium-154.0.8037.98}"
 ARCH="${CEF_ARCH:-macosarm64}"
 NAME="cef_binary_${CEF_VERSION}_${ARCH}_minimal"
-URL="https://cef-builds.spotifycdn.com/${NAME}.tar.bz2"
+# Bump the suffix (codecs2, …) when the build changes but CEF_VERSION does not.
+CEF_RELEASE="${CEF_RELEASE:-cef-${CEF_VERSION%%+*}-codecs1}"
+# TODO(codecs): switch to the GitHub build once scripts/publish-cef.sh has run:
+#   https://github.com/VictorKildahl/cra/releases/download/${CEF_RELEASE}/cef_binary_${ARCH}_minimal.tar.bz2
+URL="${CEF_URL:-https://cef-builds.spotifycdn.com/${NAME}.tar.bz2}"
 
 mkdir -p vendor
+# A different pinned build replaces vendor/cef.
+[ -d vendor/cef/Release ] && [ ! -f vendor/cef/.cra-source ] && echo "https://cef-builds.spotifycdn.com/${NAME}.tar.bz2" > vendor/cef/.cra-source
+if [ -d vendor/cef/Release ] && [ "$(cat vendor/cef/.cra-source)" != "$URL" ]; then
+  echo "CEF build changed, replacing vendor/cef"
+  rm -rf vendor/cef
+fi
 if [ ! -d vendor/cef/Release ]; then
-  echo "Downloading ${NAME} (about 130 MB)..."
+  echo "Downloading ${NAME} from ${URL%/*}..."
+  rm -rf vendor/cef-download
   mkdir -p vendor/cef-download
   curl -fL --progress-bar -o "vendor/cef-download/${NAME}.tar.bz2" "$URL"
   tar -xjf "vendor/cef-download/${NAME}.tar.bz2" -C vendor/cef-download
   rm -rf vendor/cef
   mv "vendor/cef-download/${NAME}" vendor/cef
   rm -rf vendor/cef-download
+  echo "$URL" > vendor/cef/.cra-source
 fi
 
 if [ ! -f vendor/cef/build/libcef_dll_wrapper/libcef_dll_wrapper.a ]; then
