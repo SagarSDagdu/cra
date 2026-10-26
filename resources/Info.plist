@@ -50,6 +50,10 @@
 	<string>Web sites you visit can ask to use the microphone.</string>
 	<key>NSLocationUsageDescription</key>
 	<string>Web sites you visit can ask for your location.</string>
+	<!-- macOS asks the first time a page uses WebRTC: Chromium announces a random .local
+	     name over mDNS instead of handing the page this Mac's local IP address. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Video calls and other web sites can connect to devices on your network, like someone on the same Wi-Fi or your router's settings page.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
