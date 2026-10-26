@@ -262,6 +262,16 @@ public:
         }
     }
 
+    // Chromium copies --remote-debugging-pipe to renderers, where it turns on
+    // navigator.webdriver ("automation controlled"). Google sign-in then refuses
+    // with "This browser or app may not be secure". The copy happens after this
+    // hook, so removing the switch here does nothing; switch the feature off.
+    void OnBeforeChildProcessLaunch(CefRefPtr<CefCommandLine> command_line) override {
+        if (command_line->GetSwitchValue("type") == "renderer") {
+            command_line->AppendSwitchWithValue("disable-blink-features", "AutomationControlled");
+        }
+    }
+
     // Another Cra process started (LaunchServices, `open -n`). Chromium's
     // process singleton hands its command line to us. Without this CEF opens
     // a stock Chrome-style window.

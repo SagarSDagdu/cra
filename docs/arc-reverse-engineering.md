@@ -33,6 +33,12 @@ Legend: [O] observed in shipped artifact or data file, [I] inference, [U] unknow
 - [O] Section chrome: UnpinnedSectionDivider/Header (the line between pinned and Today), SidebarClearButton,
   SidebarTidyButton, SidebarPlusButton (new tab button with menu: newTab/newFolder/newEasel/newNote/newSpace),
   PinnedSectionExpansionState, spacesWithCollapsedPinnedSections.
+- [O strings] Pinned-section collapse (Arc 1.170): actions collapsePinnedSection/expandPinnedSection, menu titles
+  "Collapse Pinned Tabs"/"Expand Pinned Tabs" (not in the main menu bar, so they live on the space header),
+  a separate spaceHeaderContextMenu, analytics event pinnedSectionToggled, onResetVisiblePinnedTabsRequested.
+  StorableWindows.json keeps windows[].spacesWithCollapsedPinnedSections (per window). [I] Clicking the space
+  name toggles it and the active pinned tab stays visible; not observed live (Arc's window sat on another
+  macOS Space and ignored synthetic input, 26 Oct). Cra: WindowPrefs.collapsedPinnedSpaces, SpaceHeader.
 
 ## Window state (StorableWindows.json)
 - [O] sidebarWidth 328, sidebarMode "anchored" (binary also has floating, hidden, collapsed), focusedSpaceID, lastFocusedSpaceID,

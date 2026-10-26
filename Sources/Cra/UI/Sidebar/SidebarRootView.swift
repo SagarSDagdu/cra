@@ -366,7 +366,12 @@ struct SpaceSectionView: View {
 
     private var rows: some View {
         let todayItems = store.children(of: space.todayContainerID)
-        let pinnedItems = store.children(of: space.pinnedContainerID)
+        var pinnedItems = store.children(of: space.pinnedContainerID)
+        // Collapsed, only the pinned tab you are on stays in the list.
+        if store.isPinnedCollapsed(space.id) {
+            let selected = store.selectedTabID(in: space.id).flatMap { store.splitContaining($0) ?? store.item($0) }
+            pinnedItems = selected.flatMap { store.rootContainer(of: $0.id) == .pinned(spaceID: space.id) ? [$0] : nil } ?? []
+        }
         return VStack(alignment: .leading, spacing: 0) {
             VStack(spacing: CraMetrics.rowSpacing) {
                 ForEach(pinnedItems) { item in
@@ -418,16 +423,15 @@ struct SpaceHeader: View {
     @Environment(\.sidebarActions) private var actions
     @State private var hover = false
 
+    private var collapsed: Bool { store.isPinnedCollapsed(space.id) }
+
+    private func toggle() {
+        withAnimation(.easeInOut(duration: 0.25)) { store.togglePinnedCollapsed(space.id) }
+    }
+
+    // Arc: a click on the space name collapses or expands the pinned tabs; the menu is on right-click.
     var body: some View {
-        Menu {
-            Button("Edit Space…") { actions.editSpace(space) }
-            Button("New Folder") { actions.performAction("newFolder") }
-            Divider()
-            Button("Clear Today") { store.clearToday(space.id) }
-            Divider()
-            Button("New Space…") { actions.editSpace(nil) }
-            Button("Delete Space…") { actions.performAction("deleteSpace") }
-        } label: {
+        Button(action: toggle) {
             HStack(spacing: 8) {
                 Text(space.emoji).font(.system(size: 12))
                 Text(space.title)
@@ -437,6 +441,7 @@ struct SpaceHeader: View {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8, weight: .bold))
                     .foregroundStyle(palette.textTertiary)
+                    .rotationEffect(.degrees(collapsed ? -90 : 0))
                     .opacity(hover ? 1 : 0)
                 Spacer()
             }
@@ -445,10 +450,19 @@ struct SpaceHeader: View {
             .background(RoundedRectangle(cornerRadius: 8).fill(hover ? palette.hoverFill : .clear))
             .contentShape(Rectangle())
         }
-        .menuStyle(.button)
         .buttonStyle(.plain)
-        .menuIndicator(.hidden)
         .onHover { hover = $0 }
+        .contextMenu {
+            Button(collapsed ? "Expand Pinned Tabs" : "Collapse Pinned Tabs", action: toggle)
+            Divider()
+            Button("Edit Space…") { actions.editSpace(space) }
+            Button("New Folder") { actions.performAction("newFolder") }
+            Divider()
+            Button("Clear Today") { store.clearToday(space.id) }
+            Divider()
+            Button("New Space…") { actions.editSpace(nil) }
+            Button("Delete Space…") { actions.performAction("deleteSpace") }
+        }
     }
 }
 

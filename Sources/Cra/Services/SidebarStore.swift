@@ -696,6 +696,12 @@ final class SidebarStore {
         if expanded { prefs.expandedFolders.insert(id) } else { prefs.expandedFolders.remove(id) }
     }
 
+    /// Arc's spacesWithCollapsedPinnedSections: clicking the space name hides its pinned tabs.
+    func isPinnedCollapsed(_ spaceID: UUID) -> Bool { prefs.collapsedPinnedSpaces.contains(spaceID) }
+    func togglePinnedCollapsed(_ spaceID: UUID) {
+        if prefs.collapsedPinnedSpaces.remove(spaceID) == nil { prefs.collapsedPinnedSpaces.insert(spaceID) }
+    }
+
     // MARK: Archive
 
     func archiveTab(_ id: UUID, reason: ArchiveReason) {
