@@ -219,6 +219,21 @@ static void CraQuitMessageLoop() {
     CefQuitMessageLoop();
 }
 
+// AuthServerAllowlist as an MDM sets it for Chrome or Edge (e.g. "*.example.com").
+// CRA_AUTH_SERVER_ALLOWLIST overrides it for machines without such a profile.
+static NSString* ManagedAuthServerAllowlist() {
+    NSString* env = NSProcessInfo.processInfo.environment[@"CRA_AUTH_SERVER_ALLOWLIST"];
+    if (env.length) return env;
+    for (NSString* domain in @[@"com.google.Chrome", @"com.microsoft.Edge"]) {
+        for (NSString* key in @[@"AuthServerAllowlist", @"AuthServerWhitelist"]) {
+            id value = CFBridgingRelease(CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                                   (__bridge CFStringRef)domain));
+            if ([value isKindOfClass:NSString.class] && [value length]) return value;
+        }
+    }
+    return nil;
+}
+
 class CraApp : public CefApp, public CefBrowserProcessHandler {
 public:
     CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
@@ -254,6 +269,12 @@ public:
             if (paths.count) command_line->AppendSwitchWithValue("load-extension", CefStringFromNS([paths componentsJoinedByString:@","]));
         }
         command_line->AppendSwitchWithValue("autoplay-policy", "document-user-activation-required");
+        // Kerberos/NTLM single sign-on (ADFS /adfs/ls/wia and the like). Chromium only sends
+        // the OS ticket to allowlisted hosts, and IT sets that list as a Chrome or Edge policy,
+        // which CEF never reads. Without it those logins fail with ERR_INVALID_AUTH_CREDENTIALS.
+        if (NSString* allowlist = ManagedAuthServerAllowlist()) {
+            command_line->AppendSwitchWithValue("auth-server-allowlist", CefStringFromNS(allowlist));
+        }
         // Browser-level DevTools protocol over a private pipe (fd 3/4, no port): the trusted
         // client Chrome requires for Extensions.triggerAction (toolbar extension buttons).
         if (CraCDPPipeSetUp()) {
@@ -722,6 +743,9 @@ public:
     void OnLoadError(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, ErrorCode errorCode,
                      const CefString& errorText, const CefString& failedUrl) override {
         if ((int)errorCode == -3 /* ERR_ABORTED */ || !frame->IsMain()) return;
+        // Chrome fails a navigation that hits an auth challenge with this error, commits a
+        // blank page and asks for the password over it. Our page would replace both.
+        if ((int)errorCode == -338 /* ERR_INVALID_AUTH_CREDENTIALS */) return;
         std::string url = failedUrl.ToString();
         std::string err = errorText.ToString();
         std::string html =
