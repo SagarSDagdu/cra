@@ -1099,3 +1099,52 @@ Dark mode only; light mode was not observed.
   `applicationShouldTerminate`, skipped on engine relaunch), `autoArchiveEnabled`.
 - [U] Light-mode colours, the popup option lists, the Shortcuts details pane, hover states
   (the source list has none), and the "Advanced Settings" ad-block dialog were not opened.
+
+## Software updates (Arc 1.170, 26 Oct 2026, static + one live check)
+- [O] Arc bundles Sparkle 2.9.4 (Frameworks/Sparkle.framework, CFBundleShortVersionString 2.9.4). Info.plist:
+  `SUFeedURL` https://releases.arc.net/updates.xml, `SUPublicEDKey` (EdDSA-signed archives), `SUEnableAutomaticChecks`,
+  `SUAutomaticallyUpdate` (download in the background), `SUScheduledCheckInterval` 28800 (8 h). No `SURequireSignedFeed`.
+- [O] Module `SoftwareUpdaterClient`: SoftwareUpdateManager (SPUUpdater + SPUUpdaterDelegate), `CustomUserDriver`
+  (an SPUUserDriver in place of Sparkle's windows), UpdaterWindowController/UpdaterWindowView, UpdaterStatusView,
+  ReleaseNotesView, SparkleVersionComparison, `--disable-software-updater`, `--fake-updater`, feed channels
+  (release, release-candidate, canary, prototype, PR, a test feed at http://localhost:8889) via setUpdaterFeedOverride.
+  Driver log lines name every SPUUserDriver callback; the permission request "should never be called, because we
+  set SUEnableAutomaticChecks in Info.plist".
+- [O] Window copy: "Checking for updates..." (Cancel), "Your browser is up to date" (Close), "A new version is
+  available" (fallback title) with release notes and "Would you like to download …", a later button, Download /
+  Install, "1kB of 100MB" progress, extracting label, "Ready to Install" + "Install and Relaunch", "Installing
+  update...", errors with "Download manually". ReleaseNotesView CSS: -apple-system 12px, rgb(20,20,20) / white in
+  dark, li line-height 20px, links #458AFF, margin 12px 8px 16px 0.
+- [O] Check for Updates…, observed live (AX menu press, window-id capture): the Arc menu reads About Arc / Settings… /
+  Share Arc / Set as Default Browser / Import from Another Browser… / Check for Updates… The up-to-date window is
+  270 × 342 with no title (traffic lights only), window background, the app icon 64 pt (84 pt AX frame at y 53, art
+  x 109–160 y 69–120), "Arc" 24 pt bold label colour (frame y 147, 30 tall), "1.170.0 (89123)" 11 pt (y 175, 16
+  tall), "Your browser is up to date" 13 pt (y 209, 208 wide), both white 50% in dark mode; "Close" button fill
+  170 × 48 at (50, 256), continuous radius ≈6 (fitted to the corner's anti-aliasing), a faint shadow, label 13 pt bold
+  at white ≈80%. `UpdaterButtonBackgroundColor` asset: white, black in dark appearance. The other states were not
+  reachable (Arc was current).
+- [O] Sidebar banners (SidebarBanner module, AppData+SidebarBanner): `updateAvailable` "An update is ready!" / "Click
+  to restart" (action "Restart and Update"), "New Arc Version Available", and after the restart `updateSummary`
+  ("Updated!", "Update Complete!", "See What's New" opening the release notes; V2 with heart.circle.fill and the
+  update-heart-animation Lottie). Defaults: `autoUpdateBannerDismissalCount` (41 on this Mac),
+  `currentUpdateAvailableSince`, `currentUpdateDownloadedSince`, `lastInstalledAppVersion`,
+  `firstLaunchAfterUpdatedFromVersion`, `lastUpdateWasAutoUpdate`, `automaticUpdateWillRelaunchApp`.
+  `forceShowUpdateBanner` is read at launch only (a new window did not show it); the banner was not captured.
+- [O] Automatic restart: analytics keys auto_update_queued, ignore_user_idle, is_auto_update_enabled,
+  is_ready_to_install_update, time_since_last_active, active_tabs_blocked_update, window_dialog_sheet_visible,
+  incognito_windows_with_web_contents_exist, sleep_satisfied_for_auto_update, forced_auto_update_occurred; remote
+  flags auto-updates-enabled, new-auto-update-heuristic-enabled, auto-update-inactivity-delay-in-seconds,
+  auto-update-required-idle-duration-in-seconds; logs "Auto update was cancelled because in progress download was
+  detected" and "… one of the web contents reported unsaved work". Little Arc windows are restored only after an
+  auto-update restart. Settings: "Automatically update my Arc" (`automaticallyUpdateArc`) with "Learn more about
+  auto-updating". [U] the flag values (remote).
+- Cra: `Services/SoftwareUpdater.swift` (Sparkle 2.10 from vendor/sparkle, same Info.plist keys, feed
+  github.com/VictorKildahl/cra/releases/latest/download/appcast.xml written by scripts/appcast.sh), the updater window
+  (`UI/Updates/UpdaterWindow.swift`, pixel-matched to the capture above), sidebar banners (`UI/Updates/UpdateBanner.swift`,
+  Arc's copy, Cra's card style since Arc's was not captured), Cra menu ▸ Check for Updates… after the import item,
+  Settings ▸ Advanced ▸ "Automatically update Cra". The automatic restart waits for 10 min in the background with
+  2 min without input, or 30 min without input, and holds off for downloads, sheets, Little Windows, Picture in
+  Picture, the import and any power assertion Cra holds (Chromium's media wake locks); the relaunch doesn't take focus.
+  Verified with local appcasts (renamed CraUpd test bundle, LSEnvironment for the relaunch): background download →
+  banner → idle restart, auto-download off → "New Cra Version Available" → Download → Install and Relaunch, and the
+  "Cra Updated!" banner after each, all ad-hoc signed.

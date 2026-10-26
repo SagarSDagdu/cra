@@ -1159,6 +1159,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         return true
     }
 
+    var isImportVisible: Bool { importWindow?.window?.isVisible == true }
+
     /// Close whatever transient UI is up (used by cra://dismiss for scripting).
     func dismissTransientUI() {
         if let sheet = window?.attachedSheet { window?.endSheet(sheet) }

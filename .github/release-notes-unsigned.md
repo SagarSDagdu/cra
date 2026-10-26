@@ -6,7 +6,7 @@
 curl -fsSL https://raw.githubusercontent.com/VictorKildahl/cra/main/scripts/install.sh | bash
 ```
 
-It puts Cra in your Applications folder and opens it, with no security prompts. Run the same line again any time to update.
+It puts Cra in your Applications folder and opens it, with no security prompts. From then on Cra keeps itself up to date.
 
 **Or download `Cra.dmg` below**
 

@@ -41,6 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         installURLEventHandler()
         CraCEFRuntime.setChromeHosting(store.settings.chromeEngine)
         startContentBlocking()
+        SoftwareUpdater.shared.start(app: self)
         buildMenus()
         NotificationCenter.default.addObserver(forName: .craKeyBindingsChanged, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.buildMenus() }
@@ -55,7 +56,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         autoArchiveTimer = Timer.scheduledTimer(withTimeInterval: 1800, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.store.runAutoArchive() }
         }
-        NSApp.activate(ignoringOtherApps: true)
+        // A restart into an update while the user was away leaves the front app alone.
+        if !SoftwareUpdater.shared.launchedByAutoUpdate { NSApp.activate(ignoringOtherApps: true) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.installURLEventHandler() }
         // Extension welcome pages and chrome.tabs.create land in Cra, not in a Chrome window.
         // --load-extension extensions count as freshly installed on every launch, so their
@@ -182,6 +184,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     func applicationWillShutdown() { store.saveAll() }
+
+    /// Sparkle quits Cra to install an update and starts it again: no quit confirmation.
+    func prepareForUpdateRelaunch() {
+        isRelaunching = true
+        store.saveAll()
+    }
+
+    /// Why an automatic update restart should wait (Arc: downloads in progress,
+    /// window_dialog_sheet_visible, active tabs). Little Windows go to the Library on quit,
+    /// so an open one waits too.
+    func autoUpdateBlocker() -> String? {
+        if main.overlay.toasts.contains(where: { $0.state == CraDownloadState.inProgress.rawValue }) { return "a download is in progress" }
+        if NSApp.modalWindow != nil || NSApp.windows.contains(where: { $0.isVisible && $0.attachedSheet != nil }) { return "a dialog is open" }
+        if !littleWindows.isEmpty { return "a Little Window is open" }
+        if PictureInPictureChrome.shared.isPlaying { return "Picture in Picture is playing" }
+        if main.isImportVisible { return "the import is open" }
+        return nil
+    }
 
     private func confirmQuit() -> Bool {
         let alert = NSAlert()
@@ -629,6 +649,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         appMenu.addItem(setDefault)
         appMenu.addItem(.separator())
         appMenu.addItem(item("importData"))
+        let update = NSMenuItem(title: "Check for Updates…", action: #selector(SoftwareUpdater.checkForUpdates(_:)), keyEquivalent: "")
+        update.target = SoftwareUpdater.shared
+        appMenu.addItem(update)
         appMenu.addItem(.separator())
         appMenu.addItem(std("Hide Cra", #selector(NSApplication.hide(_:)), "h"))
         appMenu.addItem(std("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]))

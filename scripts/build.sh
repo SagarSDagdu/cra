@@ -12,6 +12,7 @@ VERSION="${CRA_VERSION:-0.1.0}"
 BUILD_NUMBER="${CRA_BUILD:-$(date +%Y%m%d%H%M)}"
 
 scripts/fetch-cef.sh
+scripts/fetch-sparkle.sh
 
 swift build -c "$CONFIG"
 BIN="$(swift build -c "$CONFIG" --show-bin-path)"
@@ -25,6 +26,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Framewor
 
 cp "$BIN/Cra" "$APP/Contents/MacOS/Cra"
 sed -e "s/__VERSION__/$VERSION/" -e "s/__BUILD__/$BUILD_NUMBER/" resources/Info.plist > "$APP/Contents/Info.plist"
+# Only release builds (scripts/release.sh) check the update feed; a dev build would
+# otherwise replace itself with the latest release.
+[ "${CRA_RELEASE:-}" = 1 ] || /usr/libexec/PlistBuddy -c "Delete :SUFeedURL" "$APP/Contents/Info.plist"
 echo -n "APPL????" > "$APP/Contents/PkgInfo"
 [ -f resources/AppIcon.icns ] && cp resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 [ -d resources/web ] && cp -R resources/web "$APP/Contents/Resources/web"
@@ -33,6 +37,9 @@ echo -n "APPL????" > "$APP/Contents/PkgInfo"
 
 FRAMEWORK_SRC="$ROOT/vendor/cef/Release/Chromium Embedded Framework.framework"
 cp -R "$FRAMEWORK_SRC" "$APP/Contents/Frameworks/"
+# Sparkle's XPC services are only for sandboxed apps; Cra uses Autoupdate and Updater.app.
+ditto "$ROOT/vendor/sparkle/Sparkle.framework" "$APP/Contents/Frameworks/Sparkle.framework"
+rm -rf "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices" "$APP/Contents/Frameworks/Sparkle.framework/XPCServices"
 
 # CEF needs one helper app per process type (see cef_variables.cmake,
 # CEF_HELPER_APP_SUFFIXES). Format: "<name suffix>|<plist suffix>".
@@ -66,6 +73,10 @@ sign() {  # sign <path> [entitlements]
 FW="$APP/Contents/Frameworks/Chromium Embedded Framework.framework"
 find "$FW/Libraries" -name '*.dylib' -print0 2>/dev/null | while IFS= read -r -d '' lib; do sign "$lib"; done
 sign "$FW"
+SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
+sign "$SPARKLE/Versions/B/Autoupdate"
+sign "$SPARKLE/Versions/B/Updater.app"
+sign "$SPARKLE"
 for h in "$APP"/Contents/Frameworks/*.app; do sign "$h" "$ROOT/resources/CraHelper.entitlements"; done
 sign "$APP" "$ROOT/resources/Cra.entitlements"
 if [ "$IDENTITY" != "-" ]; then

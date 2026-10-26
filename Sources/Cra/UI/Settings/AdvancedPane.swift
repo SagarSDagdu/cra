@@ -3,16 +3,19 @@ import SwiftUI
 
 /// Dia's Advanced pane is a form: "General:" (Automatically update), "Sounds:", "Address Bar:"
 /// (a routing popup) and "When quitting Dia:" (Warn before quitting + a restore popup). Cra
-/// has no updater or chat sounds; its page engine, search engine, import and version rows
-/// live here instead.
+/// has no chat sounds; its page engine, search engine, import and version rows live here
+/// instead.
 struct AdvancedPane: View {
     let actions: SettingsActions
     @Environment(SidebarStore.self) private var store
 
     var body: some View {
         @Bindable var store = store
+        @Bindable var updater = SoftwareUpdater.shared
         SettingsFormPane {
             SettingsFormRow(label: "General:") {
+                SettingsCheckbox(title: "Automatically update Cra", isOn: $updater.automaticallyUpdates)
+                    .disabled(!updater.isAvailable)
                 SettingsCheckbox(title: "Chrome engine for pages (extensions, Chrome DevTools)", isOn: $store.settings.chromeEngine)
                 Text("Restart Cra to apply an engine change.").font(.system(size: 11)).foregroundStyle(.secondary)
             }

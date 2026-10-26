@@ -33,6 +33,8 @@ struct SidebarRootView: View {
             }
             .frame(maxHeight: .infinity, alignment: .top)
             .clipped()
+            UpdateBanner(palette: palette)
+                .padding(.horizontal, 8)
             // Arc's list viewport ends 50pt above the window bottom; the dock sits centred in that band.
             SpaceDock(palette: palette)
                 .padding(.horizontal, 10)

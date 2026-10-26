@@ -32,6 +32,18 @@
 	<true/>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
+	<!-- Software updates: Sparkle with Arc's settings (8-hour checks, background downloads).
+	     scripts/build.sh drops SUFeedURL outside release builds. -->
+	<key>SUFeedURL</key>
+	<string>https://github.com/VictorKildahl/cra/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>/ZvLn/gEyw0MSGRKJif47YTqQPI1WhxGYbF/nOBHu7E=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>28800</integer>
 	<key>NSCameraUsageDescription</key>
 	<string>Web sites you visit can ask to use the camera.</string>
 	<key>NSMicrophoneUsageDescription</key>

@@ -19,8 +19,8 @@ Needs macOS 14 or later on Apple silicon.
 
     curl -fsSL https://raw.githubusercontent.com/VictorKildahl/cra/main/scripts/install.sh | bash
 
-It puts Cra in your Applications folder and opens it, with no security prompts. Run
-the same line again any time to update.
+It puts Cra in your Applications folder and opens it, with no security prompts. From
+then on Cra keeps itself up to date (Cra ▸ Check for Updates…).
 
 **Or download [Cra.dmg](https://github.com/VictorKildahl/cra/releases/latest/download/Cra.dmg)**
 
