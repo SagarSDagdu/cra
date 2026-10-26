@@ -575,8 +575,8 @@ Chromium only enters PiP from a page holding a user activation. `CefBrowserHost:
 never reached the page in Chrome-style hosting (CEF 154), so Cra sends an F19 key down/up straight
 to Chromium's `RenderWidgetHostViewCocoa` (the view AppKit gives real key presses to); the page sees
 `keydown F19` with `navigator.userActivation.isActive = true`, and the injected script requests PiP
-once activation is reported. Test videos must be open codecs (VP9/Opus WebM): the CEF build has no
-H.264/AAC, so an MP4 never loads metadata.
+once activation is reported. (Until 26 Oct test videos had to be VP9/Opus WebM: Spotify's CEF build
+has no H.264/AAC. Cra now ships its own CEF build with them; see docs/release.md.)
 
 ### Hover, toolbar colour, library glyph (24 Oct, late evening)
 

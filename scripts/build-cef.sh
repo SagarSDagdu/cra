@@ -56,8 +56,6 @@ automate() {
     --with-pgo-profiles \
     --no-debug-build \
     --minimal-distrib-only \
-    --no-distrib-docs \
-    --no-distrib-symbols \
     "$@"
 }
 
@@ -73,5 +71,10 @@ for p in "$PATCHES"/*.patch; do
     git -C chromium/src apply --check --reverse "$p" || { echo "$(basename "$p") does not apply" >&2; exit 1; }
   fi
 done
-# 3. Build and package without touching the checkout again.
-automate --no-update --force-build --force-distrib
+# 3. Build without touching the checkout again.
+automate --no-update --force-build --no-distrib
+# 4. Package. automate-git does not pass --no-symbols on for branches after 7151,
+#    and without dSYMs (enable_dsyms=false) make_distrib then fails.
+rm -rf chromium/src/cef/binary_distrib
+(cd chromium/src/cef/tools && python3 make_distrib.py --output-dir=../binary_distrib --allow-partial \
+  --ninja-build --arm64-build --minimal --no-docs --no-symbols)

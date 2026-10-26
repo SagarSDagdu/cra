@@ -14,9 +14,7 @@ ARCH="${CEF_ARCH:-macosarm64}"
 NAME="cef_binary_${CEF_VERSION}_${ARCH}_minimal"
 # Bump the suffix (codecs2, …) when the build changes but CEF_VERSION does not.
 CEF_RELEASE="${CEF_RELEASE:-cef-${CEF_VERSION%%+*}-codecs1}"
-# TODO(codecs): switch to the GitHub build once scripts/publish-cef.sh has run:
-#   https://github.com/VictorKildahl/cra/releases/download/${CEF_RELEASE}/cef_binary_${ARCH}_minimal.tar.bz2
-URL="${CEF_URL:-https://cef-builds.spotifycdn.com/${NAME}.tar.bz2}"
+URL="${CEF_URL:-https://github.com/VictorKildahl/cra/releases/download/${CEF_RELEASE}/cef_binary_${ARCH}_minimal.tar.bz2}"
 
 mkdir -p vendor
 # A different pinned build replaces vendor/cef.

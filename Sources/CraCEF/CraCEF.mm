@@ -130,6 +130,12 @@ public:
         if (!g_strayPageHandler || !frame->IsMain()) return false;
         NSString* url = NSStringFromCef(request->GetURL());
         if (url.length == 0 || [url isEqualToString:@"about:blank"]) return false;
+        // Chrome's own empty tab (the window it opens to show "extension added" after a
+        // Web Store install): nobody asked for it, so it is closed, not turned into a tab.
+        if ([url hasPrefix:@"chrome://newtab"] || [url hasPrefix:@"chrome://new-tab-page"]) {
+            browser->GetHost()->CloseBrowser(true);
+            return true;
+        }
         void (^handler)(NSString*) = g_strayPageHandler;
         dispatch_async(dispatch_get_main_queue(), ^{ handler(url); });
         browser->GetHost()->CloseBrowser(true);
