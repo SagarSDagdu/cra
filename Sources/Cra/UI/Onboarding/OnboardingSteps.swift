@@ -348,26 +348,118 @@ private struct PinCard: View {
 
 // MARK: - Personalization (Dia's PersonalizationView)
 
+/// Dia 1.54's PersonalizationView: the colour swatches in one row, then "Choose how you would like
+/// to view your tabs:" over two PersonalizationTabLayoutButtons (window illustrations, Dia's
+/// TabLayout/* artwork, with a ring around the picked one and its name underneath). Dia picks a
+/// tab layout; Cra's two layouts place the address bar (Arc's View ▸ Show Toolbar).
 struct PersonalizationStep: View {
     @Bindable var model: ImportFlowModel
     let c: ImportColors
-    private let cols = Array(repeating: GridItem(.fixed(44), spacing: 14), count: 6)
     var body: some View {
         ZStack(alignment: .topLeading) {
             StepHeader(title: "Make it yours",
-                       subtitle: "Pick the theme color that feels right for you.", c: c)
-            LazyVGrid(columns: cols, alignment: .leading, spacing: 14) {
+                       subtitle: "Pick the theme color and layout that feel right for you.", c: c)
+            HStack(spacing: (ImportMetrics.columnWidth - 34 * CGFloat(SpaceTheme.presets.count)) / CGFloat(SpaceTheme.presets.count - 1)) {
                 ForEach(SpaceTheme.presets.indices, id: \.self) { i in
                     ThemeSwatch(theme: SpaceTheme.presets[i], on: model.chosenTheme == i, c: c) { model.chooseTheme(i) }
                 }
             }
-            .frame(width: ImportMetrics.columnWidth, alignment: .topLeading)
+            .frame(width: ImportMetrics.columnWidth, alignment: .leading)
             .offset(y: ImportMetrics.listTop)
+            Text("Choose where the address bar goes:")
+                .font(.system(size: 13))
+                .foregroundStyle(c.body)
+                .offset(y: 228)
+            HStack(spacing: 12) {
+                LayoutTile(toolbar: false, title: "Sidebar", model: model, c: c)
+                LayoutTile(toolbar: true, title: "Toolbar", model: model, c: c)
+            }
+            .offset(y: 252)
             PrimaryButton(title: "Continue", c: c, enabled: true) { model.continueFromPersonalization() }
                 .offset(x: -1, y: ImportMetrics.buttonTop)
         }
-        // Toolbar is Cra's only layout, so there is nothing to pick but the colour.
-        .onAppear { model.classicLayout = true }
+    }
+}
+
+/// Dia's PersonalizationTabLayoutButton: the illustration at its 230×180 artwork size scaled to
+/// the column, a 3 pt ring when picked, the name in TabLayoutLabelText underneath.
+private struct LayoutTile: View {
+    let toolbar: Bool
+    let title: String
+    @Bindable var model: ImportFlowModel
+    let c: ImportColors
+
+    private static let width: CGFloat = (ImportMetrics.columnWidth - 12) / 2
+
+    var body: some View {
+        let selected = model.classicLayout == toolbar
+        let k = Self.width / 230
+        VStack(spacing: 7) {
+            LayoutArt(toolbar: toolbar, selected: selected, dark: c.dark)
+                .frame(width: 230, height: 180)
+                .scaleEffect(k, anchor: .topLeading)
+                .frame(width: 230 * k, height: 180 * k, alignment: .topLeading)
+            // TabLayoutLabelText: black 53% / white 60%.
+            Text(title)
+                .font(.system(size: 13))
+                .foregroundStyle(c.dark ? Color.white.opacity(0.6) : Color.black.opacity(0.53))
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { withAnimation(.easeOut(duration: 0.15)) { model.classicLayout = toolbar } }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(toolbar ? "Toolbar: the address bar above the page" : "Sidebar: the address bar at the top of the sidebar")
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction { model.classicLayout = toolbar }
+    }
+}
+
+/// Drawn after Dia's TabLayout/SidebarSelected and friends (230×180 pt): a 3 pt ring, a 2 pt gap,
+/// the window inset 5 pt (radius 10), 5 pt traffic lights, 54×14 pt sidebar rows on a 19 pt pitch
+/// and the page pane from x 70. Cra's version marks where the address bar sits: the first sidebar
+/// row, or a strip across the top of the page.
+private struct LayoutArt: View {
+    let toolbar: Bool
+    let selected: Bool
+    let dark: Bool
+    var body: some View {
+        let window: Color = dark ? Color(white: 0.2) : Color.black.opacity(0.05)
+        let row: Color = dark ? Color(white: 0.36) : Color.black.opacity(0.19)
+        let pane: Color = dark ? Color(white: 0.12) : .white
+        let accent: Color = dark ? Color(white: 0.62) : Color.black.opacity(0.42)
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .strokeBorder(dark ? Color(white: 0.8) : Color.black.opacity(0.8), lineWidth: 3)
+                .opacity(selected ? 1 : 0)
+            RoundedRectangle(cornerRadius: 10, style: .continuous).fill(window)
+                .frame(width: 220, height: 170)
+                .offset(x: 5, y: 5)
+            ForEach(Array(["#FF5F57", "#FEBC2E", "#28C840"].enumerated()), id: \.offset) { i, hex in
+                Circle().fill(Color(hex: hex)).frame(width: 5, height: 5)
+                    .offset(x: 13 + CGFloat(i) * 8.5, y: 14)
+            }
+            ForEach(0..<3) { i in
+                RoundedRectangle(cornerRadius: 4.5, style: .continuous)
+                    .fill(i == 0 && !toolbar ? accent : row)
+                    .frame(width: 54, height: 14)
+                    .offset(x: 10, y: 27 + CGFloat(i) * 19)
+            }
+            RoundedRectangle(cornerRadius: 6, style: .continuous).fill(pane)
+                .frame(width: 150, height: 160)
+                .overlay(alignment: .top) {
+                    if toolbar {
+                        VStack(spacing: 0) {
+                            RoundedRectangle(cornerRadius: 3, style: .continuous).fill(accent)
+                                .frame(width: 70, height: 7)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 8)
+                                .frame(height: 18)
+                            Rectangle().fill(dark ? Color.white.opacity(0.08) : Color.black.opacity(0.08)).frame(height: 1)
+                        }
+                    }
+                }
+                .offset(x: 70, y: 10)
+        }
+        .frame(width: 230, height: 180, alignment: .topLeading)
     }
 }
 
@@ -381,9 +473,9 @@ private struct ThemeSwatch: View {
         Circle()
             .fill(LinearGradient(colors: colors.count > 1 ? colors : [colors.first ?? .gray, colors.first ?? .gray],
                                  startPoint: .topLeading, endPoint: .bottomTrailing))
-            .frame(width: 44, height: 44)
+            .frame(width: 34, height: 34)
             .overlay(Circle().strokeBorder(c.ink.opacity(on ? 0.95 : 0), lineWidth: 2).padding(-3))
-            .overlay(on ? Image(systemName: "checkmark").font(.system(size: 14, weight: .bold)).foregroundStyle(.white).shadow(radius: 1) : nil)
+            .overlay(on ? Image(systemName: "checkmark").font(.system(size: 12, weight: .bold)).foregroundStyle(.white).shadow(radius: 1) : nil)
             .contentShape(Circle())
             .onTapGesture { withAnimation(.easeOut(duration: 0.12)) { tap() } }
     }

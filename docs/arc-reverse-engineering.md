@@ -1100,6 +1100,44 @@ Dark mode only; light mode was not observed.
 - [U] Light-mode colours, the popup option lists, the Shortcuts details pane, hover states
   (the source list has none), and the "Advanced Settings" ad-block dialog were not opened.
 
+## Sidebar header with the toolbar hidden (Arc 1.170, 26 Oct 2026)
+
+Sources: a 1x window capture of the running Arc (light "Victor" space, sidebarWidth 347, app in the
+background, pointer elsewhere), its AX tree, Victor's screenshot of the active window, and strings in
+the arm64 slice. [O] = observed, [I] = inferred.
+
+- [O] Arc's preference is `topBarURLEnabled` in company.thebrowser.Browser (View ▸ Show Toolbar).
+- [O] Row 1 (AX): traffic lights 16×16 at x 12/35/58, y 16. Sidebar toggle 32×32 at x 77, y 7. Go back, Go forward
+  and Reload are 32×32 at x 241/275/309 (2 pt apart, ending 6 pt from the sidebar edge), y 7. No ⌄ menu.
+- [O] Row 2: the URL pill spans x 8…338 (8 pt in from both sides of a 347 pt sidebar), y 46…81 (36 pt), corner
+  radius ≈10, fill ≈5% black over the light theme. It shows only the host ("youtube.com", no lock or globe):
+  AX static text at x 20, 13 pt regular (ink 77 pt wide, the width of SF 13 regular). Favorites start at y 90.
+- [O] Glyph tones, light theme: app in the background, every header glyph ≈22% black. App active (Victor's
+  screenshot), enabled glyphs ≈59% black, disabled ← → ≈24%, host text ≈87%.
+- [O] Victor's screenshot of the active window shows accessories at the pill's right end: pinned extensions
+  (1Password, a purple "D"), a link glyph and a slider-square glyph, about 29 pt apart, the last ~19 pt from the
+  pill's edge. In the background capture none of them exist in the AX tree.
+- [I] They appear while the header is hovered: the binary has `isHeaderViewHovered`, `isSidebarHovered`,
+  `CopyLinkContentView` and `SiteControlCenter*` types (`Arc.SidebarHeaderView`, `URLField`,
+  `shouldDisplayURLField`). Their show/hide timing was not recorded, and the dark theme was not measured.
+
+## Dia personalization tab-layout picker (Dia 1.54.2, 26 Oct 2026, static)
+
+- [O] Strings: title "Make it yours" (Cra's), subtitle "Pick the theme color and layout that feel right for you.",
+  section "Choose how you would like to view your tabs:", plus a classic-layout title and qualifier (short
+  literals inlined in code, not recovered). Views: `Onboarding.PersonalizationView`, `PersonalizationContentView`,
+  `PersonalizationColorButton`, `PersonalizationTabLayoutButton`.
+- [O] Assets (BoostBrowser_Onboarding.bundle): `TabLayout/SidebarSelected|Unselected`,
+  `TabLayout/TopOfWindowSelected|Unselected`, 230×180 pt PDFs with light and dark variants; `TabLayoutLabelText`
+  black 53% / white 60%. Settings ▸ Tabs reuses the same art at 142×135 ("Top of Window" / "Sidebar").
+- [O] Art geometry (pt): selected ring 3 pt (black 80% / #CCCCCC), 2 pt gap, window inset 5 pt with radius 10
+  (black 5% / #333333), traffic lights 5 pt, sidebar rows 54×14 at x 10, y 27 + 19n (black 19% / #5C5C5C), page
+  pane x 70…220, y 10…170 (white / #1F1F1F). The top-of-window variant has a 19 pt tab strip at black 10%.
+- [O] The art panel swaps whole screenshots per colour and layout: `RebrandPersonalization<Colour>Sidebar|TopBar`
+  (448×544) in BoostBrowser_Unboxing.bundle.
+- Cra draws its own tiles to these measurements (no Dia artwork): the first sidebar row or a strip across the
+  page marks where the address bar sits.
+
 ## Software updates (Arc 1.170, 26 Oct 2026, static + one live check)
 - [O] Arc bundles Sparkle 2.9.4 (Frameworks/Sparkle.framework, CFBundleShortVersionString 2.9.4). Info.plist:
   `SUFeedURL` https://releases.arc.net/updates.xml, `SUPublicEDKey` (EdDSA-signed archives), `SUEnableAutomaticChecks`,

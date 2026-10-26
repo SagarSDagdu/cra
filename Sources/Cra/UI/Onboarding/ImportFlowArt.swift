@@ -42,11 +42,24 @@ struct ImportArtPanel: View {
                 // Cover and privacy show only the painted backdrop.
                 EmptyView()
             case .personalization:
-                // A live preview of a Cra window in the picked theme colour.
-                WindowMock(theme: theme, colors: colors) {
-                    PlaceholderSidebar(theme: theme)
-                } pane: { EmptyView() }
+                // A live preview of a Cra window in the picked theme colour and layout.
+                WindowMock(theme: theme, colors: colors, origin: CGPoint(x: 90, y: 80), sidebarWidth: 210,
+                           headerControls: !model.classicLayout) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !model.classicLayout {
+                            AddressPreview(theme: theme, inSidebar: true)
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                        }
+                        PlaceholderSidebar(theme: theme)
+                    }
+                } pane: {
+                    if model.classicLayout {
+                        AddressPreview(theme: theme, inSidebar: false)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+                }
                 .animation(.easeInOut(duration: 0.3), value: theme)
+                .animation(.spring(response: 0.35, dampingFraction: 0.85), value: model.classicLayout)
             case .unlock, .safariExport, .passwordsFile, .credentialsResult:
                 KeyArt(colors: colors, accent: accent(model.previewTheme))
             case .pinnedTabs:
@@ -264,6 +277,8 @@ private struct WindowMock<Sidebar: View, Pane: View>: View {
     /// Dia's window enters at (124, 80) of its 448 pt artwork, sidebar 243 pt wide.
     var origin = CGPoint(x: 132, y: 80)
     var sidebarWidth: CGFloat = 236
+    /// The toolbar-hidden title row: sidebar toggle after the traffic lights, ← → ↻ at the right.
+    var headerControls = false
     @ViewBuilder let sidebar: () -> Sidebar
     @ViewBuilder let pane: () -> Pane
 
@@ -280,6 +295,19 @@ private struct WindowMock<Sidebar: View, Pane: View>: View {
                 ForEach(["#FF5F57", "#FEBC2E", "#28C840"], id: \.self) { Circle().fill(Color(hex: $0)).frame(width: 13, height: 13) }
             }
             .offset(x: 19, y: 20)
+            if headerControls {
+                let tone: Color = palette.isDark ? .white.opacity(0.55) : .black.opacity(0.45)
+                HStack(spacing: 2) {
+                    Image(systemName: "sidebar.left").frame(width: 24)
+                    Spacer()
+                    ForEach(["arrow.left", "arrow.right", "arrow.clockwise"], id: \.self) { Image(systemName: $0).frame(width: 24) }
+                }
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(tone)
+                .frame(width: sidebarWidth - 86, height: 26)
+                .offset(x: 80, y: 13.5)
+                .transition(.opacity)
+            }
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(palette.isDark ? Color(white: 0.12) : .white)
                 .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
@@ -390,6 +418,46 @@ private struct PlaceholderSidebar: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
+    }
+}
+
+/// The address bar of the personalization preview: Arc's second sidebar row
+/// (nav buttons and a URL pill), or the toolbar strip above the page.
+private struct AddressPreview: View {
+    let theme: SpaceTheme
+    let inSidebar: Bool
+    var body: some View {
+        let p = theme.palette
+        if inSidebar {
+            // Arc's toolbar-hidden URL pill: the sidebar's width less 8 pt a side, the bare host.
+            RoundedRectangle(cornerRadius: 9, style: .continuous).fill(p.pillFill)
+                .frame(height: 34)
+                .overlay(alignment: .leading) {
+                    Text("crabrowser.app").font(.system(size: 12.5)).foregroundStyle(p.textPrimary).padding(.leading, 11)
+                }
+                .padding(.horizontal, 8)
+        } else {
+            let ink: Color = p.isDark ? .white : .black
+            VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    Image(systemName: "sidebar.left").font(.system(size: 11)).foregroundStyle(ink.opacity(0.45))
+                    navButtons(p, ink: ink)
+                    Text("crabrowser.app").font(.system(size: 10.5)).foregroundStyle(ink.opacity(0.6))
+                    Spacer()
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 30)
+                Rectangle().fill(ink.opacity(0.08)).frame(height: 1)
+            }
+        }
+    }
+
+    private func navButtons(_ p: SpacePalette, ink: Color? = nil) -> some View {
+        HStack(spacing: 7) {
+            ForEach(["arrow.left", "arrow.right", "arrow.clockwise"], id: \.self) {
+                Image(systemName: $0).font(.system(size: 10, weight: .medium)).foregroundStyle(ink.map { $0.opacity(0.45) } ?? p.textTertiary)
+            }
+        }
     }
 }
 

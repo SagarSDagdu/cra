@@ -16,6 +16,8 @@ MainActor.assumeIsolated {
         CredentialImport.applyPending(profileDir: AppPaths.chromiumCache.appendingPathComponent("Default", isDirectory: true))
     }
 
+    NativeMessagingHosts.link(into: AppPaths.chromiumCache)
+
     let useChromeStyle = ProcessInfo.processInfo.environment["CRA_CHROME_STYLE"] == "1"
     let started = CraCEFRuntime.initialize(withCachePath: AppPaths.chromiumCache.path,
                                            userAgentProduct: "",

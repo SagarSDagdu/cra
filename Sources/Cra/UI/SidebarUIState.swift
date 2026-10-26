@@ -17,6 +17,8 @@ final class SidebarUIState {
     var canGoForward = false
     var isLoading = false
     var isCompact = false
+    /// Cra is the frontmost app (Arc darkens the sidebar header's glyphs then).
+    var appActive = true
     /// Page theme colour of the visible tab ("#RRGGBB" or "").
     var pageThemeColor = ""
     /// Tab chosen from the keyboard; Arc draws its yellow/black dashed ring

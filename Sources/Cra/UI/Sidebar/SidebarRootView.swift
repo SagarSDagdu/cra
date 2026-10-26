@@ -51,40 +51,63 @@ struct SidebarRootView: View {
 /// Row 1: traffic lights, the sidebar toggle right after them, nav buttons
 /// right-aligned (Arc puts them here when the toolbar shows the URL). When the
 /// toolbar is hidden the URL pill moves into the sidebar on a second row.
+///
+/// Toolbar hidden, measured on Arc 1.170 (window capture and AX tree, 26 Oct): toggle and
+/// ← → ↻ are 32 pt buttons centred 1 pt above the traffic lights, the nav buttons 2 pt apart
+/// and 6 pt from the sidebar edge, no ⌄ menu. The URL pill spans the sidebar 8 pt in from
+/// each side, 36 pt tall, 2 pt under the title area, radius 10, the bare host in 13 pt at
+/// 12 pt in. Its accessories (pinned extensions, copy link, site controls) are absent from
+/// the AX tree while the header isn't hovered.
 struct SidebarTopBar: View {
     let palette: SpacePalette
     @Environment(SidebarStore.self) private var store
     @Environment(SidebarUIState.self) private var ui
     @Environment(\.sidebarActions) private var actions
     @State private var hoverPill = false
+    @State private var hoverHeader = false
 
     var body: some View {
-        VStack(spacing: 4) {
+        let compact = !store.settings.showToolbar
+        VStack(spacing: 0) {
             HStack(spacing: 2) {
-                Spacer().frame(width: 72)
+                Spacer().frame(width: compact ? 71 : 72)
                 // The toolbar carries the sidebar toggle; this one only stands in while the toolbar is hidden.
-                if !store.settings.showToolbar {
-                    SidebarIconButton(symbol: "sidebar.left", palette: palette, help: "Hide Sidebar (⌘S)", iconSize: 15.5, weight: .regular) { actions.toggleSidebar() }
+                if compact {
+                    SidebarIconButton(symbol: "sidebar.left", palette: palette, help: "Hide Sidebar (⌘S)", size: 32, height: 32,
+                                      iconSize: 15.5, weight: .regular, active: ui.appActive) { actions.toggleSidebar() }
                 }
                 Spacer()
-                if store.settings.showToolbar, let t = store.selectedTab?.tab, store.settings.isDeveloperMode(url: t.url) {
+                if compact {
+                    headerNavButtons
+                } else if let t = store.selectedTab?.tab, store.settings.isDeveloperMode(url: t.url) {
                     navButtons
                 }
             }
-            .frame(height: 28)
-            .padding(.top, CraMetrics.titleRowCenter - 14)
-            .padding(.bottom, CraMetrics.titleAreaHeight - CraMetrics.titleRowCenter - 14)
+            .frame(height: compact ? 32 : 28)
+            .padding(.top, compact ? CraMetrics.titleRowCenter - 17 : CraMetrics.titleRowCenter - 14)
+            .padding(.bottom, compact ? CraMetrics.titleAreaHeight - CraMetrics.titleRowCenter - 15 : CraMetrics.titleAreaHeight - CraMetrics.titleRowCenter - 14)
             .padding(.horizontal, 6)
             .contentShape(Rectangle())
             .onTapGesture(count: 2) { actions.titleBarDoubleClick() }
-            if !store.settings.showToolbar {
-                HStack(spacing: 2) {
-                    navButtons
-                    urlPill
-                }
-                .padding(.horizontal, 8)
-                .padding(.bottom, 4)
+            if compact {
+                urlPill
+                    .padding(.horizontal, 8)
+                    .padding(.top, 2)
+                    .padding(.bottom, 8)
             }
+        }
+        .onHover { hoverHeader = $0 }
+    }
+
+    /// Arc's row-1 ← → ↻ with the toolbar hidden (no ⌄ menu there).
+    private var headerNavButtons: some View {
+        HStack(spacing: 2) {
+            SidebarIconButton(symbol: "arrow.left", palette: palette, help: "Go Back (⌘[)", enabled: ui.canGoBack, size: 32, height: 32,
+                              iconSize: 15, weight: .regular, active: ui.appActive) { actions.goBack() }
+            SidebarIconButton(symbol: "arrow.right", palette: palette, help: "Go Forward (⌘])", enabled: ui.canGoForward, size: 32, height: 32,
+                              iconSize: 15, weight: .regular, active: ui.appActive) { actions.goForward() }
+            SidebarIconButton(symbol: ui.isLoading ? "xmark" : "arrow.clockwise", palette: palette, help: "Refresh (⌘R)", size: 32, height: 32,
+                              iconSize: 15, weight: .regular, active: ui.appActive) { actions.reload() }
         }
     }
 
@@ -115,38 +138,91 @@ struct SidebarTopBar: View {
         let tab = store.selectedTab
         let url = tab?.tab?.url ?? ""
         let host = URL(string: url)?.host ?? ""
-        let secure = url.hasPrefix("https://")
-        return Button {
-            actions.openCommandBar(tab == nil ? .newTab : .editURL)
-        } label: {
-            HStack(spacing: 6) {
-                // Without the toolbar, the nav-bar status ("Copied Current URL") shows here.
-                if let status = ui.toolbarStatus {
-                    Image(systemName: status.symbol).font(.system(size: 10, weight: .semibold)).foregroundStyle(palette.textSecondary)
-                    Text(status.text)
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(palette.textSecondary)
-                        .lineLimit(1)
-                } else {
-                    if tab != nil {
-                        Image(systemName: secure ? "lock.fill" : "globe").font(.system(size: 10, weight: .semibold)).foregroundStyle(palette.textSecondary)
+        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+        return HStack(spacing: 0) {
+            Button {
+                actions.openCommandBar(tab == nil ? .newTab : .editURL)
+            } label: {
+                HStack(spacing: 6) {
+                    // Without the toolbar, the nav-bar status ("Copied Current URL") shows here.
+                    if let status = ui.toolbarStatus {
+                        Image(systemName: status.symbol).font(.system(size: 10, weight: .semibold)).foregroundStyle(palette.textSecondary)
+                        Text(status.text)
+                            .font(.system(size: 13))
+                            .foregroundStyle(palette.textSecondary)
+                            .lineLimit(1)
+                    } else {
+                        Text(tab == nil ? "Search or Enter URL…" : (host.isEmpty ? SuggestionEngine.humanURL(url) : host.replacingOccurrences(of: "www.", with: "")))
+                            .font(.system(size: 13))
+                            .foregroundStyle(tab == nil ? palette.textTertiary : palette.textPrimary)
+                            .lineLimit(1).truncationMode(.middle)
                     }
-                    Text(tab == nil ? "Search or Enter URL…" : (host.isEmpty ? SuggestionEngine.humanURL(url) : host.replacingOccurrences(of: "www.", with: "")))
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(tab == nil ? palette.textTertiary : palette.textPrimary)
-                        .lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
+                .id(ui.toolbarStatus?.id)
+                .transition(.opacity)
+                .padding(.leading, 12)
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
             }
-            .id(ui.toolbarStatus?.id)
-            .transition(.opacity)
-            .padding(.horizontal, 10)
-            .frame(height: 30)
-            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(hoverPill ? palette.selectedFill : palette.pillFill))
+            .buttonStyle(.plain)
+            if hoverHeader && tab != nil {
+                pillAccessories
+                    .padding(.trailing, 5)
+                    .transition(.opacity)
+            }
+        }
+        .frame(height: 36)
+        .background(shape.fill(hoverPill ? palette.selectedFill : palette.pillFill))
+        .contentShape(shape)
+        .onHover { hoverPill = $0 }
+        .animation(.easeOut(duration: 0.15), value: hoverHeader)
+        .help(url)
+    }
+
+    /// Arc's URL-bar accessories: pinned extensions, Copy Link, then the site controls
+    /// (Cra's Extensions menu, the same button as the toolbar's).
+    private var pillAccessories: some View {
+        let extensions = ExtensionStore.shared
+        return HStack(spacing: 1) {
+            ForEach(extensions.pinnedIDs, id: \.self) { id in
+                if let e = extensions.entries.first(where: { $0.extensionID == id }) {
+                    PillImageButton(image: e.icon, palette: palette, help: e.name) { actions.runExtension(id) }
+                }
+            }
+            SidebarIconButton(symbol: "link", palette: palette, help: "Copy URL (⇧⌘C)", size: 28, height: 28,
+                              iconSize: 14, weight: .regular, active: ui.appActive) { actions.performAction("copyURL") }
+            if !extensions.entries.isEmpty {
+                SidebarIconButton(symbol: "slider.horizontal.2.square", palette: palette, help: "Extensions", size: 28, height: 28,
+                                  iconSize: 15, weight: .regular, active: ui.appActive) { actions.showExtensionsMenu() }
+            }
+        }
+    }
+}
+
+/// A pinned extension in the sidebar's URL pill: its icon at 16 pt.
+private struct PillImageButton: View {
+    let image: NSImage?
+    let palette: SpacePalette
+    var help: String = ""
+    let action: () -> Void
+    @State private var hover = false
+    var body: some View {
+        Button(action: action) {
+            Group {
+                if let image {
+                    Image(nsImage: image).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+                } else {
+                    Image(systemName: "puzzlepiece.extension").resizable().aspectRatio(contentMode: .fit)
+                }
+            }
+            .frame(width: 16, height: 16)
+            .frame(width: 28, height: 28)
+            .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(hover ? palette.hoverFill : .clear))
         }
         .buttonStyle(.plain)
-        .onHover { hoverPill = $0 }
-        .help(url)
+        .onHover { hover = $0 }
+        .help(help)
     }
 }
 
@@ -156,18 +232,29 @@ struct SidebarIconButton: View {
     var help: String = ""
     var enabled: Bool = true
     var size: CGFloat = 28
+    var height: CGFloat? = nil
     var iconSize: CGFloat = 13
     var weight: Font.Weight = .medium
+    /// Header buttons follow the app's active state (nil: the plain sidebar tone).
+    var active: Bool? = nil
     let action: () -> Void
     @State private var hover = false
+
+    /// Arc 1.170 draws these glyphs at roughly 26% black (sidebar toggle, library, +) while the
+    /// app is in the background. With the app active its header glyphs darken to ~59% black;
+    /// disabled ones stay at ~24% (light theme, 26 Oct; the dark theme was not measured).
+    private var tint: Color {
+        if palette.isDark { return enabled ? Color.white.opacity(0.55) : palette.textTertiary.opacity(0.55) }
+        guard let active else { return enabled ? Color.black.opacity(0.26) : palette.textTertiary.opacity(0.55) }
+        return Color.black.opacity(enabled && active ? 0.59 : 0.24)
+    }
 
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: iconSize, weight: weight))
-                // Arc 1.170 draws these glyphs at roughly 26% black (sidebar toggle, library, +).
-                .foregroundStyle(enabled ? (palette.isDark ? Color.white.opacity(0.55) : Color.black.opacity(0.26)) : palette.textTertiary.opacity(0.55))
-                .frame(width: size, height: min(size, 28))
+                .foregroundStyle(tint)
+                .frame(width: size, height: height ?? min(size, 28))
                 .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(hover && enabled ? palette.hoverFill : .clear))
         }
         .buttonStyle(.plain)

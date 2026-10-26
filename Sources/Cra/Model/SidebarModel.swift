@@ -303,8 +303,12 @@ struct AppSettings: Codable, Equatable {
     var searchEngine: SearchEngine = .google
     var newTabsAtTop: Bool = true
     var showStatusBar: Bool = true
-    /// Arc's toolbar above the page (URL, copy link, DevTools). ⇧⌘D toggles.
-    var showToolbar: Bool = true
+    /// Arc's toolbar above the page (URL, copy link, DevTools). ⇧⌘D toggles. Off by
+    /// default like Arc, which keeps the URL at the top of the sidebar.
+    var showToolbar: Bool = false
+    /// Cra 0.1.0 saved `showToolbar` as on for everyone; settings without this mark
+    /// take the toolbar from Arc's own preference once (off without Arc).
+    var toolbarDefaultMigrated: Bool = true
     var hasSeenImportPrompt: Bool = false
     /// Arc's per-site Developer Mode (⌃D): the toolbar shows the full URL in
     /// monospace with the developer icons, and the nav buttons move to the sidebar.
@@ -377,7 +381,11 @@ extension AppSettings {
         searchEngine = try c.decodeIfPresent(SearchEngine.self, forKey: .searchEngine) ?? .google
         newTabsAtTop = try c.decodeIfPresent(Bool.self, forKey: .newTabsAtTop) ?? true
         showStatusBar = try c.decodeIfPresent(Bool.self, forKey: .showStatusBar) ?? true
-        showToolbar = try c.decodeIfPresent(Bool.self, forKey: .showToolbar) ?? true
+        if try c.decodeIfPresent(Bool.self, forKey: .toolbarDefaultMigrated) == true {
+            showToolbar = try c.decodeIfPresent(Bool.self, forKey: .showToolbar) ?? false
+        } else {
+            showToolbar = ArcImporter.showsToolbar ?? false
+        }
         hasSeenImportPrompt = try c.decodeIfPresent(Bool.self, forKey: .hasSeenImportPrompt) ?? false
         developerHosts = try c.decodeIfPresent(Set<String>.self, forKey: .developerHosts) ?? []
         chromeEngine = try c.decodeIfPresent(Bool.self, forKey: .chromeEngine) ?? true

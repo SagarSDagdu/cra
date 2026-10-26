@@ -36,6 +36,9 @@ struct ImportedArchiveEntry {
 struct ImportedSettings {
     var autoArchive: AutoArchiveThreshold?
     var sidebarWidth: Double?
+    var showToolbar: Bool?
+
+    var isEmpty: Bool { autoArchive == nil && sidebarWidth == nil && showToolbar == nil }
 }
 
 struct ImportPlan {
@@ -90,6 +93,11 @@ enum ArcImporter {
         .appendingPathComponent("Library/Application Support/Arc", isDirectory: true)
 
     static var isAvailable: Bool { FileManager.default.fileExists(atPath: supportDir.appendingPathComponent("StorableSidebar.json").path) }
+
+    /// Arc's View ▸ Show Toolbar (topBarURLEnabled, off by default); nil when Arc never stored it.
+    static var showsToolbar: Bool? {
+        UserDefaults(suiteName: "company.thebrowser.Browser")?.object(forKey: "topBarURLEnabled") as? Bool
+    }
 
     static func plan() throws -> ImportPlan {
         let url = supportDir.appendingPathComponent("StorableSidebar.json")
@@ -181,6 +189,7 @@ enum ArcImporter {
         if let threshold = UserDefaults(suiteName: "company.thebrowser.Browser")?.string(forKey: "autoArchiveTimeThreshold") {
             plan.settings.autoArchive = AutoArchiveThreshold(rawValue: threshold)
         }
+        plan.settings.showToolbar = showsToolbar
         return plan
     }
 
@@ -447,6 +456,7 @@ extension SidebarStore {
         if includeSettings {
             if let a = plan.settings.autoArchive { settings.autoArchive = a }
             if let w = plan.settings.sidebarWidth { prefs.sidebarWidth = min(max(w, 220), 520) }
+            if let t = plan.settings.showToolbar { settings.showToolbar = t }
         }
         touchAfterImport()
         return result

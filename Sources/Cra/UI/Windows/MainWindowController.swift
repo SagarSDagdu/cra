@@ -70,6 +70,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         shell.sidebarVisible = store.prefs.sidebarVisible
         shell.showToolbar = store.settings.showToolbar
         lastSidebarVisible = store.prefs.sidebarVisible
+        window.trafficLightsHidden = !store.prefs.sidebarVisible
         lastSidebarWidth = CGFloat(store.prefs.sidebarWidth)
         window.contentView = shell
         window.backgroundColor = NSColor(palette.gradientColors.first ?? .gray)
@@ -120,10 +121,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         shell.onPaneFrames = { [weak self] frames in self?.positionPageWindows(frames) }
         shell.onAnimatePaneFrames = { [weak self] frames, d in self?.animatePageWindows(to: frames, duration: d) }
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.shell.windowActive = true }
+            Task { @MainActor in self?.shell.windowActive = true; self?.sidebarUI.appActive = true }
         }
         NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.shell.windowActive = false }
+            Task { @MainActor in self?.shell.windowActive = false; self?.sidebarUI.appActive = false }
         }
     }
 
@@ -240,6 +241,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
 
         if store.prefs.sidebarVisible != lastSidebarVisible {
             lastSidebarVisible = store.prefs.sidebarVisible
+            (window as? CraWindow)?.trafficLightsHidden = !lastSidebarVisible
             // Anchoring while the sidebar floats: bring it home first so it slides from there.
             if lastSidebarVisible { floatingSidebar?.prepareForAnchoring() }
             shell.animateSidebar(visible: lastSidebarVisible, floating: false, fullscreen: shell.contentFullscreen, width: shell.sidebarWidth)
@@ -949,12 +951,24 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         return (onScreen.maxY - (store.settings.showToolbar ? CraMetrics.toolbarHeight : 0), onScreen.maxX)
     }
 
+    /// Where a popup from a URL-bar button hangs: under the toolbar, or, with the toolbar
+    /// hidden, under the sidebar's URL pill (also while the sidebar floats in its panel).
+    private func urlBarBottomOnScreen() -> CGFloat? {
+        guard !store.settings.showToolbar else { return toolbarBottomOnScreen()?.y }
+        let host = shell.sidebarHost
+        guard let w = host.window else { return nil }
+        let rect = w.convertToScreen(host.convert(host.bounds, to: nil))
+        // SidebarTopBar: title area, 2 pt, then the 36 pt pill.
+        return rect.maxY - CraMetrics.titleAreaHeight - 2 - 36
+    }
+
     /// Runs an extension's toolbar action on the focused page, like Arc's toolbar buttons and
     /// Dia's Extensions menu. The popup hangs under the toolbar, its right edge at `buttonRightX`
     /// (screen x; nil = the card's right end, for the menu bar).
     func runExtensionAction(_ id: String, buttonRightX: CGFloat? = nil) {
         guard let bar = toolbarBottomOnScreen(), let browser = currentBrowser else { openExtensionPopupPage(id); return }
-        let anchor = NSPoint(x: buttonRightX ?? bar.cardMaxX - 8, y: bar.y)
+        let y = buttonRightX != nil ? (urlBarBottomOnScreen() ?? bar.y) : bar.y
+        let anchor = NSPoint(x: buttonRightX ?? bar.cardMaxX - 8, y: y)
         Task {
             if await !ExtensionActions.shared.run(id, on: browser, anchor: anchor) { self.openExtensionPopupPage(id) }
         }
@@ -975,9 +989,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
     /// Arc's toolbar Extensions button: the same menu as the menu bar's Extensions menu,
     /// dropped just under the button.
     private func showToolbarExtensionsMenu() {
-        guard let window, let content = window.contentView, let bar = toolbarBottomOnScreen() else { return }
+        guard let window, let content = window.contentView, let y = urlBarBottomOnScreen() else { return }
         let menu = toolbarExtensionsMenu.makeMenu()
-        let point = window.convertPoint(fromScreen: NSPoint(x: NSEvent.mouseLocation.x - 14, y: bar.y - 2))
+        let point = window.convertPoint(fromScreen: NSPoint(x: NSEvent.mouseLocation.x - 14, y: y - 2))
         menu.popUp(positioning: nil, at: content.convert(point, from: nil), in: content)
     }
 
@@ -1251,9 +1265,66 @@ final class CraWindow: NSWindow {
         }
     }
 
+    /// The strip above the content card (the window's inset margin) stands in for the
+    /// title bar there. It reaches 4 pt into the toolbar card, above its buttons, so a
+    /// press just past the card's edge still counts. Movable-by-background only drags,
+    /// and the toolbar takes a click as "edit URL", so the strip's presses are handled
+    /// here: a double-click runs the title bar action, anything else drags the window.
+    private static let titleStripHeight = CraMetrics.contentInset + 4
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown, !styleMask.contains(.fullScreen),
+           let content = contentView, event.locationInWindow.y >= content.bounds.height - Self.titleStripHeight,
+           isTitleStrip(content.hitTest(content.convert(event.locationInWindow, from: nil))) {
+            if event.clickCount == 2 { performTitleDoubleClickAction() } else { performDrag(with: event) }
+            return
+        }
+        super.sendEvent(event)
+    }
+
+    /// False over the sidebar (its header handles its own clicks) and while the page
+    /// fills the window (no margin, no toolbar).
+    private func isTitleStrip(_ view: NSView?) -> Bool {
+        var v = view
+        while let current = v {
+            if current is SidebarHostingView { return false }
+            if let shell = current as? ShellView, shell.contentFullscreen { return false }
+            v = current.superview
+        }
+        return view != nil
+    }
+
+    /// Arc hides the traffic lights with the sidebar; the floating sidebar carries its
+    /// own set (FloatingSidebarController). Full screen keeps them in the revealed title bar.
+    var trafficLightsHidden = false {
+        didSet { if trafficLightsHidden != oldValue { updateTrafficLights(animated: isVisible) } }
+    }
+    private var appliedTrafficLightsHidden = false
+
+    private func updateTrafficLights(animated: Bool) {
+        let hide = trafficLightsHidden && !styleMask.contains(.fullScreen)
+        guard hide != appliedTrafficLightsHidden else { return }
+        appliedTrafficLightsHidden = hide
+        let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].compactMap { standardWindowButton($0) }
+        guard animated else {
+            for b in buttons { b.alphaValue = hide ? 0 : 1; b.isHidden = hide }
+            return
+        }
+        if !hide { for b in buttons { b.isHidden = false } }
+        // Same timing as the sidebar's slide (ShellView.animateSidebar).
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.085
+            for b in buttons { b.animator().alphaValue = hide ? 0 : 1 }
+        } completionHandler: { [weak self] in
+            guard let self, self.appliedTrafficLightsHidden == hide else { return }
+            for b in buttons { b.isHidden = hide }
+        }
+    }
+
     override func layoutIfNeeded() {
         super.layoutIfNeeded()
         positionTrafficLights()
+        updateTrafficLights(animated: false)
     }
 
     override func makeKeyAndOrderFront(_ sender: Any?) {

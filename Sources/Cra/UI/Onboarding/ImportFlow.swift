@@ -242,7 +242,7 @@ final class ImportFlowModel {
         previewSpace = p.spaces.isEmpty ? nil : 0
         includeFavorites = !p.favorites.isEmpty
         includeArchive = !p.archive.isEmpty
-        includeSettings = p.settings.autoArchive != nil || p.settings.sidebarWidth != nil
+        includeSettings = !p.settings.isEmpty
     }
 
     var canContinueFromSource: Bool { source != nil && (plan != nil || source?.needsExportedFile == true) }
@@ -423,7 +423,7 @@ final class ImportFlowModel {
         if !chosen.isEmpty {
             cats.append(ImportCategory(id: "extensions", title: "Extensions", symbol: "puzzlepiece.extension.fill", detail: count(chosen.count, "extension")))
         }
-        if includeSettings && (plan.settings.autoArchive != nil || plan.settings.sidebarWidth != nil) {
+        if includeSettings && !plan.settings.isEmpty {
             cats.append(ImportCategory(id: "settings", title: "Settings", symbol: "gearshape.fill", detail: "Auto-archive"))
         }
         categories = cats

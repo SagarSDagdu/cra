@@ -255,10 +255,10 @@ private struct SpacesStep: View {
                                 RowTitle(title: "Archived Tabs", caption: "\(plan.archive.count) tabs", c: c)
                             }
                         }
-                        if plan.settings.autoArchive != nil || plan.settings.sidebarWidth != nil {
+                        if !plan.settings.isEmpty {
                             SelectableRow(c: c, checked: model.includeSettings, toggle: { model.includeSettings.toggle() }) {
                                 RowSymbol(name: "gearshape.fill", c: c)
-                                RowTitle(title: "Settings", caption: "Auto-archive and sidebar width", c: c)
+                                RowTitle(title: "Settings", caption: "Auto-archive, sidebar width and toolbar", c: c)
                             }
                         }
                     }
@@ -331,26 +331,32 @@ private struct ProgressStep: View {
             }
             .frame(height: 22)
             .offset(y: ImportMetrics.subtitleTop)
+            // Up to eight tiles: a fourth row only fits above the notes and the button when the
+            // tiles are shorter.
+            let compact = model.categories.count > 6
+            let gap: CGFloat = compact ? 8 : ImportMetrics.gap
             let cols = [GridItem(.fixed(ImportMetrics.card.width), spacing: ImportMetrics.gap),
                         GridItem(.fixed(ImportMetrics.card.width))]
-            LazyVGrid(columns: cols, alignment: .leading, spacing: ImportMetrics.gap) {
-                ForEach(model.categories) { CategoryTile(category: $0, c: c) }
+            VStack(alignment: .leading, spacing: 12) {
+                LazyVGrid(columns: cols, alignment: .leading, spacing: gap) {
+                    ForEach(model.categories) { CategoryTile(category: $0, c: c, height: compact ? 52 : 64) }
+                }
+                // The notes follow the grid, so they never run into the tiles.
+                if model.finished {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(model.failures, id: \.self) { Text($0).lineLimit(2) }
+                        if model.importedExtensionCount > 0 {
+                            Text("Cra restarts once to load your extensions. Their settings and sign-ins stay in \(model.source?.rawValue ?? "Arc").")
+                        } else if model.credentialsStaged {
+                            Text("Cra restarts once to bring in your passwords and sign-ins.")
+                        }
+                    }
+                    .font(.system(size: 12)).foregroundStyle(c.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .frame(width: ImportMetrics.columnWidth, alignment: .topLeading)
             .offset(y: ImportMetrics.listTop - 8)
-            if model.finished {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(model.failures, id: \.self) { Text($0) }
-                    if model.importedExtensionCount > 0 {
-                        Text("Cra restarts once to load your extensions. Their settings and sign-ins stay in \(model.source?.rawValue ?? "Arc").")
-                    } else if model.credentialsStaged {
-                        Text("Cra restarts once to bring in your passwords and sign-ins.")
-                    }
-                }
-                .font(.system(size: 12)).foregroundStyle(c.caption)
-                .frame(width: ImportMetrics.columnWidth, alignment: .leading)
-                .offset(y: ImportMetrics.buttonTop - 44)
-            }
             PrimaryButton(title: model.needsRelaunch && !model.firstRun && !model.credentialsAttempted ? "Restart Cra" : "Continue",
                           c: c, enabled: model.finished) { model.continueFromProgress() }
                 .offset(x: -1, y: ImportMetrics.buttonTop)
@@ -514,6 +520,7 @@ struct ExtensionIcon: View {
 struct CategoryTile: View {
     let category: ImportCategory
     let c: ImportColors
+    var height: CGFloat = 64
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
         HStack(spacing: 12) {
@@ -535,7 +542,7 @@ struct CategoryTile: View {
             .transition(.scale.combined(with: .opacity))
         }
         .padding(.horizontal, 14)
-        .frame(width: ImportMetrics.card.width, height: 64)
+        .frame(width: ImportMetrics.card.width, height: height)
         .overlay(shape.strokeBorder(c.tileBorder, lineWidth: 1))
         .animation(.easeOut(duration: 0.2), value: category.state)
     }
