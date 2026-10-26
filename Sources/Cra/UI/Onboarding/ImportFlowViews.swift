@@ -258,7 +258,7 @@ private struct SpacesStep: View {
                         if !plan.settings.isEmpty {
                             SelectableRow(c: c, checked: model.includeSettings, toggle: { model.includeSettings.toggle() }) {
                                 RowSymbol(name: "gearshape.fill", c: c)
-                                RowTitle(title: "Settings", caption: "Auto-archive, sidebar width and toolbar", c: c)
+                                RowTitle(title: "Settings", caption: plan.settings.linkRoutes.isEmpty ? "Auto-archive, sidebar width and toolbar" : "Auto-archive, toolbar and Air Traffic Control", c: c)
                             }
                         }
                     }

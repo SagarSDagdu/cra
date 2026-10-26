@@ -7,6 +7,8 @@ struct ImportSource: Identifiable, Hashable {
         /// Arc and Dia: their own sidebar stores, and a Chromium profile for passwords and cookies.
         case arc, dia
         case chromium, firefox
+        /// Zen: Firefox underneath, with Arc-style spaces, Essentials and pinned tabs.
+        case zen
         /// Safari: only what Safari exports itself.
         case safari
     }
@@ -50,13 +52,13 @@ struct ImportSource: Identifiable, Hashable {
         chromium("chromium", "Chromium", "org.chromium.Chromium", "Chromium", account: "Chromium"),
         ImportSource(id: "firefox", name: "Firefox", bundleID: "org.mozilla.firefox", kind: .firefox,
                      dataDir: support.appendingPathComponent("Firefox", isDirectory: true)),
-        ImportSource(id: "zen", name: "Zen", bundleID: "app.zen-browser.zen", kind: .firefox,
+        ImportSource(id: "zen", name: "Zen", bundleID: "app.zen-browser.zen", kind: .zen,
                      dataDir: support.appendingPathComponent("zen", isDirectory: true)),
         ImportSource(id: "safari", name: "Safari", bundleID: "com.apple.Safari", kind: .safari,
                      dataDir: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Safari", isDirectory: true)),
     ]
 
-    /// Installed with data to bring over. Arc and Dia only need their data
+    /// Installed with data to bring over. Arc, Dia and Zen only need their data
     /// (the import also runs after they are deleted); Safari is always there.
     var isAvailable: Bool {
         switch kind {
@@ -67,6 +69,8 @@ struct ImportSource: Identifiable, Hashable {
             return isInstalled && !ChromiumImporter.profiles(userData: dataDir).isEmpty
         case .firefox:
             return isInstalled && FirefoxImporter.defaultProfile(root: dataDir) != nil
+        case .zen:
+            return FirefoxImporter.defaultProfile(root: dataDir) != nil
         }
     }
 
@@ -81,6 +85,7 @@ struct ImportSource: Identifiable, Hashable {
         case .dia: return try DiaImporter.plan()
         case .chromium: return try ChromiumImporter.plan(browser: name, userData: dataDir)
         case .firefox: return try FirefoxImporter.plan(browser: name, root: dataDir)
+        case .zen: return try ZenImporter.plan(root: dataDir)
         case .safari: return ImportPlan(source: name)
         }
     }
@@ -93,7 +98,7 @@ struct ImportSource: Identifiable, Hashable {
     func topSites(limit: Int) -> [TopSite] {
         switch kind {
         case .arc, .dia, .chromium: return ChromiumImporter.topSites(userData: dataDir, limit: limit)
-        case .firefox: return FirefoxImporter.topSites(root: dataDir, limit: limit)
+        case .firefox, .zen: return FirefoxImporter.topSites(root: dataDir, limit: limit)
         case .safari: return []
         }
     }
@@ -101,7 +106,7 @@ struct ImportSource: Identifiable, Hashable {
     func favicons(hosts: [String]) -> [String: NSImage] {
         switch kind {
         case .arc, .dia, .chromium: return ChromiumImporter.favicons(userData: dataDir, hosts: hosts)
-        case .firefox: return FirefoxImporter.favicons(root: dataDir, hosts: hosts)
+        case .firefox, .zen: return FirefoxImporter.favicons(root: dataDir, hosts: hosts)
         case .safari: return [:]
         }
     }
@@ -109,15 +114,18 @@ struct ImportSource: Identifiable, Hashable {
     func extensions() -> [ImportableExtension] {
         switch kind {
         case .arc, .dia, .chromium: return ExtensionImporter.extensions(inUserData: dataDir)
-        case .firefox, .safari: return []
+        case .firefox, .zen, .safari: return []
         }
     }
 
-    /// The installed app's own icon (Dia shows its bundled browser logos here).
+    /// The installed app's own icon, else a logo bundled in resources/browsers for a
+    /// browser that may already be deleted (Dia bundles its browser logos).
     var icon: NSImage {
         if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
             return NSWorkspace.shared.icon(forFile: url.path)
         }
+        if let url = Bundle.main.url(forResource: id, withExtension: "png", subdirectory: "browsers"),
+           let image = NSImage(contentsOf: url) { return image }
         return NSImage(systemSymbolName: "globe", accessibilityDescription: name) ?? NSImage()
     }
 }

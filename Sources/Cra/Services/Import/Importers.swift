@@ -35,12 +35,29 @@ struct ImportedArchiveEntry {
     var spaceTitle: String?
 }
 
+/// Air Traffic Control destinations name spaces by title; ids differ between browsers.
+enum ImportedLinkDestination {
+    case mostRecentSpace
+    case space(title: String)
+    case littleWindow
+}
+
+struct ImportedLinkRoute {
+    var match: LinkMatchStyle
+    var text: String
+    var destination: ImportedLinkDestination
+}
+
 struct ImportedSettings {
     var autoArchive: AutoArchiveThreshold?
     var sidebarWidth: Double?
     var showToolbar: Bool?
+    var linkRoutes: [ImportedLinkRoute] = []
+    var defaultLinkDestination: ImportedLinkDestination?
 
-    var isEmpty: Bool { autoArchive == nil && sidebarWidth == nil && showToolbar == nil }
+    var isEmpty: Bool {
+        autoArchive == nil && sidebarWidth == nil && showToolbar == nil && linkRoutes.isEmpty && defaultLinkDestination == nil
+    }
 }
 
 struct ImportPlan {
@@ -199,7 +216,39 @@ enum ArcImporter {
             plan.settings.autoArchive = AutoArchiveThreshold(rawValue: threshold)
         }
         plan.settings.showToolbar = showsToolbar
+        if let ldata = try? Data(contentsOf: supportDir.appendingPathComponent("StorableLinkRouting.json")),
+           let lroot = try? JSONSerialization.jsonObject(with: ldata) as? [String: Any] {
+            plan.settings.defaultLinkDestination = linkDestination(lroot["defaultDestination"], spaceTitles: spaceTitleByID)
+            plan.settings.linkRoutes = (lroot["rules"] as? [[String: Any]] ?? []).compactMap { linkRoute($0, spaceTitles: spaceTitleByID) }
+        }
         return plan
+    }
+
+    /// One Air Traffic Control rule: `sourceComponents[0].componentType.urlMatch` is
+    /// `{_0: {contains: {}} | {matches: {}}, _1: text}`.
+    private static func linkRoute(_ rule: [String: Any], spaceTitles: [String: String]) -> ImportedLinkRoute? {
+        guard let dest = linkDestination(rule["destination"], spaceTitles: spaceTitles),
+              let component = (rule["sourceComponents"] as? [[String: Any]])?.first,
+              let type = component["componentType"] as? [String: Any],
+              let urlMatch = type["urlMatch"] as? [String: Any],
+              let text = urlMatch["_1"] as? String else { return nil }
+        let style: LinkMatchStyle = (urlMatch["_0"] as? [String: Any])?["matches"] != nil ? .equals : .contains
+        return ImportedLinkRoute(match: style, text: text, destination: dest)
+    }
+
+    /// `{littleArc: {_0: <profile>}}` or `{space: {_0: {mostRecent: {}}}}`; a specific
+    /// space is recognised by its id anywhere inside `space`.
+    private static func linkDestination(_ value: Any?, spaceTitles: [String: String]) -> ImportedLinkDestination? {
+        guard let d = value as? [String: Any] else { return nil }
+        if d["littleArc"] != nil { return .littleWindow }
+        guard let space = d["space"] else { return nil }
+        func title(_ v: Any) -> String? {
+            if let s = v as? String { return spaceTitles[s] }
+            if let o = v as? [String: Any] { return o.values.lazy.compactMap(title).first }
+            if let a = v as? [Any] { return a.lazy.compactMap(title).first }
+            return nil
+        }
+        return title(space).map { .space(title: $0) } ?? .mostRecentSpace
     }
 
     /// Arc caches sidebar favicons as 32x32 PNGs named md5(item id).
@@ -468,6 +517,19 @@ extension SidebarStore {
             if let a = plan.settings.autoArchive { settings.autoArchive = a }
             if let w = plan.settings.sidebarWidth { prefs.sidebarWidth = min(max(w, 220), 520) }
             if let t = plan.settings.showToolbar { settings.showToolbar = t }
+            // Air Traffic Control, pointed at the spaces of the same name.
+            func destination(_ d: ImportedLinkDestination) -> LinkDestination {
+                switch d {
+                case .mostRecentSpace: return .mostRecentSpace
+                case .littleWindow: return .littleWindow
+                case .space(let title):
+                    return orderedSpaces.first { $0.title.caseInsensitiveCompare(title) == .orderedSame }.map { .space($0.id) } ?? .mostRecentSpace
+                }
+            }
+            if let d = plan.settings.defaultLinkDestination { settings.defaultLinkDestination = destination(d) }
+            for r in plan.settings.linkRoutes where !settings.linkRoutes.contains(where: { $0.match == r.match && $0.text == r.text }) {
+                settings.linkRoutes.append(LinkRoute(match: r.match, text: r.text, destination: destination(r.destination)))
+            }
         }
         touchAfterImport()
         return result

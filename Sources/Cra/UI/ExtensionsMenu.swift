@@ -38,7 +38,7 @@ final class ExtensionsMenu: NSObject, NSMenuDelegate, NSMenuItemValidation {
         manage.target = self
         menu.addItem(manage)
 
-        // Until the toolbar's Extensions popover exists, pinning is a checklist here.
+        // Dia's checklist; the Site Control Center's tiles pin the same list (Arc).
         let pin = NSMenuItem(title: "Pin Extensions…", action: nil, keyEquivalent: "")
         let pinMenu = NSMenu(title: "Pin Extensions")
         for e in entries {

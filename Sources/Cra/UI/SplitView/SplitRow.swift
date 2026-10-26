@@ -67,7 +67,7 @@ struct SplitChildCell: View {
     var body: some View {
         let session = ui
         HStack(spacing: 8) {
-            FaviconView(key: item.tab?.faviconKey, palette: palette)
+            FaviconView(key: item.tab?.iconKey, palette: palette)
                 .frame(width: CraMetrics.favicon)
             Text(item.displayTitle)
                 .font(.system(size: 14))
@@ -91,7 +91,7 @@ struct SplitChildCell: View {
         .onTapGesture { store.selectTab(item.id) }
         .draggable(SidebarDragItem.begin(item.id, session)) {
             HStack(spacing: 8) {
-                FaviconView(key: item.tab?.faviconKey, palette: palette)
+                FaviconView(key: item.tab?.iconKey, palette: palette)
                 Text(item.displayTitle).font(.system(size: 14)).lineLimit(1)
             }
             .padding(8)

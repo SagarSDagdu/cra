@@ -134,7 +134,7 @@ struct UnlockStep: View {
     }
 }
 
-// MARK: - Exported file (Dia's SafariExportedDataView; also Firefox passwords)
+// MARK: - Exported file (Dia's SafariExportedDataView; also Firefox and Zen passwords)
 
 struct ExportedFileStep: View {
     let model: ImportFlowModel
@@ -142,13 +142,14 @@ struct ExportedFileStep: View {
     @State private var dropTargeted = false
 
     private var isSafari: Bool { model.source?.kind == .safari }
+    private var browser: String { model.source?.name ?? "Firefox" }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
             BackLink(c: c) { model.go(.source) }
-            StepHeader(title: isSafari ? "Import from Safari" : "Import Firefox passwords",
+            StepHeader(title: isSafari ? "Import from Safari" : "Import \(browser) passwords",
                        subtitle: isSafari ? "Open Safari and follow these steps to import your passwords, history, and bookmarks."
-                                          : "In Firefox, open Settings ▸ Passwords ▸ ⋯ ▸ Export Passwords, then drop the file here.", c: c)
+                                          : "In \(browser), open Settings ▸ Passwords ▸ ⋯ ▸ Export Passwords, then drop the file here.", c: c)
             VStack(alignment: .leading, spacing: 10) {
                 if isSafari {
                     InstructionRow(n: 1, text: "Open the Safari app.", c: c)

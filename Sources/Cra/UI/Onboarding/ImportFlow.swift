@@ -251,7 +251,7 @@ final class ImportFlowModel {
         guard canContinueFromSource, let source else { return }
         switch source.kind {
         case .safari: go(.safariExport)
-        case .firefox: go(.passwordsFile)
+        case .firefox, .zen: go(.passwordsFile)
         case .arc, .dia, .chromium: credentialProfiles.isEmpty ? goToSpaces() : go(.unlock)
         }
     }
@@ -312,7 +312,7 @@ final class ImportFlowModel {
     }
 
     /// Safari's exported .zip or folder (bookmarks, history, passwords) or
-    /// Firefox's exported passwords CSV.
+    /// Firefox's (or Zen's) exported passwords CSV.
     func readExport(_ url: URL) {
         guard let source, !readingExport else { return }
         readingExport = true
@@ -366,7 +366,7 @@ final class ImportFlowModel {
         credentialsStaged = false
         switch source.kind {
         case .safari: go(.safariExport)
-        case .firefox: go(.passwordsFile)
+        case .firefox, .zen: go(.passwordsFile)
         default: go(.unlock)
         }
     }

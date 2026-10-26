@@ -732,6 +732,11 @@ of the sidebar strip, pixel runs at x=500 px (2x), y = 160/700/1200/1700/2100.
   y 135 shown only while the list is scrolled away from the top, bottom one at y 1033 shown only while
   rows are hidden below the viewport (the trailing empty space does not count). Both fade over roughly
   0.2–0.3s (window captures 0.2s apart showed partial strength in the first frame).
+- [O] Pinned rows scroll with Today (26 Oct, AX row frames): one outline holds pinned, divider and Today
+  rows; at scroll value 1 the first pinned rows (Kildash, Phantom, Umami) sat above the viewport top while
+  the header stayed. No sticky pinned section: no class implements `tableView:isGroupRow:` /
+  `floatsGroupRows` (only a selector reference exists). Arc's way to keep a long pinned list out of the way
+  is collapsing it from the space name. Cra keeps the single list (a pinned/Today split was tried and dropped).
 - [?] Dark-theme hairline colour (no dark Arc sidebar on screen; Cra uses 7% white) and whether Arc keeps
   each space's scroll offset across space switches (Cra currently resets to the top).
 - Cra: favorites and `SpaceHeader` are outside the `ScrollView`; its viewport measures 0,168 284×899 in
@@ -1192,3 +1197,131 @@ the arm64 slice. [O] = observed, [I] = inferred.
   Verified with local appcasts (renamed CraUpd test bundle, LSEnvironment for the relaunch): background download →
   banner → idle restart, auto-download off → "New Cra Version Available" → Download → Install and Relaunch, and the
   "Cra Updated!" banner after each, all ad-hoc signed.
+
+## Air Traffic Control (Arc 1.170, 26 Oct 2026, live via AX + window captures)
+
+- [O] Settings ▸ Links ends with a card "Choose where links open inside Arc. ⓘ" and an "Air Traffic Control…" button,
+  which opens a 508 × 500 sheet: "Air Traffic Control" 13 pt bold at (24, 37), "New Route" 122 × 28 at (306, 32), a
+  32 × 32 close ✕ at (452, 30), a hairline, the route list (scroll area at (24, 92), 460 wide), a hairline at y 410,
+  "Default" at (60, 438) with a 165 × 24 popup at (164, 434). Each route is two lines on a 76 pt pitch, 52 pt tall:
+  "🔗 URL" (secondary, x 55) · match popup 110 × 24 at x 112 ("Is equal to" / "Contains") · text field 210 × 24 at
+  x 230 (placeholder "arc.net") · 13 pt ⊖ remove at x 449; then "↳ Open in" at x 129 with a 165 × 24 popup at x 207,
+  28 pt below. Destination menu: disabled header "Open in Space", "Most Recent Space", every space (emoji + title),
+  separator, "Little Arc". New Route appends `Contains`, empty, Most Recent Space at the bottom.
+- [O] Storage `StorableLinkRouting.json`: `{rules: [{id, sourceComponents: [{id, componentType: {urlMatch: {_0:
+  {contains: {}} | {matches: {}}, _1: "meet.google.com"}}}], destination}], defaultDestination, version: 1}` with
+  destinations `{space: {_0: {mostRecent: {}}}}` and `{littleArc: {_0: {mostRecent: {}}}}` (the inner value is the
+  profile). Swift types: LinkMatchingRule, LinkSourceComponent.ComponentType (only `urlMatch`),
+  LinkSourceTextMatchingStyle, LinkDestination, ProfileDestination. Arc seeds a meet.google.com route
+  (`didSetDefaultGoogleMeetRoute`).
+- [O] "Links from other apps open in Little Arc" *is* the default destination: switching it off rewrote
+  defaultDestination to `space(mostRecent)`, on to `littleArc`.
+- [O] Swift metadata (`__swift5_fieldmd`, arm64 slice): `LinkDestination = space(ProfileDestination) |
+  littleArc(ProfileDestination)`, `ProfileDestination = mostRecent | space(UUID) | profile(…)`, so a specific space is
+  stored as `{space: {_0: {space: {_0: "<space id>"}}}}`. `LinkMatchingRule {id, sourceComponents, destination}`,
+  `LinkSourceComponent.ComponentType = urlMatch(LinkSourceTextMatchingStyle, String)`, style `matches | contains`.
+  Only `Arc.AppReducer` and `Arc.WindowsReducer` hold the LinkRoutingClient (routing happens where URLs are opened).
+  The editor (`LinkRoutingEditor`) has a `focusedRuleID` and ComponentAction `add/delete/submit`; Return in a route
+  field did not add a second condition. Analytics: LinkRoutingWindowType `littleArc | mainWindow | customSpace`,
+  LinkRoutingURLMatchType `equals | contains`, property `autoRouted`. `AppState+DefaultLinkRoutes.swift` seeds the
+  meet.google.com → Most Recent Space route once.
+- [O] Runtime (26 Oct 2026, temporary routes written to StorableLinkRouting.json while Arc was quit, links handed over
+  with `open -g -a Arc <url>`, landing read from the AX tree and StorableSidebar.json, file restored afterwards):
+  - Both the URL and the route text lose case, the scheme and a leading `www.` before comparing: "Contains
+    https://example.com/atc-scheme" matched `http://example.com/…` and `https://www.example.com/…`; "Contains
+    ATC-CASE" matched `/atc-case`.
+  - "Contains" also sees the query and fragment (`?x=atc-order`, `#atc-recent` matched).
+  - "Is equal to" compares host and path only: `example.com/atc-eq` matched `…/atc-eq?x=1`, `…/atc-eq#frag`,
+    `http://`, `www.`, upper case and a trailing slash, but not `…/atc-eq/more`.
+  - Routes are checked in order; the first match wins. No match → the default (Little Arc).
+  - A space destination opens a new foreground tab at the top of that space's Today list (a second copy when the URL
+    is already open) and switches the main window to the space. Most Recent Space = the space the main window last
+    showed.
+  - `littleArc(space(JYSK))` opened a Little Arc whose button read "Open in Victor" (the most recent space); the
+    editor shows that destination blank. The payload only picks a profile.
+- [U] what several conditions in one rule mean (any vs all; the UI never creates them), the ⓘ help article URL
+  (built at run time, `featuresForLinkRouting`), the empty-list state.
+- Cra: `Model/LinkRouting.swift` (Arc's matching above, checked against every observed case; first match wins; the
+  Google Meet route is seeded once), `AppSettings.linkRoutes` / `defaultLinkDestination` (the Little Window checkbox is a view of the
+  default; old `openExternalLinksInLittleWindow` values migrate), `AppDelegate.openExternalURL`, Settings ▸ Tabs ▸
+  Links ▸ "Air Traffic Control…" (`UI/Settings/AirTrafficControlView.swift`, Arc's geometry within 1 pt, 440 tall to
+  fit Cra's Settings window, the window's own background instead of Arc's navy). The Arc import brings the routes
+  and default along, matching spaces by title. Compare: docs/screenshots/compare-air-traffic-control.png.
+
+## Extension popups and extension windows (Arc 1.170, 26 Oct 2026, static)
+
+Method: `strings`, `otool -oV` with relative-method-list selectors resolved by hand, and Swift field metadata
+(`__swift5_types` → field descriptors) of the arm64 slices of `Arc` and `ArcCore.framework`. No runtime capture of
+Arc's popup this time, so geometry is not measured.
+
+- [O] ArcCore's browser delegate hands the toolbar popup to the Swift shell as web contents:
+  `browser:didOpenExtensionPopup:webContents:`, `browser:didResizeExtensionPopup:size:`,
+  `browser:didCloseExtensionPopup:` (`ADKClientLive.BrowserExtensionsPopUpManager`). The window state keeps
+  `WindowState.browserExtensionPopup: BrowserExtensionPopup? {extensionID, size, browserID}` and
+  `WindowViewController` / `LittleWindowViewController` own a `browserExtensionWindowController`.
+- [O] `Arc.BrowserExtensionWindow: NSWindow` (fields store, viewStore, defaultSize; "Expected an extension
+  popupView, but there wasn't one.") and `BrowserExtensionWindowController: NSWindowController` (delegate,
+  `savedDefaultWindowFrameKey`, `userHasMovedWindow`, `closeCurrentItem:`, `windowDidBecomeKey:`,
+  `onWindowWillMove:`; autosave name `.browserExtensionWindowAutosaveFrame`).
+  [I] The popup is a separate window under the toolbar that the user can drag; once moved, its frame is remembered.
+  Every popup takes this path, whatever opened it (toolbar click, keyboard command, `chrome.action.openPopup()`).
+- [O] Windows an extension creates: ArcCore `createPopupBrowser:withDelegate:` / `didCreateNewBrowser:`,
+  `ChromiumBrowser.browserType: BrowserType {normal, popup, pictureInPicture}` and `OpenDisposition.popup`. Popup-type
+  browsers stay popups; Arc's tabs live in normal Chrome windows.
+- [O] Arc ships a list of password-manager extension IDs (`PasswordManagerExtensionID`: 1Password, its beta and
+  nightly builds, Bitwarden, Dashlane, LastPass, iCloud Passwords, Keeper, RoboForm, NordPass), plus a hard-coded
+  `chrome-extension://pejdijmoenmkgeppbflobdenhhabjlaj/page_popup.html?popupWindow=1` ([I] iCloud Passwords).
+- Cra (Chromium side, observed with a probe extension and the DevTools port):
+  - CEF creates every `CefBrowserView` browser as `TYPE_POPUP` (trusted). To extensions every Cra tab therefore
+    sits in a `"popup"` window (`windows.getAll()` returns only popups), and `chrome.action.openPopup()` fails with
+    "Browser window has no toolbar." (`PopupBrowserSupportsWindowFeature(kFeatureToolbar)` is false). 1Password
+    calls `openPopup()` from its inline menu and checks `windows.getCurrent().type === "popup"`; its
+    `windows.onCreated` handler treats every new Cra tab as a sign-in popup from the previous tab.
+    `scripts/cef-patches/extensions-normal-windows.patch` reports `IsViewsHosted()` browsers as `"normal"` and lets
+    them open popups (needs a CEF build; not in the CEF 154 codecs1 build).
+  - `windows.create({type: "popup"})` used to become a Cra tab (StrayBrowserClient). Chrome gives tabbed windows
+    `NSWindowStyleMaskFullSizeContentView` (BrowserNativeWidgetMac::PopulateCreateWindowParams) and popups a plain
+    titled window, so Cra now keeps the latter as Chrome's own window (`+[CraCEFRuntime isExtensionWindow:]`, ⌘W
+    closes it). The window does not exist yet in OnAfterCreated (GetWindowHandle is nil); it does by OnBeforeBrowse.
+  - Popups Cra did not open itself (shortcut, `openPopup()`) are found through `Target.setDiscoverTargets`: the
+    target is created as `"other"` with no URL and gets the popup URL in `targetInfoChanged`; Chrome creates the
+    bubble window hidden before that, so placement looks for a newly *visible* borderless window. Without this the
+    popup hangs off Chrome's hidden toolbar (x ≈ 174 pt from the left).
+  - [U] Not reproduced from Arc: the popup window's chrome (shadow, corner radius, drag handle) and where it reopens
+    after being dragged; Cra still uses Chrome's bubble.
+
+## Site Control Center and pinned extensions (Arc 1.170, 26 Oct 2026, live via AX + captures)
+
+- [O] The toolbar's sliders button is "Site Control Center" (32×28 at the bar's right end, after the pinned extension
+  icons at a 36 pt pitch; `SiteControlCenterView` in ARC_SiteControlCenter). It opens an `AXPopover` 262 wide whose
+  content column is 236 wide, inset 13; the popover's top sits 4 pt above the bar's bottom edge.
+- [O] Column, top to bottom: four 48×32 action buttons on a 56 pt pitch (Share, New Boost, "Capture a portion of this
+  page", "Capture the full page"; raised: gradient #363636→#212121, top edge #69696A, outline #141115), 11 pt;
+  "Extensions" 14 pt bold #D4D4D5 (hovering the section shows "Manage" 12 pt #959496 at the right; it opens
+  extension management), 10 pt; a 4-column grid of 48×32 tiles (#353436, hover #39383B) on 56/40 pt pitches:
+  pinned extensions in pin order, then the rest by name, then a "+" tile (Add Extension); 15 pt; "Settings", 10 pt;
+  208×33 rows on a 43 pt pitch (32 pt circle #F0F1FE when on, #6A6A6F when off; title 14 pt semibold #DBDBDB,
+  subtitle 13 pt #979798): Developer Mode On/Off, Block Ads & Trackers On/Off, Automatic Picture-In-Picture Allowed;
+  a divider; footer: "Secure" pill 82×32 (#363536) and a 32 pt "More" circle (#403F40). Background #272728 (dark theme).
+- [O] Pinning: each tile carries a 14 pt `pin.fill` badge at (+37, +21) from its top-left. Pinned tiles always show
+  it (#F0F1FE, AX "Unpin"); an unpinned tile shows it on hover only (#7F7E85, AX "Pin"). The badge glyph is the
+  popover's background colour.
+- [O] More menu items (strings): Clear Cache, Clear Cookies, Manage Extensions, Add Extension, All Site Settings
+  (plus Boost items).
+- [O] Extension popup window (user screenshot): ≈472×380 pt titled window, ≈25 pt title bar with a red close button and
+  disabled minimize/zoom, the popup page filling the rest.
+- Cra: `UI/SiteControlCenter.swift` (same geometry; Cra's popover lands at Arc's exact screen coordinates), the
+  second action is Copy URL (no Boosts), Capture = visible page, Capture full page = DevTools
+  `Page.captureScreenshot` with `captureBeyondViewport`; Clear Cookies = `Storage.clearDataForOrigin`, Clear Cache =
+  `Network.clearBrowserCache`, both reload. Pins live in `pinned-extensions.json`; when that file does not exist yet
+  Cra takes Arc's (then Dia's, then Chrome's) `extensions.pinned_extensions`. The popup frame is
+  `UI/Windows/ExtensionPopupWindow.swift` (Chrome's bubble as a child; the frame never becomes key, since Chrome
+  closes popups that lose focus, so its traffic lights are drawn by Cra).
+- [U] Arc's "disabled" subtitle wording for Picture-in-Picture (Cra says "Disabled"); the Secure pill's click action.
+- Popup size (Arc inherits Chrome's rule): the popup page's own size, at least 25×25 and at most 800×600, following
+  the page as it changes. When Cra has no page to hang Chrome's real popup on (no tab open, no DevTools pipe) it used
+  to load the popup page into a 1000×700 Little Window; it now uses `ExtensionPageWindow` (same frame, the page's
+  max-content width and its height at that width, re-measured every 250 ms, closes when it loses focus).
+- Chrome-style page windows that Cra re-parents keep Chrome's `BridgedContentView` at y −22 (where the title bar ended):
+  the page is drawn 22 pt low and its bottom cut off unless the content view is reset to the full window frame
+  (MainWindowController.fillContentView did this for tabs; Little Windows and the popup window now do too).

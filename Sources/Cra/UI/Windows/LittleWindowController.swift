@@ -59,7 +59,10 @@ enum LittleMetrics {
     static let popupRowHeight: CGFloat = 54
     static let popupHeaderHeight: CGFloat = 46
     static let commandBarWidth: CGFloat = 500
-    static let defaultSize = NSSize(width: 1000, height: 700)
+    static let defaultSize = NSSize(width: 1400, height: 900)
+    /// The old default, which every resize used to save (placement and the open
+    /// animation included), so a stored copy of it was never the user's choice.
+    static let legacyDefaultSize = NSSize(width: 1000, height: 700)
     static let minSize = NSSize(width: 480, height: 360)
     static let openDuration: TimeInterval = 0.12
 }
@@ -126,6 +129,7 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
         state = LittleWindowState(targetSpaceID: app.store.focusedSpaceID)
         commandBar = CommandBarController(engine: app.engine, store: app.store)
         let size = app.store.prefs.littleWindowSize.map { NSSizeFromString($0) }
+            .flatMap { $0 == LittleMetrics.legacyDefaultSize ? nil : $0 }
             .map { NSSize(width: max(LittleMetrics.minSize.width, $0.width), height: max(LittleMetrics.minSize.height, $0.height)) }
             ?? LittleMetrics.defaultSize
         let window = LittleWindow(contentRect: NSRect(origin: .zero, size: size),
@@ -198,6 +202,7 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
         w.isOpaque = false
         w.backgroundColor = .clear
         if let cv = w.contentView {
+            cv.isHidden = false   // a background tab's page (MainWindowController hides it)
             cv.wantsLayer = true
             cv.layer?.cornerRadius = LittleMetrics.cornerRadius
             cv.layer?.cornerCurve = .continuous
@@ -215,6 +220,10 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
         guard let window, let w = browser?.hostWindow, w.parent === window, !rectInWindow.isEmpty else { return }
         let onScreen = window.convertToScreen(rectInWindow)
         if w.frame != onScreen { w.setFrame(onScreen, display: true) }
+        // Chrome leaves its content view where the title bar ended (22 pt down), which
+        // showed as a strip above the page and cut off its bottom.
+        let full = NSRect(origin: .zero, size: onScreen.size)
+        if let cv = w.contentView, cv.frame != full { cv.frame = full }
         if let cv = w.contentView { cv.layer?.cornerRadius = window.styleMask.contains(.fullScreen) ? 0 : LittleMetrics.cornerRadius }
     }
 
@@ -544,6 +553,12 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
         guard let window, (notification.object as? NSWindow) === window, !window.styleMask.contains(.fullScreen) else { return }
         if commandBar.isOpen { positionCommandPanel() }
         if popup != nil { closePopup() }
+    }
+
+    /// Only a drag by the user sets the remembered size, not placement clamping
+    /// or the open animation.
+    func windowDidEndLiveResize(_ notification: Notification) {
+        guard let window, (notification.object as? NSWindow) === window, !window.styleMask.contains(.fullScreen) else { return }
         store.prefs.littleWindowSize = NSStringFromSize(window.frame.size)
     }
 
@@ -656,9 +671,9 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
         if kinds & 1 != 0 { what.append("camera") }
         if kinds & 2 != 0 { what.append("microphone") }
         if kinds & 4 != 0 { what.append("location") }
-        if what.isEmpty { what.append("a browser permission") }
         let alert = NSAlert()
-        alert.messageText = "\(origin) wants to use your \(what.joined(separator: " and "))"
+        alert.messageText = what.isEmpty ? "\(origin) is asking for a browser permission"
+                                         : "\(origin) wants to use your \(what.joined(separator: " and "))"
         alert.addButton(withTitle: "Allow")
         alert.addButton(withTitle: "Block")
         guard let window else { completion(false); return }

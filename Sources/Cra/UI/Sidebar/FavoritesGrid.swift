@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Arc's "top apps": a 4-wide grid of favorite tiles. Arc shares them between
 /// spaces; in Cra every space has its own.
@@ -58,29 +59,40 @@ struct FavoriteCell: View {
     let palette: SpacePalette
     @Environment(SidebarStore.self) private var store
     @Environment(SidebarUIState.self) private var ui
+    @Environment(FaviconCache.self) private var favicons
     @Environment(\.sidebarActions) private var actions
     @State private var hover = false
     @State private var targeted = false
 
     private var selected: Bool { store.selectedTabID(in: space.id) == item.id }
+    private var tileColor: String? { item.tab?.tileColor }
+    private var tileIsDark: Bool { tileColor.flatMap(HexColor.luminance).map { $0 < 0.5 } ?? palette.isDark }
 
     var body: some View {
         let session = ui
         ZStack {
-            // Arc 1.170: 13pt circular corners; the active tile is the hover fill
-            // with a 2pt darker rim, inactive tiles sit ~4.5% darker than the sidebar.
-            RoundedRectangle(cornerRadius: 13)
-                // Arc 1.170 over white: tile 207/194/166, hovered tile 197/184/158 (another ~4.5% black on top of the tile fill).
-                .fill(selected ? (palette.isDark ? Color.white.opacity(0.13) : Color.white.opacity(0.38))
-                      : (hover || targeted ? (palette.isDark ? Color.white.opacity(0.15) : Color.black.opacity(0.09)) : palette.pillFill))
+            if let tileColor {
+                // A picked color keeps its hue in every state; hover and selection shade it.
+                RoundedRectangle(cornerRadius: 13).fill(Color(hex: tileColor))
+                if selected || hover || targeted {
+                    RoundedRectangle(cornerRadius: 13).fill(tileIsDark ? Color.white.opacity(0.12) : Color.black.opacity(0.07))
+                }
+            } else {
+                // Arc 1.170: 13pt circular corners; the active tile is the hover fill
+                // with a 2pt darker rim, inactive tiles sit ~4.5% darker than the sidebar.
+                RoundedRectangle(cornerRadius: 13)
+                    // Arc 1.170 over white: tile 207/194/166, hovered tile 197/184/158 (another ~4.5% black on top of the tile fill).
+                    .fill(selected ? (palette.isDark ? Color.white.opacity(0.13) : Color.white.opacity(0.38))
+                          : (hover || targeted ? (palette.isDark ? Color.white.opacity(0.15) : Color.black.opacity(0.09)) : palette.pillFill))
+            }
             if selected {
                 RoundedRectangle(cornerRadius: 13)
-                    .strokeBorder(palette.isDark ? Color.white.opacity(0.14) : Color.black.opacity(0.17), lineWidth: 2)
+                    .strokeBorder(tileIsDark ? Color.white.opacity(0.14) : Color.black.opacity(0.17), lineWidth: 2)
             }
             if ui.keyboardFocusID == item.id { FocusRing(radius: 13) }
-            FaviconView(key: item.tab?.faviconKey, palette: palette, size: 20)
+            FaviconView(key: item.tab?.iconKey, palette: palette, size: 20, onDark: tileIsDark)
             if item.isUnread && !selected {
-                Circle().fill(palette.textPrimary.opacity(0.6)).frame(width: 6, height: 6)
+                Circle().fill((tileColor == nil ? palette.textPrimary : (tileIsDark ? .white : .black)).opacity(0.6)).frame(width: 6, height: 6)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                     .padding(5)
             }
@@ -107,8 +119,102 @@ struct FavoriteCell: View {
             if let t = item.tab, t.url != t.savedURL { Button("Back to Pinned Page") { actions.resetPinnedTab(item.id) } }
             Button("Make This the Pinned Page") { store.setPinnedHomeToCurrent(item.id) }
             Divider()
+            Button("Change Icon…") { pickIcon() }
+            if let key = item.tab?.customIconKey {
+                Button("Use Site Icon") {
+                    store.setCustomIcon(nil, for: item.id)
+                    favicons.removeCustomIcon(key)
+                }
+            }
+            tileColorMenu
+            Divider()
             Button("Close") { actions.closeTab(item.id) }
             Button("Archive") { store.archiveTab(item.id, reason: .manual) }
         }
+    }
+
+    private var tileColorMenu: some View {
+        Menu("Tile Color") {
+            colorToggle("Default", hex: nil)
+            ForEach(TileColor.presets, id: \.hex) { colorToggle($0.name, hex: $0.hex) }
+            if let tileColor, !TileColor.presets.contains(where: { $0.hex == tileColor }) {
+                colorToggle("Custom", hex: tileColor)
+            }
+            Button("Other Color…") {
+                let id = item.id
+                TileColorPanel.shared.show(tileColor) { [store] hex in store.setTileColor(hex, for: [id]) }
+            }
+            Divider()
+            Button("Use This Color for All Favorites") {
+                store.setTileColor(tileColor, for: store.tabs(under: space.favoritesContainerID).map(\.id))
+            }
+        }
+    }
+
+    private func colorToggle(_ name: String, hex: String?) -> some View {
+        Toggle(isOn: Binding(get: { tileColor == hex }, set: { _ in store.setTileColor(hex, for: [item.id]) })) {
+            Label { Text(name) } icon: { Image(nsImage: TileColor.swatch(hex)) }
+        }
+    }
+
+    private func pickIcon() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use Icon"
+        panel.message = "Choose an image for \(item.displayTitle)."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let key = favicons.importCustomIcon(from: url) else { NSSound.beep(); return }
+        let old = item.tab?.customIconKey
+        store.setCustomIcon(key, for: item.id)
+        if let old { favicons.removeCustomIcon(old) }
+    }
+}
+
+/// Tile backgrounds offered in a favorite's "Tile Color" menu.
+enum TileColor {
+    static let presets: [(name: String, hex: String)] = [
+        ("White", "#FFFFFF"), ("Light Gray", "#D9D9DE"), ("Graphite", "#48484A"), ("Black", "#000000"),
+        ("Red", "#FF453A"), ("Orange", "#FF9F0A"), ("Yellow", "#FFD60A"), ("Green", "#30D158"),
+        ("Teal", "#40C8E0"), ("Blue", "#0A84FF"), ("Purple", "#BF5AF2"), ("Pink", "#FF375F"),
+    ]
+
+    /// A 12pt dot for the menu; Default is drawn hollow.
+    static func swatch(_ hex: String?) -> NSImage {
+        NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
+            let path = NSBezierPath(ovalIn: rect.insetBy(dx: 0.5, dy: 0.5))
+            if let hex { NSColor(hex: hex).setFill(); path.fill() }
+            NSColor.secondaryLabelColor.setStroke()
+            path.lineWidth = 1
+            path.stroke()
+            return true
+        }
+    }
+}
+
+/// Routes the shared color panel to whichever favorite asked for it last.
+@MainActor
+final class TileColorPanel: NSObject {
+    static let shared = TileColorPanel()
+    private var onChange: ((String) -> Void)?
+
+    func show(_ hex: String?, onChange: @escaping (String) -> Void) {
+        let panel = NSColorPanel.shared
+        // Detach first so seeding the color doesn't recolor the previous tile.
+        panel.setTarget(nil)
+        panel.setAction(nil)
+        panel.showsAlpha = false
+        panel.isContinuous = true
+        if let hex { panel.color = NSColor(hex: hex) }
+        self.onChange = onChange
+        panel.setTarget(self)
+        panel.setAction(#selector(changed(_:)))
+        panel.orderFront(nil)
+    }
+
+    @objc private func changed(_ panel: NSColorPanel) {
+        guard let c = panel.color.usingColorSpace(.sRGB) else { return }
+        onChange?(String(format: "#%02X%02X%02X", Int((c.redComponent * 255).rounded()),
+                         Int((c.greenComponent * 255).rounded()), Int((c.blueComponent * 255).rounded())))
     }
 }

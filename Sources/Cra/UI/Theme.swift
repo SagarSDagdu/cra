@@ -30,7 +30,8 @@ struct SpacePalette {
     let pillFill: Color
     let toolbarFill: Color
     let folderTint: Color
-    /// Arc 1.170: folder glyphs are a cream fill (theme colour pulled 80% to white) with an outline in the toolbar colour.
+    /// Arc 1.170: folder glyphs are a cream fill (theme colour pulled 80% to white) with an outline in the
+    /// toolbar colour. Dark themes use a light outline over a faint white fill instead.
     let folderFill: Color
     /// Selected row in the command bar (Arc tints it with the space color).
     let commandHighlight: Color
@@ -43,6 +44,15 @@ struct SpacePalette {
 
     var gradient: LinearGradient {
         LinearGradient(colors: gradientColors, startPoint: .top, endPoint: .bottom)
+    }
+
+    /// Outline and fill for a folder glyph; nil (Auto) is the theme's pair.
+    func folderColors(_ style: FolderIconStyle?) -> (tint: Color, fill: Color) {
+        switch style {
+        case nil: return (folderTint, folderFill)
+        case .white?: return (.white.opacity(0.92), .white.opacity(0.22))
+        case .black?: return (.black.opacity(0.8), .black.opacity(0.12))
+        }
     }
 }
 
@@ -132,8 +142,9 @@ extension SpaceTheme {
             pillFill: dark ? .white.opacity(0.08) : .black.opacity(0.045),
             // Arc: the toolbar is the first theme color at ~46% (dark) / lightened a touch (dark themes).
             toolbarFill: SpaceTheme.toolbarColor(self.accent ?? base[0], dark: dark),
-            folderTint: SpaceTheme.toolbarColor(self.accent ?? base[0], dark: dark),
-            folderFill: SpaceTheme.mix(base[0], towardWhite: !dark, amount: dark ? 0.25 : 0.8),
+            // Dark themes: the toolbar shade vanished on the dark sidebar, so the outline is light ink there.
+            folderTint: dark ? .white.opacity(0.85) : SpaceTheme.toolbarColor(self.accent ?? base[0], dark: dark),
+            folderFill: dark ? .white.opacity(0.14) : SpaceTheme.mix(base[0], towardWhite: true, amount: 0.8),
             commandHighlight: dark ? accent.opacity(0.55) : SpaceTheme.mix(base[0], towardWhite: false, amount: 0.45).opacity(0.75),
             noise: noise,
             // Calibrated against Arc's rendering of a 0.25-intensity vibrant theme.

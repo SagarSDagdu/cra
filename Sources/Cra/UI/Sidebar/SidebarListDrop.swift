@@ -180,16 +180,22 @@ struct SidebarListDropDelegate: DropDelegate {
 
     private func apply(_ drop: SidebarListDrop) {
         let id = drop.draggedID
+        // A picked tab carries the other picks along (a split still takes one pane).
+        let group = ui.group(for: id, in: store)
         switch drop.target {
         case .insert(let parent, let index)?:
-            store.moveItem(id, to: parent, index: index)
+            store.moveItems(group, to: parent, index: index)
         case .newFolder(let tab)?:
-            if let folder = store.createFolder(combining: tab, with: id) { ui.renamingID = folder.id }
+            if let folder = store.createFolder(combining: tab, with: group) { ui.renamingID = folder.id }
         case .split(let tab, let leading)?:
             store.createSplit(with: leading ? [id, tab] : [tab, id], at: tab)
         case .into(let target)?:
-            store.moveItem(id, to: target, index: nil)
-            if store.item(target)?.isFolder == true { store.setExpanded(target, true) }
+            if store.item(target)?.isFolder == true {
+                store.moveItems(group, to: target, index: nil)
+                store.setExpanded(target, true)
+            } else {
+                store.moveItem(id, to: target, index: nil)
+            }
         case nil:
             break
         }
@@ -240,6 +246,7 @@ struct SidebarListDropDelegate: DropDelegate {
     /// a new folder, a split row takes a pane.
     func resolve(dragged id: UUID, at p: CGPoint) -> SidebarListDrop {
         let rows = visibleRows()
+        let group = ui.group(for: id, in: store)
         let isTab = store.item(id)?.isTab == true
         let half = CraMetrics.rowSpacing / 2
         var target: SidebarListDrop.Target?
@@ -249,7 +256,7 @@ struct SidebarListDropDelegate: DropDelegate {
             let middle = (0.25..<0.75).contains(f)
             let before = SidebarListDrop.Target.insert(parent: r.parent, index: r.index)
             let after = SidebarListDrop.Target.insert(parent: r.parent, index: r.index + 1)
-            if r.item.id == id || isInside(r.item.id, id) {
+            if group.contains(r.item.id) || isInside(r.item.id, id) {
                 target = nil
             } else if r.item.isFolder {
                 if f < 0.25 { target = before }
@@ -279,7 +286,7 @@ struct SidebarListDropDelegate: DropDelegate {
         if case .insert(let parent, let index)? = target {
             if parent == id || isInside(parent, id) {
                 target = nil
-            } else if store.item(id)?.parentID == parent, let old = store.item(parent)?.children.firstIndex(of: id), index == old || index == old + 1 {
+            } else if group.count == 1, store.item(id)?.parentID == parent, let old = store.item(parent)?.children.firstIndex(of: id), index == old || index == old + 1 {
                 target = nil
             }
         }
@@ -350,7 +357,7 @@ struct SidebarDropPreview: ViewModifier {
                         .allowsHitTesting(false)
                 }
             }
-            .opacity(combine != nil ? 0 : (drop?.draggedID == id ? 0.4 : 1))
+            .opacity(combine != nil ? 0 : (drop.map { isDragged($0.draggedID) } ?? false ? 0.4 : 1))
             .overlay {
                 if let combine, let target = store.item(id), let dragged = store.item(combine.dragged) {
                     CombineDropPreview(kind: combine.kind, target: target, dragged: dragged, depth: depth, palette: palette)
@@ -360,6 +367,11 @@ struct SidebarDropPreview: ViewModifier {
             }
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(SidebarListDropDelegate.coordinateSpace)) } action: { ui.rowFrames[id] = $0 }
             .visualEffect { content, _ in content.offset(y: nudge) }
+    }
+
+    /// This row is being dragged, itself or as one of the picked tabs.
+    private func isDragged(_ draggedID: UUID) -> Bool {
+        draggedID == id || (ui.multiSelection.count > 1 && ui.multiSelection.contains(draggedID) && ui.multiSelection.contains(id))
     }
 
     private func combine(for drop: SidebarListDrop?) -> (kind: CombineDropPreview.Kind, dragged: UUID)? {
@@ -453,7 +465,7 @@ struct CombineDropPreview: View {
 
     private func cell(_ item: SidebarItem) -> some View {
         HStack(spacing: 8) {
-            FaviconView(key: item.tab?.faviconKey, palette: palette)
+            FaviconView(key: item.tab?.iconKey, palette: palette)
                 .frame(width: CraMetrics.favicon)
             Text(item.displayTitle)
                 .font(.system(size: 14))
@@ -498,7 +510,7 @@ struct CombineDropPreview: View {
     }
 
     private func stackedIcon(_ item: SidebarItem) -> some View {
-        FaviconView(key: item.tab?.faviconKey, palette: palette, size: 14)
+        FaviconView(key: item.tab?.iconKey, palette: palette, size: 14)
             .padding(3)
             .background(
                 RoundedRectangle(cornerRadius: 5, style: .continuous)

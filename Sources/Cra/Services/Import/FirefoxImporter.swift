@@ -1,7 +1,7 @@
 import AppKit
 import Compression
 
-// Firefox and Firefox-based browsers (Zen): bookmarks from places.sqlite and
+// Firefox (and Zen's bookmarks and favicons, see ZenImporter): bookmarks from places.sqlite and
 // open tabs from the session store (mozLz4). Saved logins come in only through
 // Firefox's own export (about:logins ▸ Export Passwords…), read with
 // PasswordCSV like Safari's exported Passwords.csv.
@@ -43,6 +43,10 @@ enum FirefoxImporter {
         space.today = openTabs(profile: profile)
         if !space.pinned.isEmpty || !space.today.isEmpty { plan.spaces.append(space) }
         return plan
+    }
+
+    static func bookmarks(profile: URL) -> [ImportedItem] {
+        SQLiteSnapshot(copying: profile.appendingPathComponent("places.sqlite")).map(bookmarks) ?? []
     }
 
     /// The toolbar's bookmarks, then the menu and unsorted bookmarks as folders.

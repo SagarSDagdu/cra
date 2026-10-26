@@ -176,6 +176,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         // right edge lines up with the button's (Chrome anchors popups that way).
         sidebarActions.runExtension = { [weak self] id in self?.runExtensionAction(id, buttonRightX: NSEvent.mouseLocation.x + 17) }
         sidebarActions.showExtensionsMenu = { [weak self] in self?.showToolbarExtensionsMenu() }
+        // Popups from an extension's shortcut or chrome.action.openPopup() hang where the
+        // menu bar's do: under the toolbar at the card's right end.
+        ExtensionActions.shared.watchPopups { [weak self] in
+            guard let self, let window = self.window, let key = NSApp.keyWindow, key === window || key.parent === window,
+                  let bar = self.toolbarBottomOnScreen() else { return nil }
+            return NSPoint(x: bar.cardMaxX - 8, y: bar.y)
+        }
         sidebarActions.performAction = { [weak self] id in
             if id.hasPrefix("muteTab:"), let uuid = UUID(uuidString: String(id.dropFirst(8))) {
                 let muted = self?.store.item(uuid)?.tab?.muted ?? false
@@ -429,6 +436,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         let focused = browsers.visibleRuntime?.hostWindow
         for (id, rt) in browsers.runtimes {
             guard let w = rt.hostWindow else { continue }
+            // Chromium never learns that an ordered-out window is hidden (it checks for a hidden
+            // NSView ancestor), so hidden tabs stayed "visible": background tabs autoplayed video
+            // and ran at full speed. A hidden content view makes the tab hidden like Chrome's
+            // background tabs: media waits until the tab is first shown.
+            w.contentView?.isHidden = !visibleIDs.contains(id)
             if !visibleIDs.contains(id) { if w.isVisible { w.orderOut(nil) }; continue }
             if w.parent !== window {
                 // Borderless: a titled window gets macOS's rounded corners on all four sides,
@@ -751,6 +763,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         if let u = URL(string: url) { app.handleInternalURL(u) }
     }
 
+    func browserManagerPageClosedTab(_ tabID: UUID) { closeTab(tabID) }
+
     // MARK: Tabs
 
     /// cra://debug?devtoolsjs=…: run script in the current tab's DevTools frontend.
@@ -974,7 +988,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
 
     // MARK: Extensions
 
-    private lazy var toolbarExtensionsMenu = ExtensionsMenu(app: app)
+    private let siteControlCenter = SiteControlCenterPopover()
 
     /// Screen y of the focused card's toolbar bottom (its top edge when the toolbar is hidden),
     /// and the card's right edge.
@@ -1001,33 +1015,108 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
     /// Dia's Extensions menu. The popup hangs under the toolbar, its right edge at `buttonRightX`
     /// (screen x; nil = the card's right end, for the menu bar).
     func runExtensionAction(_ id: String, buttonRightX: CGFloat? = nil) {
-        guard let bar = toolbarBottomOnScreen(), let browser = currentBrowser else { openExtensionPopupPage(id); return }
+        guard let bar = toolbarBottomOnScreen() else { openExtensionPopupPage(id, anchor: nil); return }
         let y = buttonRightX != nil ? (urlBarBottomOnScreen() ?? bar.y) : bar.y
         let anchor = NSPoint(x: buttonRightX ?? bar.cardMaxX - 8, y: y)
+        guard let browser = currentBrowser else { openExtensionPopupPage(id, anchor: anchor); return }
         Task {
-            if await !ExtensionActions.shared.run(id, on: browser, anchor: anchor) { self.openExtensionPopupPage(id) }
+            if await !ExtensionActions.shared.run(id, on: browser, anchor: anchor) { self.openExtensionPopupPage(id, anchor: anchor) }
         }
     }
 
-    /// Without the DevTools pipe (or for a page it cannot reach): the popup page in a Little
-    /// Window, else the options page, else Chrome's details page for the extension.
-    private func openExtensionPopupPage(_ id: String) {
+    /// No page for Chrome's popup to attach to (no tab open, no DevTools pipe, a page it
+    /// cannot reach): the popup page in a popup-sized window under the button, else the
+    /// options page, else Chrome's details page for the extension.
+    private func openExtensionPopupPage(_ id: String, anchor: NSPoint?) {
         guard let e = ExtensionStore.shared.entries.first(where: { $0.extensionID == id }) else { return }
         let base = "chrome-extension://\(id)/"
         if let popup = e.popupPath {
-            _ = app.openLittleWindow(url: base + popup)
+            let fallback = window.map { NSPoint(x: $0.frame.maxX - 16, y: $0.frame.maxY - CraMetrics.toolbarHeight) } ?? .zero
+            ExtensionPageWindow.open(url: base + popup, anchor: anchor ?? fallback, app: app)
         } else {
             store.createTab(url: e.optionsPath.map { base + $0 } ?? "chrome://extensions/?id=\(id)", select: true)
         }
     }
 
-    /// Arc's toolbar Extensions button: the same menu as the menu bar's Extensions menu,
-    /// dropped just under the button.
+    /// Arc's sliders button (toolbar and URL pill): the Site Control Center, hung under the
+    /// button the pointer is on (buttons are 32 × 28).
     private func showToolbarExtensionsMenu() {
         guard let window, let content = window.contentView, let y = urlBarBottomOnScreen() else { return }
-        let menu = toolbarExtensionsMenu.makeMenu()
-        let point = window.convertPoint(fromScreen: NSPoint(x: NSEvent.mouseLocation.x - 14, y: y - 2))
-        menu.popUp(positioning: nil, at: content.convert(point, from: nil), in: content)
+        ExtensionStore.shared.reload()
+        let mouse = NSEvent.mouseLocation
+        // Arc's popover overlaps the bar by 4 pt (popover top 71 under a bar ending at 75).
+        let onScreen = NSRect(x: mouse.x - 16, y: y + 4, width: 32, height: 28)
+        let rect = content.convert(window.convertFromScreen(onScreen), from: nil)
+        let url = store.selectedTabID.flatMap { store.item($0)?.tab?.url } ?? ""
+        var actions = SiteControlCenterActions()
+        actions.share = { [weak self] in self?.shareCurrentPage(from: rect, in: content) }
+        actions.copyURL = { [weak self] in self?.app.perform("copyURL") }
+        actions.capture = { [weak self] in self?.capturePage() }
+        actions.captureFullPage = { [weak self] in self?.captureFullPage() }
+        actions.runExtension = { [weak self] id in self?.runExtensionAction(id) }
+        actions.addExtension = { [weak self] in self?.openTab("https://chromewebstore.google.com/category/extensions") }
+        actions.manageExtensions = { [weak self] in self?.openTab("chrome://extensions") }
+        actions.clearCache = { [weak self] in self?.clearSiteData(cookies: false) }
+        actions.clearCookies = { [weak self] in self?.clearSiteData(cookies: true) }
+        actions.siteSettings = { [weak self] in
+            guard let origin = URL(string: url).flatMap({ u in u.host.map { "\(u.scheme ?? "https")://\($0)" } }) else { return }
+            self?.openTab("chrome://settings/content/siteDetails?site=" + (origin.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? origin))
+        }
+        siteControlCenter.show(relativeTo: rect, of: content, url: url, dark: store.focusedSpace.theme.palette.isDark,
+                               store: store, actions: actions)
+    }
+
+    private func openTab(_ url: String) {
+        store.createTab(url: url, select: true)
+        showWindow(nil)
+    }
+
+    private func shareCurrentPage(from rect: NSRect, in view: NSView) {
+        guard let url = store.selectedTabID.flatMap({ store.item($0)?.tab?.url }).flatMap(URL.init(string:)) else { return }
+        NSSharingServicePicker(items: [url]).show(relativeTo: rect, of: view, preferredEdge: .minY)
+    }
+
+    /// Arc's "Clear cookies and refresh the current page" (and the cache variant): this site's
+    /// cookies, or the HTTP cache, then a reload.
+    private func clearSiteData(cookies: Bool) {
+        guard let b = currentBrowser, let u = URL(string: b.currentURL), let host = u.host, let scheme = u.scheme else { return }
+        let done: (String?, String?) -> Void = { _, error in
+            if let error { NSLog("Cra: clearing site data failed: %@", error) }
+            DispatchQueue.main.async { b.reload() }
+        }
+        if cookies {
+            let params = ["origin": "\(scheme)://\(host)\(u.port.map { ":\($0)" } ?? "")", "storageTypes": "cookies"]
+            let json = String(decoding: (try? JSONSerialization.data(withJSONObject: params)) ?? Data("{}".utf8), as: UTF8.self)
+            b.sendDevToolsMethod("Storage.clearDataForOrigin", params: json, completion: done)
+        } else {
+            b.sendDevToolsMethod("Network.clearBrowserCache", params: "{}", completion: done)
+        }
+    }
+
+    /// Arc's "Capture the full page": the whole document (beyond the viewport) as a PNG in Downloads.
+    func captureFullPage() {
+        guard let b = currentBrowser else { return }
+        b.sendDevToolsMethod("Page.getLayoutMetrics", params: "{}") { result, _ in
+            guard let result, let m = try? JSONSerialization.jsonObject(with: Data(result.utf8)) as? [String: Any],
+                  let size = (m["cssContentSize"] ?? m["contentSize"]) as? [String: Any],
+                  let w = size["width"] as? Double, let h = size["height"] as? Double else { return }
+            let params = #"{"format":"png","captureBeyondViewport":true,"clip":{"x":0,"y":0,"width":\#(w),"height":\#(min(h, 16384)),"scale":1}}"#
+            b.sendDevToolsMethod("Page.captureScreenshot", params: params) { shot, error in
+                guard let shot, let o = try? JSONSerialization.jsonObject(with: Data(shot.utf8)) as? [String: Any],
+                      let b64 = o["data"] as? String, let png = Data(base64Encoded: b64) else {
+                    NSLog("Cra: full-page capture failed: %@", error ?? "no data")
+                    return
+                }
+                DispatchQueue.main.async {
+                    let f = DateFormatter()
+                    f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+                    let url = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
+                        .appendingPathComponent("Cra Capture \(f.string(from: Date())).png")
+                    try? png.write(to: url)
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
+            }
+        }
     }
 
     // MARK: Command bar
@@ -1351,18 +1440,20 @@ final class CraWindow: NSWindow {
         guard hide != appliedTrafficLightsHidden else { return }
         appliedTrafficLightsHidden = hide
         let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].compactMap { standardWindowButton($0) }
+        // Hidden buttons rest at alpha 1: AppKit refuses to miniaturize a window whose
+        // minimize button has alpha 0 (⌘M and the floating sidebar's yellow button did nothing).
         guard animated else {
-            for b in buttons { b.alphaValue = hide ? 0 : 1; b.isHidden = hide }
+            for b in buttons { b.alphaValue = 1; b.isHidden = hide }
             return
         }
-        if !hide { for b in buttons { b.isHidden = false } }
+        if !hide { for b in buttons where b.isHidden { b.alphaValue = 0; b.isHidden = false } }
         // Same timing as the sidebar's slide (ShellView.animateSidebar).
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.085
             for b in buttons { b.animator().alphaValue = hide ? 0 : 1 }
         } completionHandler: { [weak self] in
             guard let self, self.appliedTrafficLightsHidden == hide else { return }
-            for b in buttons { b.isHidden = hide }
+            for b in buttons { b.isHidden = hide; b.alphaValue = 1 }
         }
     }
 

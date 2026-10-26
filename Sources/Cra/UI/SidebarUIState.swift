@@ -93,6 +93,13 @@ final class SidebarUIState {
         }
     }
 
+    /// The tabs an action on this row moves: every picked tab, in sidebar
+    /// order, when the row is one of several picks; otherwise just the row.
+    func group(for id: UUID, in store: SidebarStore) -> [UUID] {
+        guard multiSelection.count > 1, multiSelection.contains(id) else { return [id] }
+        return store.listedTabIDs(in: store.focusedSpaceID).filter { multiSelection.contains($0) }
+    }
+
     func clearPicks(anchor: UUID? = nil) {
         if !multiSelection.isEmpty { multiSelection = [] }
         selectionAnchor = anchor

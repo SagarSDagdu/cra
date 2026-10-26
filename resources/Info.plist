@@ -50,6 +50,8 @@
 	<string>Web sites you visit can ask to use the microphone.</string>
 	<key>NSLocationUsageDescription</key>
 	<string>Web sites you visit can ask for your location.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Web sites you visit can ask to connect to Bluetooth devices, and passkey sign-ins can use your phone nearby.</string>
 	<!-- macOS asks the first time a page uses WebRTC: Chromium announces a random .local
 	     name over mDNS instead of handing the page this Mac's local IP address. -->
 	<key>NSLocalNetworkUsageDescription</key>

@@ -42,6 +42,8 @@ protocol BrowserManagerDelegate: AnyObject {
     func browserManagerHandleUnhandledKey(_ event: NSEvent) -> Bool
     func browserManagerFocusedBrowser(_ tabID: UUID)
     func browserManagerOpenInternalURL(_ url: String)
+    /// The page closed itself (window.close()).
+    func browserManagerPageClosedTab(_ tabID: UUID)
 }
 
 /// Creates, shows, hides and tears down CEF browsers inside a container view.
@@ -109,6 +111,9 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
         runtimes[tabID] = rt
         byBrowser[ObjectIdentifier(browser)] = tabID
         if let t = store.item(tabID)?.tab, t.muted { browser.setAudioMuted(true) }
+        // CEF creates the page window inside CraBrowser's init, before the tab is known here,
+        // so didCreateHostWindow could not place it: a background tab's window stayed shown.
+        if browser.hostWindow != nil { delegate?.browserManagerPageWindowsChanged(focus: false) }
         return rt
     }
 
@@ -408,9 +413,9 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
         if kinds & 2 != 0 { what.append("microphone") }
         if kinds & 4 != 0 { what.append("location") }
         if kinds & 8 != 0 { what.append("notifications") }
-        if what.isEmpty { what.append("a browser permission") }
         let alert = NSAlert()
-        alert.messageText = "\(origin) wants to use your \(what.joined(separator: " and "))"
+        alert.messageText = what.isEmpty ? "\(origin) is asking for a browser permission"
+                                         : "\(origin) wants to use your \(what.joined(separator: " and "))"
         alert.addButton(withTitle: "Allow")
         alert.addButton(withTitle: "Block")
         guard let window = container.window else { completion(false); return }
@@ -430,5 +435,7 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
         if visibleTabID == id { visibleTabID = nil }
         visibleTabIDs.removeAll { $0 == id }
         delegate?.browserManagerDidUpdate(id)
+        // window.close() (a sign-in or payment popup finishing): the tab goes, like Chrome.
+        if browser.closedByPage { delegate?.browserManagerPageClosedTab(id) }
     }
 }

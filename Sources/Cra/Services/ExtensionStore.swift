@@ -56,7 +56,11 @@ final class ExtensionStore {
     /// Set once the folder changed in this session; a restart loads the change.
     private(set) var needsRestart = false
 
-    init() { reload() }
+    init() {
+        reload()
+        // Keep what was taken over from another browser, so it is only read once.
+        if !FileManager.default.fileExists(atPath: Self.pinnedFile.path), !pinnedIDs.isEmpty { savePinned() }
+    }
 
     func reload() {
         let fm = FileManager.default
@@ -103,7 +107,21 @@ final class ExtensionStore {
     private static var pinnedFile: URL { AppPaths.file("pinned-extensions.json") }
 
     /// Chromium extension IDs in toolbar order.
-    private(set) var pinnedIDs: [String] = (try? JSONDecoder().decode([String].self, from: Data(contentsOf: ExtensionStore.pinnedFile))) ?? []
+    private(set) var pinnedIDs: [String] = ExtensionStore.loadPinned()
+
+    /// Before Cra has a list of its own, the browser it replaces supplies one: Arc keeps its
+    /// pinned extensions in Chromium's `extensions.pinned_extensions` pref, as do Dia and Chrome.
+    private static func loadPinned() -> [String] {
+        if let data = try? Data(contentsOf: pinnedFile) { return (try? JSONDecoder().decode([String].self, from: data)) ?? [] }
+        for source in [ImportSource.arc, .dia] + ImportSource.allCases.filter({ $0.id == "chrome" }) {
+            let prefs = source.dataDir.appendingPathComponent("Default/Preferences")
+            guard let data = try? Data(contentsOf: prefs),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let ids = (json["extensions"] as? [String: Any])?["pinned_extensions"] as? [String], !ids.isEmpty else { continue }
+            return ids
+        }
+        return []
+    }
 
     func isPinned(_ id: String) -> Bool { pinnedIDs.contains(id) }
 

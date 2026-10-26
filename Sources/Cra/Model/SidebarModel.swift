@@ -64,6 +64,12 @@ struct TabData: Codable, Equatable {
     var activeTabBeforeCreationID: UUID?
     /// Host used as favicon cache key.
     var faviconKey: String?
+    /// FaviconCache key of an image the user picked; wins over the site's favicon.
+    var customIconKey: String?
+    /// Favorite tile background as "#RRGGBB". nil is the theme's tile fill.
+    var tileColor: String?
+
+    var iconKey: String? { customIconKey ?? faviconKey }
 
     init(url: String, title: String = "") {
         self.url = url
@@ -99,6 +105,11 @@ enum SplitOrientation: String, Codable {
     case vertical
 }
 
+/// A fixed folder glyph colour, for when the theme's own doesn't read well.
+enum FolderIconStyle: String, Codable, CaseIterable {
+    case white, black
+}
+
 enum ItemData: Codable, Equatable {
     case tab(TabData)
     case folder
@@ -115,6 +126,8 @@ struct SidebarItem: Identifiable, Codable, Equatable {
     var isUnread: Bool
     var createdAt: Date
     var data: ItemData
+    /// A folder's glyph colour; nil is Auto (it follows the theme).
+    var folderIcon: FolderIconStyle? = nil
 
     var tab: TabData? {
         if case .tab(let t) = data { return t }
@@ -349,9 +362,13 @@ struct AppSettings: Codable, Equatable {
     /// Host pages in Chrome-style windows: Chrome extensions and Chrome's own
     /// DevTools docking. Needs a restart to change.
     var chromeEngine: Bool = true
-    /// Arc's "Links from other apps open in Little Arc": URLs handed to Cra by
-    /// other apps open in a small disposable window instead of a sidebar tab.
-    var openExternalLinksInLittleWindow: Bool = true
+    /// Air Traffic Control's "Default": where links from other apps open when no route
+    /// matches. Arc's "Links from other apps open in Little Arc" switch is this set to
+    /// Little Arc (on) or the most recent space (off).
+    var defaultLinkDestination: LinkDestination = .littleWindow
+    /// Air Traffic Control routes, checked in order (LinkRouting.swift). Starts with Arc's
+    /// Google Meet route.
+    var linkRoutes: [LinkRoute] = [.googleMeet]
     /// Arc: "Enable Picture in Picture when you leave a video tab".
     var autoPictureInPicture: Bool = true
     /// Dia's onboarding privacy choice "Block third-party ads and trackers": requests
@@ -369,6 +386,12 @@ struct AppSettings: Codable, Equatable {
 
     static func siteKey(for url: String) -> String? {
         URL(string: url)?.host?.lowercased().replacingOccurrences(of: "www.", with: "")
+    }
+    /// Arc's "Links from other apps open in Little Arc" (URLs handed over by other apps
+    /// open in a small disposable window instead of a sidebar tab).
+    var openExternalLinksInLittleWindow: Bool {
+        get { defaultLinkDestination == .littleWindow }
+        set { defaultLinkDestination = newValue ? .littleWindow : .mostRecentSpace }
     }
     func isDeveloperMode(url: String) -> Bool { AppSettings.siteKey(for: url).map(developerHosts.contains) ?? false }
     mutating func toggleDeveloperMode(url: String) {
@@ -408,6 +431,9 @@ struct RankingData: Codable, Equatable {
 
 // Tolerant decoding so new preference keys never reset the file.
 extension AppSettings {
+    /// Keys earlier versions wrote; read once and replaced.
+    private enum LegacyKeys: String, CodingKey { case openExternalLinksInLittleWindow }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         autoArchive = try c.decodeIfPresent(AutoArchiveThreshold.self, forKey: .autoArchive) ?? .twelveHours
@@ -424,7 +450,14 @@ extension AppSettings {
         chromeEngine = try c.decodeIfPresent(Bool.self, forKey: .chromeEngine) ?? true
         autoPictureInPicture = try c.decodeIfPresent(Bool.self, forKey: .autoPictureInPicture) ?? true
         blockAdsAndTrackers = try c.decodeIfPresent(Bool.self, forKey: .blockAdsAndTrackers) ?? true
-        openExternalLinksInLittleWindow = try c.decodeIfPresent(Bool.self, forKey: .openExternalLinksInLittleWindow) ?? true
+        if let d = try? c.decodeIfPresent(LinkDestination.self, forKey: .defaultLinkDestination) {
+            defaultLinkDestination = d
+        } else {
+            let legacy = try decoder.container(keyedBy: LegacyKeys.self)
+            openExternalLinksInLittleWindow = try legacy.decodeIfPresent(Bool.self, forKey: .openExternalLinksInLittleWindow) ?? true
+        }
+        // Settings from before Air Traffic Control get Arc's Google Meet route once.
+        linkRoutes = c.contains(.linkRoutes) ? (try? c.decode([LinkRoute].self, forKey: .linkRoutes)) ?? [] : [.googleMeet]
         hapticFeedbackOnReorder = try c.decodeIfPresent(Bool.self, forKey: .hapticFeedbackOnReorder) ?? true
         warnBeforeQuitting = try c.decodeIfPresent(Bool.self, forKey: .warnBeforeQuitting) ?? false
         autoArchiveEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoArchiveEnabled) ?? true
@@ -470,5 +503,7 @@ extension TabData {
         timeLastActiveAt = try c.decodeIfPresent(Date.self, forKey: .timeLastActiveAt)
         activeTabBeforeCreationID = try c.decodeIfPresent(UUID.self, forKey: .activeTabBeforeCreationID)
         faviconKey = try c.decodeIfPresent(String.self, forKey: .faviconKey) ?? URL(string: url)?.host
+        customIconKey = try c.decodeIfPresent(String.self, forKey: .customIconKey)
+        tileColor = try c.decodeIfPresent(String.self, forKey: .tileColor)
     }
 }

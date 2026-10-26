@@ -24,13 +24,20 @@ enum NativeMessagingHosts {
 
         // First source wins: Chrome is where every app installs, the rest fill gaps.
         for dir in sources {
-            for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] where name.hasSuffix(".json") {
+            for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] where name.hasSuffix(".json") && !excluded.contains(name) {
                 let link = dest.appendingPathComponent(name)
                 if (try? link.checkResourceIsReachable()) == true { continue }
                 try? fm.createSymbolicLink(at: link, withDestinationURL: dir.appendingPathComponent(name))
             }
         }
     }
+
+    /// Hosts that let a desktop app drive "Chrome" through its extension. The app
+    /// cannot tell Cra from Chrome, so ChatGPT's computer use switched to Cra (and
+    /// its agent tabs took over Cra's window) instead of using the user's Chrome.
+    private static let excluded: Set<String> = [
+        "com.openai.codexextension.json",   // ChatGPT desktop app → ChatGPT extension
+    ]
 
     private static var sources: [URL] {
         let browsers = ImportSource.allCases.filter { [.chromium, .arc, .dia].contains($0.kind) }

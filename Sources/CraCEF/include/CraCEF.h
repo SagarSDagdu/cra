@@ -97,6 +97,8 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 @property (nonatomic, readonly) BOOL canGoForward;
 @property (nonatomic, readonly) BOOL isCreated;
 @property (nonatomic, readonly) BOOL isClosed;
+/// YES once the page closed itself (window.close()) rather than through -close.
+@property (nonatomic, readonly) BOOL closedByPage;
 @property (nonatomic, readonly) BOOL hasDevTools;
 /// Anything you want to hang on the browser (Swift stores the tab id).
 @property (nonatomic, strong, nullable) id userInfo;
@@ -193,7 +195,12 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 /// Pages Chromium opens on its own (an extension's chrome.tabs.create or
 /// windows.create, welcome pages after an extension loads). The handler gets
 /// the URL to open as a Cra tab; Chrome's own window for it is closed.
+/// Popup-type windows (windows.create({type: "popup"})) stay Chrome's windows.
 + (void)setStrayPageHandler:(void (^)(NSString *url))handler;
+/// YES for a popup window an extension opened (kept by the stray page handling).
++ (BOOL)isExtensionWindow:(NSWindow *)window;
+/// YES for the Chrome-style window hosting one of Cra's own browsers.
++ (BOOL)isPageWindow:(NSWindow *)window;
 + (NSString *)chromiumVersion;
 + (NSString *)cefVersion;
 /// YES when the browser-level DevTools pipe is up (it needs fds 3/4 free at start-up).

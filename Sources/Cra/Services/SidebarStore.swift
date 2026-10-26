@@ -458,6 +458,16 @@ final class SidebarStore {
         touch()
     }
 
+    /// Moves several items so they end up next to each other, in the given
+    /// order, starting at `index` (appended when nil).
+    func moveItems(_ ids: [UUID], to newParent: UUID, index: Int?) {
+        var at = index
+        for id in ids {
+            moveItem(id, to: newParent, index: at)
+            if at != nil, let i = items[newParent]?.children.firstIndex(of: id) { at = i + 1 }
+        }
+    }
+
     private func rootContainerKind(_ id: UUID) -> ContainerKind? { rootContainer(of: id) }
 
     // MARK: Split view (Arc: SidebarSplitViewData + WindowAction.SplitViewAction)
@@ -681,7 +691,28 @@ final class SidebarStore {
     /// Favorites belong to one space: the tab's own unless another is given.
     func addToFavorites(_ id: UUID, in spaceID: UUID? = nil) {
         guard let space = spaces[spaceID ?? self.spaceID(ofItem: id) ?? focusedSpaceID] else { return }
+        // A new favorite takes the tile color when every existing one shares it.
+        let colors = Set(tabs(under: space.favoritesContainerID).map { $0.tab?.tileColor })
         moveItem(id, to: space.favoritesContainerID, index: nil)
+        if colors.count == 1, let color = colors.first!, items[id]?.tab?.tileColor == nil { setTileColor(color, for: [id]) }
+    }
+
+    func setTileColor(_ hex: String?, for ids: [UUID]) {
+        for id in ids {
+            guard var it = items[id], var t = it.tab else { continue }
+            t.tileColor = hex
+            it.data = .tab(t)
+            items[id] = it
+        }
+        touch()
+    }
+
+    func setCustomIcon(_ key: String?, for id: UUID) {
+        guard var it = items[id], var t = it.tab else { return }
+        t.customIconKey = key
+        it.data = .tab(t)
+        items[id] = it
+        touch()
     }
 
     func removeFromFavorites(_ id: UUID) {
@@ -707,6 +738,8 @@ final class SidebarStore {
         p.children.insert(folder.id, at: min(index ?? p.children.count, p.children.count))
         items[parent] = p
         prefs.expandedFolders.insert(folder.id)
+        // A collapsed pinned list would hide the new folder (and its rename field).
+        if case .pinned(let sid)? = rootContainer(of: parent) { prefs.collapsedPinnedSpaces.remove(sid) }
         touch()
         return folder
     }
@@ -716,14 +749,34 @@ final class SidebarStore {
     /// the folder at the end of its space's pinned list.
     @discardableResult
     func createFolder(combining targetID: UUID, with tabID: UUID, named name: String = "New Folder") -> SidebarItem? {
-        guard targetID != tabID, items[targetID]?.isTab == true, items[tabID]?.isTab == true,
+        createFolder(combining: targetID, with: [tabID], named: name)
+    }
+
+    @discardableResult
+    func createFolder(combining targetID: UUID, with tabIDs: [UUID], named name: String = "New Folder") -> SidebarItem? {
+        let tabIDs = tabIDs.filter { $0 != targetID && items[$0]?.isTab == true }
+        guard !tabIDs.isEmpty, items[targetID]?.isTab == true,
               let parent = items[targetID]?.parentID, let sid = spaceID(ofItem: targetID), let space = spaces[sid] else { return nil }
         let inPinned = rootContainer(of: targetID) == .pinned(spaceID: sid)
         let folder = createFolder(named: name, in: inPinned ? parent : space.pinnedContainerID,
                                   index: inPinned ? items[parent]?.children.firstIndex(of: targetID) : nil)
-        moveItem(targetID, to: folder.id, index: nil)
-        moveItem(tabID, to: folder.id, index: nil)
+        moveItems([targetID] + tabIDs, to: folder.id, index: nil)
         return items[folder.id]
+    }
+
+    func setFolderIcon(_ style: FolderIconStyle?, for id: UUID) {
+        guard var it = items[id], it.isFolder else { return }
+        it.folderIcon = style
+        items[id] = it
+        touch()
+    }
+
+    /// A new folder at the top of the space's pinned list holding these tabs.
+    @discardableResult
+    func createFolder(with tabIDs: [UUID], named name: String = "New Folder") -> SidebarItem {
+        let folder = createFolder(named: name, in: focusedSpace.pinnedContainerID, index: 0)
+        moveItems(tabIDs, to: folder.id, index: nil)
+        return items[folder.id] ?? folder
     }
 
     func deleteFolder(_ id: UUID) {

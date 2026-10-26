@@ -217,12 +217,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             handleInternalURL(u)
             return
         }
-        // Arc: "Links from other apps open in Little Arc".
-        if store.settings.openExternalLinksInLittleWindow {
+        // Arc's Air Traffic Control: the first matching route, else the default
+        // ("Links from other apps open in Little Arc").
+        switch store.settings.destination(forExternalURL: url) {
+        case .littleWindow:
             openLittleWindow(url: url)
             return
+        case .space(let id) where store.space(id) != nil:
+            store.createTab(url: url, in: id, select: true)
+        case .space, .mostRecentSpace:
+            store.createTab(url: url, select: true)
         }
-        store.createTab(url: url, select: true)
         main.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -476,6 +481,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func perform(_ id: String) {
         store.recordCommandUse(id)
+        // An extension's own window (Arc: BrowserExtensionWindowController.closeCurrentItem:)
+        // closes on ⌘W instead of the tab behind it.
+        if ["closeTab", "closeWindow"].contains(id), let key = NSApp.keyWindow, CraCEFRuntime.isExtensionWindow(key) {
+            key.performClose(nil)
+            return
+        }
         // A key Little Window takes the page/window actions first (⌘W, ⌘L, ⌘R…).
         if let little = keyLittleWindow, little.handle(action: id) { return }
         let current = store.selectedTabID

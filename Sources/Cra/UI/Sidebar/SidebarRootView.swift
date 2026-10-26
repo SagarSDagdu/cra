@@ -289,19 +289,28 @@ struct SpaceSectionView: View {
             SpaceHeader(space: space, palette: palette)
                 .padding(.horizontal, 10)
                 .padding(.bottom, 3)
-            ScrollView(.vertical, showsIndicators: false) {
-                rows
-                    .padding(.top, 3)
-                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.scrollSpace)) } action: { rowsFrame = $0 }
-                    // Arc leaves ~121pt of empty list after the last row at full scroll.
-                    .padding(.bottom, 121)
-                    .overlay(alignment: .topLeading) { dropLine }
-                    .background(DragAutoscroller.Anchor(scroller: autoscroller))
-                    .contentShape(Rectangle())
-                    .onDrop(of: [.craSidebarItem], delegate: SidebarListDropDelegate(space: space, store: store, ui: ui, autoscroller: autoscroller))
-                    // Safety net: a drag that ended without an exit callback leaves no preview behind.
-                    .onContinuousHover { _ in if ui.listDrop != nil, NSEvent.pressedMouseButtons == 0 { ui.listDrop = nil } }
-                    .coordinateSpace(name: SidebarListDropDelegate.coordinateSpace)
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: false) {
+                    rows
+                        .padding(.top, 3)
+                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.scrollSpace)) } action: { rowsFrame = $0 }
+                        // Arc leaves ~121pt of empty list after the last row at full scroll.
+                        .padding(.bottom, 121)
+                        .overlay(alignment: .topLeading) { dropLine }
+                        .background(DragAutoscroller.Anchor(scroller: autoscroller))
+                        .contentShape(Rectangle())
+                        // Right-click on empty list space; rows have their own menus.
+                        .contextMenu { listMenu }
+                        .onDrop(of: [.craSidebarItem], delegate: SidebarListDropDelegate(space: space, store: store, ui: ui, autoscroller: autoscroller))
+                        // Safety net: a drag that ended without an exit callback leaves no preview behind.
+                        .onContinuousHover { _ in if ui.listDrop != nil, NSEvent.pressedMouseButtons == 0 { ui.listDrop = nil } }
+                        .coordinateSpace(name: SidebarListDropDelegate.coordinateSpace)
+                }
+                // A new folder starts renaming at the top of pinned, maybe scrolled away.
+                .onChange(of: ui.renamingID) { _, id in
+                    guard let id else { return }
+                    withAnimation(.snappy(duration: 0.25, extraBounce: 0)) { proxy.scrollTo(id) }
+                }
             }
             .coordinateSpace(name: Self.scrollSpace)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }
@@ -313,6 +322,17 @@ struct SpaceSectionView: View {
     }
 
     private static let scrollSpace = "spaceSectionScroll"
+
+    @ViewBuilder
+    private var listMenu: some View {
+        Button("New Tab") { actions.openCommandBar(.newTab) }
+        Button("New Folder") { actions.performAction("newFolder") }
+        Divider()
+        if !store.children(of: space.todayContainerID).isEmpty {
+            Button("Clear Today") { store.clearToday(space.id) }
+        }
+        Button("Edit Space…") { actions.editSpace(space) }
+    }
 
     @ViewBuilder
     private var dropLine: some View {
@@ -376,6 +396,7 @@ struct SpaceSectionView: View {
             VStack(spacing: CraMetrics.rowSpacing) {
                 ForEach(pinnedItems) { item in
                     SidebarItemView(item: item, depth: 0, palette: palette, section: .pinned)
+                        .id(item.id)
                 }
                 // With nothing pinned the list is 8pt tall; a drag opens a real target.
                 // Not when collapsed: the placeholder would claim an empty list and
@@ -408,6 +429,7 @@ struct SpaceSectionView: View {
             VStack(spacing: CraMetrics.rowSpacing) {
                 ForEach(todayItems) { item in
                     SidebarItemView(item: item, depth: 0, palette: palette, section: .today)
+                        .id(item.id)
                 }
                 NewTabRow(palette: palette)
             }

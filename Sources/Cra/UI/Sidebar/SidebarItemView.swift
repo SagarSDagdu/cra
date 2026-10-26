@@ -31,14 +31,21 @@ struct FaviconView: View {
     let key: String?
     let palette: SpacePalette
     var size: CGFloat = CraMetrics.favicon
+    /// Whether the icon sits on a dark fill; defaults to the sidebar's.
+    var onDark: Bool?
     @Environment(FaviconCache.self) private var favicons
 
     var body: some View {
         if let img = favicons.image(forKey: key) {
+            // One-color glyphs (GitHub) flip to white on dark fills and black on light ones.
+            let dark = onDark ?? palette.isDark
+            let flip = favicons.glyphIsDark(forKey: key) == dark
             Image(nsImage: img)
                 .resizable()
+                .renderingMode(flip ? .template : .original)
                 .interpolation(.high)
                 .aspectRatio(contentMode: .fit)
+                .foregroundStyle(dark ? Color.white.opacity(0.92) : Color.black.opacity(0.85))
                 .frame(width: size, height: size)
                 .clipShape(RoundedRectangle(cornerRadius: size * 0.22, style: .continuous))
         } else {
@@ -83,7 +90,7 @@ struct TabRow: View {
     var body: some View {
         let session = ui
         HStack(spacing: 11) {
-            FaviconView(key: tab.faviconKey, palette: palette)
+            FaviconView(key: tab.iconKey, palette: palette)
                 .frame(width: CraMetrics.favicon)
             if editing {
                 TextField("", text: $draft)
@@ -152,9 +159,18 @@ struct TabRow: View {
             }
         }
         .draggable(SidebarDragItem.begin(item.id, session)) {
+            // Dragging one of several picked tabs moves them all.
             HStack(spacing: 8) {
-                FaviconView(key: tab.faviconKey, palette: palette)
+                FaviconView(key: tab.iconKey, palette: palette)
                 Text(item.displayTitle).font(.system(size: 14)).lineLimit(1)
+                if closeGroup.count > 1 {
+                    Text("\(closeGroup.count)")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .frame(minWidth: 18, minHeight: 18)
+                        .background(Capsule().fill(Color.accentColor))
+                }
             }
             .padding(8)
             .background(RoundedRectangle(cornerRadius: 8).fill(.regularMaterial))
@@ -182,10 +198,31 @@ struct TabRow: View {
     @ViewBuilder
     private var contextMenu: some View {
         if closeGroup.count > 1 {
+            folderMenu(ui.group(for: item.id, in: store))
+            Divider()
             Button("Close \(closeGroup.count) Tabs") { closeTabs(closeGroup) }
             Button("Deselect All") { ui.clearPicks() }
         } else {
             singleTabMenu
+        }
+    }
+
+    /// Move to Folder / New Folder for this tab, or for every picked tab.
+    @ViewBuilder
+    private func folderMenu(_ ids: [UUID]) -> some View {
+        let folders = store.children(of: store.focusedSpace.pinnedContainerID).filter { $0.isFolder }
+        if !folders.isEmpty {
+            Menu(ids.count > 1 ? "Move \(ids.count) Tabs to Folder" : "Move to Folder") {
+                ForEach(folders) { f in
+                    Button(f.title ?? "Folder") {
+                        withAnimation(.snappy(duration: 0.22, extraBounce: 0)) { store.moveItems(ids, to: f.id, index: nil) }
+                    }
+                    .disabled(ids.allSatisfy { store.item($0)?.parentID == f.id })
+                }
+            }
+        }
+        Button(ids.count > 1 ? "New Folder with \(ids.count) Tabs" : "New Folder with Tab") {
+            withAnimation(.snappy(duration: 0.22, extraBounce: 0)) { ui.renamingID = store.createFolder(with: ids).id }
         }
     }
 
@@ -222,20 +259,7 @@ struct TabRow: View {
                     .disabled(s.id == store.spaceID(ofItem: item.id))
             }
         }
-        let folders = store.children(of: store.focusedSpace.pinnedContainerID).filter { $0.isFolder }
-        if !folders.isEmpty {
-            Menu("Move to Folder") {
-                ForEach(folders) { f in
-                    Button(f.title ?? "Folder") { store.moveItem(item.id, to: f.id, index: nil) }
-                        .disabled(f.id == item.parentID)
-                }
-            }
-        }
-        Button("New Folder with Tab") {
-            let f = store.createFolder(named: "New Folder", in: store.focusedSpace.pinnedContainerID, index: 0)
-            store.moveItem(item.id, to: f.id, index: nil)
-            ui.renamingID = f.id
-        }
+        folderMenu([item.id])
         Divider()
         Button(pinned ? "Close" : "Archive") { actions.closeTab(item.id) }
         if pinned { Button("Unpin and Archive") { store.archiveTab(item.id, reason: .manual) } }
@@ -257,12 +281,13 @@ struct FolderRow: View {
 
     var body: some View {
         let session = ui
+        let glyph = palette.folderColors(item.folderIcon)
         HStack(spacing: 11) {
             ZStack {
                 if !expanded {
-                    Image(systemName: "folder.fill").foregroundStyle(palette.folderFill)
+                    Image(systemName: "folder.fill").foregroundStyle(glyph.fill)
                 }
-                Image(systemName: "folder").foregroundStyle(palette.folderTint)
+                Image(systemName: "folder").foregroundStyle(glyph.tint)
             }
             .font(.system(size: 15, weight: .regular))
             .frame(width: CraMetrics.favicon)
@@ -308,6 +333,11 @@ struct FolderRow: View {
                 let f = store.createFolder(named: "New Folder", in: item.id, index: 0)
                 store.setExpanded(item.id, true)
                 ui.renamingID = f.id
+            }
+            Picker("Icon Color", selection: Binding(get: { item.folderIcon }, set: { store.setFolderIcon($0, for: item.id) })) {
+                Text("Auto").tag(FolderIconStyle?.none)
+                Text("White").tag(FolderIconStyle?.some(.white))
+                Text("Black").tag(FolderIconStyle?.some(.black))
             }
             Divider()
             Button("Delete Folder (archives tabs)") { store.deleteFolder(item.id) }
