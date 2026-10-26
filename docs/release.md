@@ -149,6 +149,19 @@ from a different source. To change the build without a CEF version bump, bump th
 `codecsN` suffix of `CEF_RELEASE` and publish again. Needs Xcode's Metal toolchain
 (`xcodebuild -downloadComponent MetalToolchain`).
 
+**Staying current.** Chromium only ships security fixes for its newest version. The
+"CEF updates" workflow (`.github/workflows/cef-updates.yml`, daily, free Linux runner)
+runs `scripts/check-cef-update.sh`: when Spotify's index lists a newer stable CEF for
+macOS arm64, it opens one "Chromium engine update available" issue, assigned to the repo
+owner, with the exact command. The build itself runs on the Mac, because GitHub's free
+macOS runners are too small (3 cores, 14 GB disk, 6 hour jobs) and larger ones are billed:
+
+    scripts/update-cef.sh <cef_version>   # build, publish, pin, rebuild Cra
+
+A same-major update reuses the checkout (1–2 hours); a new Chromium major compiles
+everything again. Then test `build/Cra.app`, commit `scripts/fetch-cef.sh`, close the
+issue and tag a release.
+
 ## Later
 
 - **Homebrew.** A cask (`brew install --cask cra`) pointing at the DMG and

@@ -6,17 +6,21 @@
 # compile-time switch in Chromium and FFmpeg is linked into the framework, so the
 # only fix is building CEF ourselves with proprietary_codecs + ffmpeg_branding=Chrome.
 #
-# Same CEF commit as the pinned prebuilt (scripts/fetch-cef.sh); besides the codecs
-# only the fixes in scripts/cef-patches/ change. Needs ~80 GB free and several hours on an M2 Max. Re-running
-# resumes: the checkout is kept and ninja only rebuilds what changed.
+# Builds the CEF_VERSION pinned in scripts/fetch-cef.sh (or the one in the environment;
+# scripts/update-cef.sh does that); besides the codecs only the fixes in
+# scripts/cef-patches/ change. Needs ~80 GB free and several hours on an M2 Max.
+# Re-running resumes: the checkout is kept and ninja only rebuilds what changed.
 #
 # Output: $CEF_BUILD_DIR/chromium/src/cef/binary_distrib/cef_binary_<ver>_macosarm64_minimal.tar.bz2
-# Publish it with scripts/publish-cef.sh, then bump CEF_FLAVOR in fetch-cef.sh.
+# Publish it with scripts/publish-cef.sh.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-CEF_BRANCH="${CEF_BRANCH:-8037}"
-CEF_COMMIT="${CEF_COMMIT:-14c5a08}"
+eval "$(grep -E '^CEF_VERSION=' scripts/fetch-cef.sh)"
+# 154.0.34+g14c5a08+chromium-154.0.8037.98: CEF commit 14c5a08 on branch 8037.
+CEF_COMMIT="$(sed -E 's/.*\+g([0-9a-f]+)\+.*/\1/' <<<"$CEF_VERSION")"
+CEF_BRANCH="$(sed -E 's/.*chromium-[0-9]+\.[0-9]+\.([0-9]+)\..*/\1/' <<<"$CEF_VERSION")"
+echo "Building CEF $CEF_VERSION (branch $CEF_BRANCH, commit $CEF_COMMIT)"
 # .noindex keeps Spotlight out of ~40 GB of sources.
 CEF_BUILD_DIR="${CEF_BUILD_DIR:-$HOME/cef-build.noindex}"
 
@@ -31,10 +35,13 @@ if [ ! -d "$CEF_BUILD_DIR/depot_tools" ]; then
 fi
 # Bootstrap once (python, gn); DEPOT_TOOLS_UPDATE=0 below keeps it from updating.
 [ -f "$CEF_BUILD_DIR/depot_tools/python3_bin_reldir.txt" ] || "$CEF_BUILD_DIR/depot_tools/ensure_bootstrap" || true
-if [ ! -f "$CEF_BUILD_DIR/automate/automate-git.py" ]; then
-  mkdir -p "$CEF_BUILD_DIR/automate"
+# automate-git.py from the branch being built (it changes between branches).
+AUTOMATE="$CEF_BUILD_DIR/automate/$CEF_BRANCH/automate-git.py"
+if [ ! -f "$AUTOMATE" ]; then
+  mkdir -p "$(dirname "$AUTOMATE")"
+  rm -rf "$CEF_BUILD_DIR/cef-tools"
   git -C "$CEF_BUILD_DIR" clone --depth 1 --branch "$CEF_BRANCH" https://github.com/chromiumembedded/cef.git cef-tools
-  cp "$CEF_BUILD_DIR/cef-tools/tools/automate/automate-git.py" "$CEF_BUILD_DIR/automate/"
+  cp "$CEF_BUILD_DIR/cef-tools/tools/automate/automate-git.py" "$AUTOMATE"
   rm -rf "$CEF_BUILD_DIR/cef-tools"
 fi
 
@@ -45,7 +52,7 @@ export CEF_ARCHIVE_FORMAT=tar.bz2
 export GN_DEFINES="is_official_build=true proprietary_codecs=true ffmpeg_branding=Chrome symbol_level=0 blink_symbol_level=0 v8_symbol_level=0 enable_dsyms=false"
 
 automate() {
-  python3 "$CEF_BUILD_DIR/automate/automate-git.py" \
+  python3 "$AUTOMATE" \
     --download-dir="$CEF_BUILD_DIR" \
     --depot-tools-dir="$CEF_BUILD_DIR/depot_tools" \
     --branch="$CEF_BRANCH" \
