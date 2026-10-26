@@ -84,7 +84,7 @@ struct FavoriteCell: View {
         }
         .frame(height: 47)
         .contentShape(RoundedRectangle(cornerRadius: 13))
-        .onHover { hover = $0; ui.pointerOverDraggable = $0 }
+        .onHover { hover = $0; ui.hoverDraggable(item.id, $0) }
         .onTapGesture { ui.keyboardFocusID = nil; store.selectTab(item.id) }
         .help(item.displayTitle)
         .draggable(SidebarDragItem.begin(item.id, session))

@@ -274,6 +274,7 @@ struct SpaceSectionView: View {
     @State private var hoverDivider = false
     @State private var rowsFrame = CGRect.zero
     @State private var viewportHeight: CGFloat = 0
+    @State private var autoscroller = DragAutoscroller()
 
     /// Arc 1.170 draws a full-width 1pt hairline (~5% black over the light theme) at an edge of
     /// the list only while rows are hidden past it, fading over ~0.25s.
@@ -292,8 +293,9 @@ struct SpaceSectionView: View {
                     // Arc leaves ~121pt of empty list after the last row at full scroll.
                     .padding(.bottom, 121)
                     .overlay(alignment: .topLeading) { dropLine }
+                    .background(DragAutoscroller.Anchor(scroller: autoscroller))
                     .contentShape(Rectangle())
-                    .onDrop(of: [.craSidebarItem], delegate: SidebarListDropDelegate(space: space, store: store, ui: ui))
+                    .onDrop(of: [.craSidebarItem], delegate: SidebarListDropDelegate(space: space, store: store, ui: ui, autoscroller: autoscroller))
                     // Safety net: a drag that ended without an exit callback leaves no preview behind.
                     .onContinuousHover { _ in if ui.listDrop != nil, NSEvent.pressedMouseButtons == 0 { ui.listDrop = nil } }
                     .coordinateSpace(name: SidebarListDropDelegate.coordinateSpace)
@@ -366,19 +368,16 @@ struct SpaceSectionView: View {
 
     private var rows: some View {
         let todayItems = store.children(of: space.todayContainerID)
-        var pinnedItems = store.children(of: space.pinnedContainerID)
-        // Collapsed, only the pinned tab you are on stays in the list.
-        if store.isPinnedCollapsed(space.id) {
-            let selected = store.selectedTabID(in: space.id).flatMap { store.splitContaining($0) ?? store.item($0) }
-            pinnedItems = selected.flatMap { store.rootContainer(of: $0.id) == .pinned(spaceID: space.id) ? [$0] : nil } ?? []
-        }
+        let pinnedItems = store.listedPinnedItems(in: space)
         return VStack(alignment: .leading, spacing: 0) {
             VStack(spacing: CraMetrics.rowSpacing) {
                 ForEach(pinnedItems) { item in
                     SidebarItemView(item: item, depth: 0, palette: palette, section: .pinned)
                 }
                 // With nothing pinned the list is 8pt tall; a drag opens a real target.
-                if pinnedItems.isEmpty && ui.listDrop != nil { pinPlaceholder }
+                // Not when collapsed: the placeholder would claim an empty list and
+                // open under the pointer, taking drops meant for the top of Today.
+                if store.children(of: space.pinnedContainerID).isEmpty && ui.listDrop != nil { pinPlaceholder }
             }
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(SidebarListDropDelegate.coordinateSpace)) } action: { ui.rowFrames[space.pinnedContainerID] = $0 }
             .padding(.horizontal, 10)

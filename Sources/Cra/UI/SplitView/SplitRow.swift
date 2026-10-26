@@ -87,7 +87,7 @@ struct SplitChildCell: View {
         .padding(.trailing, 4)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
-        .onHover { hover = $0; ui.pointerOverDraggable = $0 }
+        .onHover { hover = $0; ui.hoverDraggable(item.id, $0) }
         .onTapGesture { store.selectTab(item.id) }
         .draggable(SidebarDragItem.begin(item.id, session)) {
             HStack(spacing: 8) {

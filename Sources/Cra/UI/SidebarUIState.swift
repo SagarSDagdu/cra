@@ -24,10 +24,21 @@ final class SidebarUIState {
     /// Tab chosen from the keyboard; Arc draws its yellow/black dashed ring
     /// around it until the mouse picks another tab.
     var keyboardFocusID: UUID?
-    /// The pointer is over a draggable sidebar row or tile. The sidebar's
-    /// hosting view then refuses window-background drags so SwiftUI's
-    /// `.draggable` gets the press (the window is movable by its background).
-    var pointerOverDraggable = false
+    /// The pointer is over a draggable sidebar row or tile. The window is
+    /// movable by its background; the window controller turns that off while
+    /// this is true so a press starts SwiftUI's `.draggable`, not a window drag.
+    var pointerOverDraggable: Bool { draggableUnderPointer != nil }
+    @ObservationIgnored var onPointerOverDraggableChange: (Bool) -> Void = { _ in }
+    /// Moving between rows, the next row's hover can arrive before the last
+    /// one's exit; a shared flag then ended up false over a row and the press
+    /// dragged the window instead of the tab. Each row clears only itself.
+    @ObservationIgnored private var draggableUnderPointer: UUID? {
+        didSet { if (oldValue != nil) != (draggableUnderPointer != nil) { onPointerOverDraggableChange(pointerOverDraggable) } }
+    }
+
+    func hoverDraggable(_ id: UUID, _ inside: Bool) {
+        if inside { draggableUnderPointer = id } else if draggableUnderPointer == id { draggableUnderPointer = nil }
+    }
     /// Per-tab navigation state for split panes (each pane has its own toolbar).
     var navStates: [UUID: TabNavState] = [:]
     /// Panes currently shown in the window (empty when a single page shows).

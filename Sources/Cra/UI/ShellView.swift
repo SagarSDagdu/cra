@@ -612,16 +612,10 @@ final class ShellView: NSView {
     }
 }
 
-/// Hosts the SwiftUI sidebar. The window is movable by its background, and
-/// AppKit asks the hit view at mouse-down whether that press may move the
-/// window; NSHostingView says yes for the whole sidebar, so a press on a tab
-/// row started a window drag before SwiftUI's `.draggable` could begin. Rows
-/// and tiles flag the pointer while hovered; then the press stays with SwiftUI.
-final class SidebarHostingView: NSHostingView<AnyView> {
-    /// Returns true while the pointer is over something draggable (a row, a tile).
-    var pointerOverDraggable: () -> Bool = { false }
-    override var mouseDownCanMoveWindow: Bool { !pointerOverDraggable() }
-}
+/// Hosts the SwiftUI sidebar. The window is movable by its background; while
+/// the pointer is over a draggable row or tile the window controller turns that
+/// off, so a press starts SwiftUI's `.draggable` instead of a window drag.
+final class SidebarHostingView: NSHostingView<AnyView> {}
 
 /// Thin vertical strip between sidebar and content that drags the width.
 final class ResizeHandleView: NSView {

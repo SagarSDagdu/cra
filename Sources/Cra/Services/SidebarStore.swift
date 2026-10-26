@@ -155,6 +155,14 @@ final class SidebarStore {
         return out
     }
 
+    /// The top-level pinned rows a space's list draws. Collapsed, only the
+    /// pinned item holding the open tab stays.
+    func listedPinnedItems(in space: Space) -> [SidebarItem] {
+        guard isPinnedCollapsed(space.id) else { return children(of: space.pinnedContainerID) }
+        let selected = selectedTabID(in: space.id).flatMap { splitContaining($0) ?? item($0) }
+        return selected.flatMap { rootContainer(of: $0.id) == .pinned(spaceID: space.id) ? [$0] : nil } ?? []
+    }
+
     /// Favorites + pinned + today for a space, in sidebar order. This is what
     /// ⌘1…⌘9 index into (Arc: "Go to Sidebar Item N").
     func visibleTabs(in spaceID: UUID) -> [SidebarItem] {

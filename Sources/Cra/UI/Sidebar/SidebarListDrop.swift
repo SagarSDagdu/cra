@@ -33,6 +33,75 @@ struct SidebarListDrop: Equatable {
     var rowBelow: UUID?
 }
 
+/// Scrolls a space's list while a drag hovers near its top or bottom edge.
+/// SwiftUI's ScrollView has no autoscroll for custom drops, so with a long
+/// pinned list everything past the fold (Today included) was out of reach.
+@MainActor
+final class DragAutoscroller {
+    /// Edge band, and the speed at the very edge in points per second.
+    static let band: CGFloat = 48
+    static let maxSpeed: CGFloat = 900
+
+    fileprivate weak var anchor: NSView?
+    private var timer: Timer?
+    private var lastTick: CFTimeInterval = 0
+
+    /// Starts or stops scrolling for where the pointer is now.
+    func update() {
+        guard speed() != 0 else { stop(); return }
+        guard timer == nil else { return }
+        lastTick = CACurrentMediaTime()
+        let t = Timer(timeInterval: 1 / 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+        // A drag keeps the run loop in event-tracking mode.
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func speed() -> CGFloat {
+        guard NSEvent.pressedMouseButtons != 0, let sv = anchor?.enclosingScrollView, let window = sv.window else { return 0 }
+        let p = sv.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        let fromTop = sv.isFlipped ? p.y : sv.bounds.height - p.y
+        let fromBottom = sv.bounds.height - fromTop
+        guard p.x >= 0, p.x <= sv.bounds.width, fromTop >= 0, fromBottom >= 0 else { return 0 }
+        if fromTop < Self.band { return -Self.maxSpeed * (1 - fromTop / Self.band) }
+        if fromBottom < Self.band { return Self.maxSpeed * (1 - fromBottom / Self.band) }
+        return 0
+    }
+
+    private func tick() {
+        let now = CACurrentMediaTime()
+        let dt = min(now - lastTick, 0.05)
+        lastTick = now
+        let v = speed()
+        guard v != 0, let sv = anchor?.enclosingScrollView else { stop(); return }
+        let clip = sv.contentView
+        var origin = clip.bounds.origin
+        origin.y += v * dt * (sv.documentView?.isFlipped ?? true ? 1 : -1)
+        let r = clip.constrainBoundsRect(NSRect(origin: origin, size: clip.bounds.size))
+        guard r.origin != clip.bounds.origin else { return }
+        clip.scroll(to: r.origin)
+        sv.reflectScrolledClipView(clip)
+    }
+
+    /// Placed inside the list so the scroller can find the scroll view around it.
+    struct Anchor: NSViewRepresentable {
+        let scroller: DragAutoscroller
+        func makeNSView(context: Context) -> NSView { PassThroughView() }
+        func updateNSView(_ view: NSView, context: Context) { scroller.anchor = view }
+    }
+
+    private final class PassThroughView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+}
+
 /// One drop delegate for the whole pinned + today list. Per-row drop
 /// destinations only report entered/exited, so the list hit-tests the pointer
 /// against the rows' frames itself on every move.
@@ -44,6 +113,7 @@ struct SidebarListDropDelegate: DropDelegate {
     let space: Space
     let store: SidebarStore
     let ui: SidebarUIState
+    let autoscroller: DragAutoscroller
 
     func validateDrop(info: DropInfo) -> Bool { info.hasItemsConforming(to: [.craSidebarItem]) }
 
@@ -65,10 +135,12 @@ struct SidebarListDropDelegate: DropDelegate {
     }
 
     func dropExited(info: DropInfo) {
+        autoscroller.stop()
         withAnimation(Self.animation) { ui.listDrop = nil }
     }
 
     func performDrop(info: DropInfo) -> Bool {
+        autoscroller.stop()
         guard let id = ui.draggingID, store.item(id) != nil else { return false }
         let drop = ui.listDrop ?? resolve(dragged: id, at: info.location)
         withAnimation(Self.animation) {
@@ -84,6 +156,7 @@ struct SidebarListDropDelegate: DropDelegate {
     }
 
     private func update(_ info: DropInfo) {
+        autoscroller.update()
         guard let id = ui.draggingID, store.item(id) != nil else { return }
         let drop = resolve(dragged: id, at: info.location)
         guard drop != ui.listDrop else { return }
@@ -132,18 +205,21 @@ struct SidebarListDropDelegate: DropDelegate {
         let frame: CGRect
     }
 
-    /// Rows as drawn: pinned (expanded folders open), then today.
+    /// Rows as drawn: pinned (expanded folders open), then today. Frames stay
+    /// recorded for rows that are no longer drawn (a collapsed pinned list),
+    /// so only drawn rows may be hit.
     private func visibleRows() -> [Row] {
         var out: [Row] = []
-        func walk(_ parent: UUID, _ depth: Int) {
-            for (i, c) in store.children(of: parent).enumerated() {
-                guard let f = ui.rowFrames[c.id] else { continue }
+        func walk(_ rows: [SidebarItem], _ depth: Int) {
+            for c in rows {
+                guard let f = ui.rowFrames[c.id], let parent = c.parentID,
+                      let i = store.item(parent)?.children.firstIndex(of: c.id) else { continue }
                 out.append(Row(item: c, parent: parent, index: i, depth: depth, frame: f))
-                if c.isFolder, store.isExpanded(c.id) { walk(c.id, depth + 1) }
+                if c.isFolder, store.isExpanded(c.id) { walk(store.children(of: c.id), depth + 1) }
             }
         }
-        walk(space.pinnedContainerID, 0)
-        walk(space.todayContainerID, 0)
+        walk(store.listedPinnedItems(in: space), 0)
+        walk(store.children(of: space.todayContainerID), 0)
         return out
     }
 
@@ -212,9 +288,9 @@ struct SidebarListDropDelegate: DropDelegate {
         guard case .insert(let parent, let index)? = target else { return drop }
         let kids = store.item(parent)?.children ?? []
         var y: CGFloat?
-        if index < kids.count, let f = ui.rowFrames[kids[index]] {
+        if index < kids.count, let f = rows.first(where: { $0.item.id == kids[index] })?.frame {
             y = f.minY - half
-        } else if let last = kids.last, let r = rows.last(where: { $0.item.id == last || isInside($0.item.id, last) }) {
+        } else if index > 0, let r = rows.last(where: { $0.item.id == kids[index - 1] || isInside($0.item.id, kids[index - 1]) }) {
             y = r.frame.maxY + half
         } else if store.item(parent)?.isFolder == true, let f = ui.rowFrames[parent] {
             y = f.maxY + half

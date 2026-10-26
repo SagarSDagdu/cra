@@ -77,7 +77,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
 
         browsers = BrowserManager(store: store, favicons: app.favicons, container: shell.parkingView)
         browsers.delegate = self
-        shell.sidebarHost.pointerOverDraggable = { [weak self] in self?.sidebarUI.pointerOverDraggable ?? false }
+        // AppKit asks the view under a press whether it may move the window. In the
+        // sidebar's list that is SwiftUI's scroll container, which always says yes,
+        // so the window's own flag is what keeps a row press for the row's drag.
+        sidebarUI.onPointerOverDraggableChange = { [weak window] over in window?.isMovableByWindowBackground = !over }
         browsers.paneHost = { [weak self] id in self?.shell.card(for: id)?.webArea }
         shell.makeToolbar = { [weak self] id in
             guard let self else { return AnyView(EmptyView()) }

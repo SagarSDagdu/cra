@@ -135,7 +135,7 @@ struct TabRow: View {
         )
         .overlay { if ui.keyboardFocusID == item.id { FocusRing(radius: CraMetrics.rowCorner) } }
         .contentShape(Rectangle())
-        .onHover { hover = $0; ui.pointerOverDraggable = $0 }
+        .onHover { hover = $0; ui.hoverDraggable(item.id, $0) }
         .onTapGesture {
             let event = NSApp.currentEvent
             let flags = event?.modifierFlags.intersection([.command, .shift]) ?? []
@@ -292,7 +292,7 @@ struct FolderRow: View {
         .frame(height: CraMetrics.rowHeight)
         .background(RoundedRectangle(cornerRadius: CraMetrics.rowCorner, style: .continuous).fill(hover ? palette.hoverFill : .clear))
         .contentShape(Rectangle())
-        .onHover { hover = $0; ui.pointerOverDraggable = $0 }
+        .onHover { hover = $0; ui.hoverDraggable(item.id, $0) }
         // Every click toggles, however fast they come: double-click-to-rename made
         // quick open/close clicks start a rename that then swallowed the clicks.
         // Rename stays in the context menu. No count: 2 gesture either: it makes

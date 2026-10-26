@@ -47,7 +47,15 @@ struct SpaceDockButton: View {
                 guard let d = items.first else { return false }
                 store.moveTab(d.id, toSpace: space.id)
                 return true
-            } isTargeted: { targeted = $0 }
+            } isTargeted: { t in
+                targeted = t
+                // Arc: holding a dragged item over a space switches to it, so the
+                // item can be carried into that space's list and dropped in place.
+                guard t, !selected else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    if targeted { store.focusSpace(space.id) }
+                }
+            }
             .contextMenu {
                 Button("Edit Space…") { actions.editSpace(space) }
                 Divider()
