@@ -15,23 +15,13 @@ Shell: Swift (AppKit + SwiftUI). Engine: Chromium Embedded Framework.
 
 Needs macOS 14 or later on Apple silicon.
 
-**Easiest: paste this into Terminal** (Applications → Utilities → Terminal)
+**[Download Cra.dmg](https://github.com/VictorKildahl/cra/releases/latest/download/Cra.dmg)**,
+open it and drag Cra to Applications. Cra is signed and notarized by Apple, so it opens
+like any other app, and from then on it keeps itself up to date (Cra ▸ Check for Updates…).
+
+**Prefer Terminal?** This puts the latest Cra in your Applications folder and opens it:
 
     curl -fsSL https://raw.githubusercontent.com/VictorKildahl/cra/main/scripts/install.sh | bash
-
-It puts Cra in your Applications folder and opens it, with no security prompts. From
-then on Cra keeps itself up to date (Cra ▸ Check for Updates…).
-
-**Or download [Cra.dmg](https://github.com/VictorKildahl/cra/releases/latest/download/Cra.dmg)**
-
-1. Open `Cra.dmg` and drag Cra to Applications.
-2. Open Cra. macOS says it could not verify the app. Click **Done**.
-3. Open **System Settings → Privacy & Security**, scroll down, and click **Open Anyway**
-   next to "Cra was blocked".
-4. Confirm with Touch ID or your password, then click **Open Anyway** once more.
-
-You only do this once. Cra is not notarized by Apple yet; every line of it is in this
-repository.
 
 ## Build
 
