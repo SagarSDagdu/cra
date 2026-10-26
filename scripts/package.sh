@@ -1,6 +1,6 @@
 #!/bin/bash
-# Packages build/Cra.app into build/dist/: a zip, a DMG with an Applications
-# shortcut, and SHA-256 checksums. Signs the DMG when CRA_SIGN_IDENTITY is set.
+# Packages build/Cra.app into build/dist/: a zip, a DMG with the drag-to-install
+# window (resources/dmg), and SHA-256 checksums. Signs the DMG when CRA_SIGN_IDENTITY is set.
 #   scripts/package.sh [path/to/Cra.app]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -17,12 +17,15 @@ DMG="$DIST/Cra.dmg"
 # Zip: ditto keeps resource forks and symlinks, which codesign requires.
 ditto -c -k --keepParent "$APP" "$ZIP"
 
-# DMG: stage app + Applications link, build a compressed read-only image.
-STAGE="$(mktemp -d /tmp/cra-dmg.XXXXXX)"
-cp -R "$APP" "$STAGE/"
-ln -s /Applications "$STAGE/Applications"
-hdiutil create -quiet -volname "Cra" -srcfolder "$STAGE" -ov -format UDZO -fs HFS+ "$DMG"
-rm -rf "$STAGE"
+# DMG: dmgbuild writes the Finder layout (background, icon positions, hidden
+# chrome) into .DS_Store directly, so no Finder scripting and it works on CI.
+# Layout in resources/dmg/settings.py.
+VENV="build/dmgbuild-venv"
+if [ ! -x "$VENV/bin/dmgbuild" ]; then
+  python3 -m venv "$VENV"
+  "$VENV/bin/pip" install --quiet --disable-pip-version-check dmgbuild==1.6.7
+fi
+"$VENV/bin/dmgbuild" -s resources/dmg/settings.py -D app="$APP" "Cra" "$DMG"
 if [ "$IDENTITY" != "-" ]; then
   codesign --force --sign "$IDENTITY" --timestamp "$DMG"
 fi

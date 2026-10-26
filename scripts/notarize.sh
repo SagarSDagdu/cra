@@ -13,8 +13,9 @@ if [ -n "${NOTARY_KEYCHAIN_PROFILE:-}" ]; then
 elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_APP_PASSWORD:-}" ]; then
   AUTH=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD")
 else
-  echo "No notarization credentials in the environment; skipping." >&2
-  exit 0
+  # Only called for Developer ID builds, and Gatekeeper rejects those unnotarized.
+  echo "No notarization credentials in the environment. Set NOTARY_KEYCHAIN_PROFILE or APPLE_ID, APPLE_TEAM_ID and APPLE_APP_PASSWORD." >&2
+  exit 1
 fi
 echo "Notarizing $(basename "$FILE")…"
 xcrun notarytool submit "$FILE" "${AUTH[@]}" --wait --timeout 30m
