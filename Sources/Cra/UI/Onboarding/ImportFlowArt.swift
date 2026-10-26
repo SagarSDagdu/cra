@@ -334,7 +334,7 @@ private struct SidebarPreview: View {
         let p = theme.palette
         if let plan = model.plan, let i = model.previewSpace, i < plan.spaces.count {
             let space = plan.spaces[i]
-            let favorites = model.includeFavorites ? Array(plan.favorites.filter { !$0.isFolder }.prefix(8)) : []
+            let favorites = Array((space.favorites + (model.includeFavorites ? plan.favorites : [])).filter { !$0.isFolder }.prefix(8))
             VStack(alignment: .leading, spacing: 10) {
                 if !favorites.isEmpty {
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 7), count: 4), spacing: 7) {

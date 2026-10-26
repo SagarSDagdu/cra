@@ -20,6 +20,8 @@ struct ImportedSpace {
     var title: String
     var emoji: String
     var theme: SpaceTheme?
+    /// The space's own favorites (Arc: the top apps of the space's profile).
+    var favorites: [ImportedItem] = []
     var pinned: [ImportedItem] = []
     var today: [ImportedItem] = []
 }
@@ -44,17 +46,18 @@ struct ImportedSettings {
 struct ImportPlan {
     var source: String
     var spaces: [ImportedSpace] = []
+    /// Favorites that belong to no imported space; they go to the focused space.
     var favorites: [ImportedItem] = []
     var archive: [ImportedArchiveEntry] = []
     var settings = ImportedSettings()
 
     var tabCount: Int {
         func count(_ items: [ImportedItem]) -> Int { items.reduce(0) { $0 + ($1.isFolder ? count($1.children) : 1) } }
-        return spaces.reduce(count(favorites)) { $0 + count($1.pinned) + count($1.today) }
+        return spaces.reduce(count(favorites)) { $0 + count($1.favorites) + count($1.pinned) + count($1.today) }
     }
     var folderCount: Int {
         func count(_ items: [ImportedItem]) -> Int { items.reduce(0) { $0 + ($1.isFolder ? 1 + count($1.children) : 0) } }
-        return spaces.reduce(count(favorites)) { $0 + count($1.pinned) + count($1.today) }
+        return spaces.reduce(count(favorites)) { $0 + count($1.favorites) + count($1.pinned) + count($1.today) }
     }
 }
 
@@ -132,11 +135,15 @@ enum ArcImporter {
             return nil
         }
 
-        // Favorites (topApps) container(s).
+        // Favorites (topApps): one container per profile, shared by that profile's spaces.
+        var favoritesByProfile: [(profile: NSDictionary, items: [ImportedItem])] = []
+        var allFavorites: [ImportedItem] = []
         for (_, it) in items {
             guard let d = it["data"] as? [String: Any], let c = d["itemContainer"] as? [String: Any],
-                  let type = c["containerType"] as? [String: Any], type["topApps"] != nil else { continue }
-            for cid in it["childrenIds"] as? [String] ?? [] { if let x = convert(cid) { plan.favorites.append(x) } }
+                  let type = c["containerType"] as? [String: Any], let top = type["topApps"] as? [String: Any] else { continue }
+            let favs = (it["childrenIds"] as? [String] ?? []).compactMap(convert)
+            allFavorites += favs
+            if let profile = top["_0"] as? NSDictionary { favoritesByProfile.append((profile, favs)) }
         }
 
         for (sid, space) in pairs(main["spaces"]) {
@@ -158,6 +165,8 @@ enum ArcImporter {
                 }
             }
             var sp = ImportedSpace(title: title, emoji: emoji, theme: theme(from: space))
+            let profile = space["profile"] as? NSDictionary
+            sp.favorites = favoritesByProfile.first { $0.profile.isEqual(profile) }?.items ?? allFavorites
             if let p = pinnedID, let c = items[p] { sp.pinned = (c["childrenIds"] as? [String] ?? []).compactMap(convert) }
             if let t = todayID, let c = items[t] { sp.today = (c["childrenIds"] as? [String] ?? []).compactMap(convert) }
             plan.spaces.append(sp)
@@ -398,7 +407,7 @@ extension SidebarStore {
             }
         }
         copyFavicons(plan.favorites)
-        for sp in plan.spaces { copyFavicons(sp.pinned); copyFavicons(sp.today) }
+        for sp in plan.spaces { copyFavicons(sp.favorites); copyFavicons(sp.pinned); copyFavicons(sp.today) }
 
         func insert(_ items: [ImportedItem], into parent: UUID, skip: Set<String>, pinned: Bool) {
             var skip = skip
@@ -427,7 +436,8 @@ extension SidebarStore {
             }
         }
 
-        insert(plan.favorites, into: favoritesContainerID, skip: existingURLs(under: favoritesContainerID), pinned: true)
+        let current = focusedSpace.favoritesContainerID
+        insert(plan.favorites, into: current, skip: existingURLs(under: current), pinned: true)
 
         for sp in plan.spaces {
             let space: Space
@@ -438,6 +448,7 @@ extension SidebarStore {
                 space = createSpace(title: sp.title, emoji: sp.emoji, theme: sp.theme, focus: false)
                 result.spaces += 1
             }
+            insert(sp.favorites, into: space.favoritesContainerID, skip: existingURLs(under: space.favoritesContainerID), pinned: true)
             insert(sp.pinned, into: space.pinnedContainerID, skip: existingURLs(under: space.pinnedContainerID), pinned: true)
             insert(sp.today, into: space.todayContainerID, skip: existingURLs(under: space.todayContainerID), pinned: false)
         }

@@ -13,10 +13,6 @@ struct SidebarRootView: View {
         let palette = space.theme.palette
         VStack(spacing: 0) {
             SidebarTopBar(palette: palette)
-            // Arc 1.170 keeps favorites and the space header fixed; only the
-            // space's tab list scrolls (SpaceSectionView owns that scroll view).
-            FavoritesGrid(palette: palette)
-                .padding(.horizontal, 8)
             // Dia's paging container: every space's list sits side by side and the
             // strip follows the swipe 1:1, then a spring settles it on a page.
             GeometryReader { g in
@@ -24,9 +20,16 @@ struct SidebarRootView: View {
                 let index = CGFloat(spaces.firstIndex { $0.id == space.id } ?? 0)
                 HStack(alignment: .top, spacing: 0) {
                     ForEach(spaces) { s in
-                        SpaceSectionView(space: s, palette: s.theme.palette)
-                            .foregroundStyle(s.theme.palette.textPrimary)
-                            .frame(width: g.size.width, height: g.size.height, alignment: .top)
+                        // Arc 1.170 keeps favorites and the space header fixed; only the
+                        // space's tab list scrolls (SpaceSectionView owns that scroll view).
+                        // Favorites belong to the space, so they page with it.
+                        VStack(spacing: 0) {
+                            FavoritesGrid(space: s, palette: s.theme.palette)
+                                .padding(.horizontal, 8)
+                            SpaceSectionView(space: s, palette: s.theme.palette)
+                        }
+                        .foregroundStyle(s.theme.palette.textPrimary)
+                        .frame(width: g.size.width, height: g.size.height, alignment: .top)
                     }
                 }
                 .offset(x: -(index + ui.spaceSwipe) * g.size.width)

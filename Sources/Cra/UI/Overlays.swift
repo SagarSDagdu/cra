@@ -19,6 +19,9 @@ final class OverlayState {
     var findVisible = false
     var findQuery = ""
     var findFocusToken = 0
+    /// Find in page results ("2/7" in the bar); nil until the page answers.
+    var findMatchCount: Int?
+    var findActiveMatch = 0
     var toasts: [DownloadToast] = []
 }
 
@@ -42,7 +45,7 @@ struct StatusBubble: View {
 
 struct FindBar: View {
     let overlay: OverlayState
-    let onFind: (String, Bool, Bool) -> Void   // query, forward, isNext
+    let onFind: (String, Bool) -> Void   // query, forward
     let onClose: () -> Void
     @FocusState private var focused: Bool
 
@@ -53,24 +56,45 @@ struct FindBar: View {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Find in page", text: $overlay.findQuery)
                     .textFieldStyle(.plain)
-                    .frame(width: 180)
+                    .frame(maxWidth: .infinity)
                     .focused($focused)
-                    .onSubmit { onFind(overlay.findQuery, !(NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false), true) }
-                    .onChange(of: overlay.findQuery) { _, q in onFind(q, true, false) }
+                    .onSubmit { onFind(overlay.findQuery, !(NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false)) }
+                    .onChange(of: overlay.findQuery) { _, q in onFind(q, true) }
                     .onExitCommand { onClose() }
-                Button { onFind(overlay.findQuery, false, true) } label: { Image(systemName: "chevron.up") }.buttonStyle(.plain)
-                Button { onFind(overlay.findQuery, true, true) } label: { Image(systemName: "chevron.down") }.buttonStyle(.plain)
+                if !overlay.findQuery.isEmpty, let count = overlay.findMatchCount {
+                    Text("\(count == 0 ? 0 : overlay.findActiveMatch)/\(count)")
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .fixedSize()
+                }
+                Button { onFind(overlay.findQuery, false) } label: { Image(systemName: "chevron.up") }.buttonStyle(.plain)
+                Button { onFind(overlay.findQuery, true) } label: { Image(systemName: "chevron.down") }.buttonStyle(.plain)
                 Button { onClose() } label: { Image(systemName: "xmark") }.buttonStyle(.plain)
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.primary.opacity(0.1)))
-            .padding(10)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             .onAppear { focused = true }
             .onChange(of: overlay.findFocusToken) { _, _ in focused = true }
         }
+    }
+}
+
+/// The find bar's own window, just the bar's size, over the page windows. The
+/// page-sized overlay panel can't take key and would swallow every click on the page.
+final class FindBarPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+
+    init() {
+        super.init(contentRect: NSRect(origin: .zero, size: CraMetrics.findBarSize),
+                   styleMask: [.borderless], backing: .buffered, defer: false)
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = false
+        isMovable = false
+        hidesOnDeactivate = false
     }
 }
 

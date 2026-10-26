@@ -19,6 +19,7 @@
 #include "include/cef_context_menu_handler.h"
 #include "include/cef_display_handler.h"
 #include "include/cef_download_handler.h"
+#include "include/cef_find_handler.h"
 #include "include/cef_focus_handler.h"
 #include "include/cef_keyboard_handler.h"
 #include "include/cef_life_span_handler.h"
@@ -598,7 +599,8 @@ class CraClient : public CefClient,
                   public CefKeyboardHandler,
                   public CefDownloadHandler,
                   public CefFocusHandler,
-                  public CefPermissionHandler {
+                  public CefPermissionHandler,
+                  public CefFindHandler {
 public:
     CraBrowser* owner() { return owner_; }
     explicit CraClient(CraBrowser* owner) : owner_(owner) { CraClientRegistry().insert(static_cast<const void*>(static_cast<CefClient*>(this))); }
@@ -613,6 +615,7 @@ public:
     CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
     CefRefPtr<CefFocusHandler> GetFocusHandler() override { return this; }
     CefRefPtr<CefPermissionHandler> GetPermissionHandler() override { return this; }
+    CefRefPtr<CefFindHandler> GetFindHandler() override { return this; }
 
     // Life span -----------------------------------------------------------
 
@@ -805,6 +808,15 @@ public:
 
     void OnStatusMessage(CefRefPtr<CefBrowser> browser, const CefString& value) override {
         if (CraBrowser* o = owner_) [o.delegate browser:o didChangeStatusMessage:NSStringFromCef(value)];
+    }
+
+    // Find ------------------------------------------------------------------
+
+    void OnFindResult(CefRefPtr<CefBrowser> browser, int identifier, int count, const CefRect& selectionRect,
+                      int activeMatchOrdinal, bool finalUpdate) override {
+        CraBrowser* o = owner_;
+        if (o && [o.delegate respondsToSelector:@selector(browser:didFindMatches:activeMatch:)])
+            [o.delegate browser:o didFindMatches:count activeMatch:activeMatchOrdinal];
     }
 
     void OnLoadingProgressChange(CefRefPtr<CefBrowser> browser, double progress) override {

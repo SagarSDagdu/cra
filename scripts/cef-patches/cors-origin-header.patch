@@ -1,0 +1,24 @@
+diff --git a/cef/libcef/browser/net_service/proxy_url_loader_factory.cc b/cef/libcef/browser/net_service/proxy_url_loader_factory.cc
+index b8207e0bc..14af54024 100644
+--- a/cef/libcef/browser/net_service/proxy_url_loader_factory.cc
++++ b/cef/libcef/browser/net_service/proxy_url_loader_factory.cc
+@@ -568,10 +568,15 @@ void InterceptedRequest::Restart() {
+     // Match logic in navigation_request.cc AddAdditionalRequestHeaders.
+     url::Origin origin_header_value =
+         request_.request_initiator.value_or(url::Origin());
+-    origin_header_value = content::Referrer::SanitizeOriginForRequest(
+-        request_.url, origin_header_value,
+-        blink::ReferrerUtils::NetToMojoReferrerPolicy(
+-            request_.referrer_policy));
++    // Cra: CORS requests send the initiator as is (CorsURLLoader does the same).
++    // Sanitizing it as a referrer turned chrome-extension:// origins into "null",
++    // and servers that check the extension's origin (1Password) then refuse.
++    if (!should_check_cors) {
++      origin_header_value = content::Referrer::SanitizeOriginForRequest(
++          request_.url, origin_header_value,
++          blink::ReferrerUtils::NetToMojoReferrerPolicy(
++              request_.referrer_policy));
++    }
+ 
+     request_.headers.SetHeaderIfMissing(net::HttpRequestHeaders::kOrigin,
+                                         origin_header_value.Serialize());

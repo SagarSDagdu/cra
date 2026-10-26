@@ -318,4 +318,7 @@ enum CraMetrics {
     static let titleRowCenter: CGFloat = 24
     static let titleAreaHeight: CGFloat = 44
     static let commandBarWidth: CGFloat = 766
+    static let findBarSize = NSSize(width: 300, height: 38)
+    /// Gap between the find bar and the page's top and trailing edges.
+    static let findBarInset: CGFloat = 10
 }

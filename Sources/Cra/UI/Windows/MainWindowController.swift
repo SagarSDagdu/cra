@@ -64,7 +64,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
                           placeholder: AnyView(EmptyContentView(space: store.focusedSpace)),
                           status: AnyView(StatusBubble(overlay: overlay)),
                           toasts: AnyView(ToastStack(overlay: overlay)),
-                          find: AnyView(FindBar(overlay: overlay, onFind: { [weak self] q, fwd, next in self?.find(q, forward: fwd, next: next) },
+                          find: AnyView(FindBar(overlay: overlay, onFind: { [weak self] q, fwd in self?.find(q, forward: fwd) },
                                                 onClose: { [weak self] in self?.hideFindBar() })))
         shell.sidebarWidth = CGFloat(store.prefs.sidebarWidth)
         shell.sidebarVisible = store.prefs.sidebarVisible
@@ -318,6 +318,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         syncSidebarUI()
         let colors = browsers.runtimes.compactMapValues { $0.backgroundColor.isEmpty ? nil : $0.backgroundColor }
         if colors != shell.pageColors { shell.pageColors = colors }
+        // Same rule as ContentToolbarView.cardHex.
+        let bars = browsers.runtimes.compactMapValues { rt in HexColor.components(rt.themeColor) != nil ? rt.themeColor : nil }
+        if bars != shell.toolbarColors { shell.toolbarColors = bars }
         if tabID == browsers.visibleTabID { window?.title = store.item(tabID)?.displayTitle ?? "Cra" }
     }
 
@@ -327,12 +330,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         shell.layoutContentChildren()
     }
 
+    func browserManager(findMatches count: Int, activeMatch: Int) {
+        guard overlay.findVisible else { return }
+        if count >= 0 { overlay.findMatchCount = count }
+        if activeMatch >= 0 { overlay.findActiveMatch = activeMatch }
+    }
+
     func browserManager(download: CraDownloadInfo) {
         let name = (download.fullPath as NSString).lastPathComponent.isEmpty ? download.suggestedName : (download.fullPath as NSString).lastPathComponent
         let toast = DownloadToast(id: download.identifier, name: name, percent: download.percent, state: download.state.rawValue, path: download.fullPath)
         if let i = overlay.toasts.firstIndex(where: { $0.id == toast.id }) { overlay.toasts[i] = toast } else { overlay.toasts.append(toast) }
         shell.toastCount = overlay.toasts.count
-        overlayPanel?.ignoresMouseEvents = overlay.toasts.isEmpty && !overlay.findVisible
+        overlayPanel?.ignoresMouseEvents = overlay.toasts.isEmpty
         shell.layoutContentChildren()
         if download.state != .inProgress {
             let id = toast.id
@@ -369,6 +378,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
     // MARK: Chrome-style page windows
 
     private var overlayPanel: NSPanel?
+    private var findPanel: FindBarPanel?
     /// Page area per visible tab, window coordinates (one entry per pane).
     private var lastPaneFrames: [UUID: NSRect] = [:]
     /// While a divider is dragged the page windows follow every mouse move.
@@ -385,9 +395,30 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         panel.ignoresMouseEvents = true
         panel.hidesOnDeactivate = false
         panel.contentView = NSView(frame: panel.contentRect(forFrameRect: panel.frame))
-        shell.moveOverlays(to: panel.contentView!)
+        let find = FindBarPanel()
+        shell.moveOverlays(to: panel.contentView!, findBar: find)
         window.addChildWindow(panel, ordered: .above)
         overlayPanel = panel
+        findPanel = find
+        if overlay.findVisible { window.addChildWindow(find, ordered: .above) }
+    }
+
+    /// Overlay panel above the page windows (and the floating sidebar), the find bar above it.
+    private func raiseOverlayPanels() {
+        guard let window else { return }
+        var panels: [NSPanel?] = [overlayPanel]
+        if overlay.findVisible { panels.append(findPanel) }
+        for case let panel? in panels {
+            window.removeChildWindow(panel)
+            window.addChildWindow(panel, ordered: .above)
+            panel.orderFront(nil)
+        }
+    }
+
+    /// The find bar's screen frame: the top trailing corner of the focused page.
+    private func findPanelFrame(page: NSRect) -> NSRect {
+        let size = CraMetrics.findBarSize, inset = CraMetrics.findBarInset
+        return NSRect(x: page.maxX - size.width - inset, y: page.maxY - size.height - inset, width: size.width, height: size.height)
     }
 
     /// Attaches the visible tabs' Chrome windows over their pane areas, hides the others.
@@ -430,11 +461,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         }
         if let dev = browsers.visibleDevToolsWindow, dev.parent === window {
             raisePageWindows(above: dev)
-        } else if let panel = overlayPanel {
-            // Keep the overlay panel above the page windows.
-            window.removeChildWindow(panel)
-            window.addChildWindow(panel, ordered: .above)
-            panel.orderFront(nil)
+        } else {
+            raiseOverlayPanels()
         }
     }
 
@@ -470,6 +498,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         if shell.frontendPageRect != pr { shell.frontendPageRect = pr }
         let focusOnScreen = window.convertToScreen(focusPage)
         if let panel = overlayPanel, panel.frame != focusOnScreen { panel.setFrame(focusOnScreen, display: true) }
+        if let find = findPanel, find.frame != findPanelFrame(page: focusOnScreen) { find.setFrame(findPanelFrame(page: focusOnScreen), display: true) }
     }
 
     private func animatePageWindows(to frames: [UUID: NSRect], duration: TimeInterval) {
@@ -491,6 +520,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
                 dev.animator().setFrame(window.convertToScreen(body), display: true)
             }
             overlayPanel?.animator().setFrame(window.convertToScreen(focusPage), display: true)
+            findPanel?.animator().setFrame(findPanelFrame(page: window.convertToScreen(focusPage)), display: true)
         }
     }
 
@@ -688,11 +718,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
             window.addChildWindow(w, ordered: .above)
             w.orderFront(nil)
         }
-        if let panel = overlayPanel {
-            window.removeChildWindow(panel)
-            window.addChildWindow(panel, ordered: .above)
-            panel.orderFront(nil)
-        }
+        raiseOverlayPanels()
     }
 
     private func positionDevToolsWindow(_ rectInWindow: NSRect) {
@@ -826,9 +852,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         f.sidebarHidden = { [weak self] in self.map { !$0.store.prefs.sidebarVisible } ?? false }
         f.didAttachPanel = { [weak self] in
             // Keep toasts and the find bar above the floating sidebar.
-            guard let self, let window = self.window, let panel = self.overlayPanel else { return }
-            window.removeChildWindow(panel)
-            window.addChildWindow(panel, ordered: .above)
+            self?.raiseOverlayPanels()
         }
         f.install()
         floatingSidebar = f
@@ -1120,30 +1144,40 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         overlay.findVisible = true
         overlay.findFocusToken += 1
         shell.findVisible = true
-        overlayPanel?.ignoresMouseEvents = false
-        overlayPanel?.makeKeyAndOrderFront(nil)
         shell.layoutContentChildren()
-        window?.makeFirstResponder(shell.findHost)
+        if let window, let find = findPanel {
+            if find.parent !== window { window.addChildWindow(find, ordered: .above) }
+            find.makeKeyAndOrderFront(nil)
+        }
     }
 
     func hideFindBar() {
         overlay.findVisible = false
+        overlay.findMatchCount = nil
         shell.findVisible = false
-        overlayPanel?.ignoresMouseEvents = overlay.toasts.isEmpty
         currentBrowser?.stopFinding(true)
         shell.layoutContentChildren()
+        if let find = findPanel, let window {
+            // Typing goes back to the page, unless focus already moved elsewhere.
+            if find.isKeyWindow { browsers.visibleRuntime?.hostWindow?.makeKey() }
+            window.removeChildWindow(find)
+            find.orderOut(nil)
+        }
         currentBrowser?.setFocused(true)
     }
 
     func findNext(forward: Bool) {
         if !overlay.findVisible { showFindBar(); return }
-        find(overlay.findQuery, forward: forward, next: true)
+        find(overlay.findQuery, forward: forward)
     }
 
-    private func find(_ q: String, forward: Bool, next: Bool) {
+    /// Always a follow-up find: CEF restarts the search when the text changes, and
+    /// unlike a first request that selects a match (Chrome's find bar does this while
+    /// typing), so the bar shows "1/3" rather than "0/3".
+    private func find(_ q: String, forward: Bool) {
         guard let b = currentBrowser else { return }
-        if q.isEmpty { b.stopFinding(true); return }
-        b.findText(q, forward: forward, matchCase: false, findNext: next)
+        if q.isEmpty { overlay.findMatchCount = nil; b.stopFinding(true); return }
+        b.findText(q, forward: forward, matchCase: false, findNext: true)
     }
 
     // MARK: Sheets

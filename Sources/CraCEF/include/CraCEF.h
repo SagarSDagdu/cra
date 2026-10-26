@@ -76,6 +76,9 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 /// canvas colour of its color scheme), as "#RRGGBB". The shell fills the area under
 /// the page window with it, so a page lagging behind a resize shows no white edge.
 - (void)browser:(CraBrowser *)browser didReportBackgroundColor:(NSString *)hex;
+/// Find in page progress: `count` matches, `activeMatch` is the highlighted one
+/// (1-based). Either is -1 while Chromium has no new value for it.
+- (void)browser:(CraBrowser *)browser didFindMatches:(NSInteger)count activeMatch:(NSInteger)activeMatch;
 @end
 
 @interface CraBrowser : NSObject

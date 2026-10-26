@@ -80,6 +80,10 @@ final class ShellView: NSView {
     var pageColors: [UUID: String] = [:] {
         didSet { for c in paneCards where c.pageColor != pageColors[c.tabID] { c.pageColor = pageColors[c.tabID] } }
     }
+    /// Each tab's toolbar colour ("#RRGGBB"), painted behind its toolbar (PaneCardView.toolbarColor).
+    var toolbarColors: [UUID: String] = [:] {
+        didSet { for c in paneCards where c.toolbarColor != toolbarColors[c.tabID] { c.toolbarColor = toolbarColors[c.tabID] } }
+    }
 
     var sidebarWidth: CGFloat = CraMetrics.sidebarDefaultWidth { didSet { needsLayout = true } }
     var sidebarVisible = true { didSet { needsLayout = true } }
@@ -258,6 +262,7 @@ final class ShellView: NSView {
                 let card = PaneCardView(tabID: id, toolbar: makeToolbar?(id == ShellView.noTabID ? nil : id) ?? AnyView(EmptyView()))
                 card.isDark = isDarkTheme
                 card.pageColor = pageColors[id]
+                card.toolbarColor = toolbarColors[id]
                 card.transparent = id == ShellView.noTabID
                 card.showToolbar = showToolbar && !contentFullscreen
                 contentContainer.addSubview(card, positioned: .below, relativeTo: placeholderHost)
@@ -559,15 +564,24 @@ final class ShellView: NSView {
         statusHost.frame = NSRect(x: wb.minX, y: wb.minY, width: min(540, wb.width), height: 34)
         toastHost.isHidden = toastCount == 0
         toastHost.frame = NSRect(x: wb.maxX - 330, y: wb.minY, width: 330, height: CGFloat(toastCount) * 76 + 20)
-        findHost.isHidden = !findVisible
-        findHost.frame = NSRect(x: wb.maxX - 360, y: wb.maxY - 60, width: 360, height: 60)
+        if findHost.superview === overlayParent {
+            let size = CraMetrics.findBarSize, inset = CraMetrics.findBarInset
+            findHost.isHidden = !findVisible
+            findHost.frame = NSRect(x: wb.maxX - size.width - inset, y: wb.maxY - size.height - inset, width: size.width, height: size.height)
+        }
         if !animatingPanes, paneCards.allSatisfy({ $0.frozenWebBounds == nil }) { onPaneFrames?(paneWebFrames(layout)) }
     }
 
-    /// Chrome-style hosting: overlays move into a panel above the page windows.
-    func moveOverlays(to view: NSView) {
+    /// Chrome-style hosting: overlays move into a panel above the page windows, and
+    /// the find bar into its own panel (FindBarPanel), which the window controller places.
+    func moveOverlays(to view: NSView, findBar: NSPanel) {
         overlayParent = view
-        for h in [statusHost, toastHost, findHost] { h.removeFromSuperview(); view.addSubview(h) }
+        for h in [statusHost, toastHost] { h.removeFromSuperview(); view.addSubview(h) }
+        findHost.removeFromSuperview()
+        findHost.isHidden = false
+        findHost.autoresizingMask = [.width, .height]
+        findHost.frame = findBar.contentView!.bounds
+        findBar.contentView!.addSubview(findHost)
         needsLayout = true
     }
 

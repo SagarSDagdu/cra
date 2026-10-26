@@ -326,12 +326,36 @@ enum CredentialImport {
                     "is_httponly": c.httpOnly, "last_access_utc": c.lastAccess, "has_expires": c.expires > 0,
                     "is_persistent": c.expires > 0, "priority": Int64(1), "samesite": Int64(c.sameSite),
                     "source_scheme": Int64(c.secure ? 2 : 1), "source_port": Int64(c.secure ? 443 : 80),
-                    "last_update_utc": c.lastAccess, "source_type": Int64(0), "has_cross_site_ancestor": false,
+                    // Chromium stores every unpartitioned cookie with has_cross_site_ancestor = 1 and
+                    // matches on it when it updates or deletes one; see repairImportedCookies.
+                    "last_update_utc": c.lastAccess, "source_type": Int64(0), "has_cross_site_ancestor": true,
                 ], orIgnore: true)
                 if !ok { return false }
             }
             return true
         }
+    }
+
+    /// Earlier imports wrote unpartitioned cookies with has_cross_site_ancestor = 0.
+    /// Chromium's UPDATE and DELETE never match those rows, so a fresh sign-in sat next
+    /// to the stale imported cookie, and at the next launch Chromium dropped the stale
+    /// duplicate with a DELETE that hit the fresh row instead: signed out after every
+    /// restart. Drops imported rows Chromium has since replaced and fixes the rest.
+    /// Called from main.swift before Chromium starts.
+    static func repairImportedCookies(profileDir: URL) {
+        guard let db = open(profileDir.appendingPathComponent("Cookies")) else { return }
+        defer { sqlite3_close(db) }
+        guard !SQLite.rows(db, "SELECT 1 FROM cookies WHERE top_frame_site_key = '' AND has_cross_site_ancestor = 0 LIMIT 1").isEmpty else { return }
+        let ok = transaction(db) {
+            sqlite3_exec(db, """
+                DELETE FROM cookies WHERE top_frame_site_key = '' AND has_cross_site_ancestor = 0 AND EXISTS (
+                    SELECT 1 FROM cookies c WHERE c.top_frame_site_key = '' AND c.has_cross_site_ancestor = 1
+                    AND c.host_key = cookies.host_key AND c.name = cookies.name AND c.path = cookies.path
+                    AND c.source_scheme = cookies.source_scheme AND c.source_port = cookies.source_port);
+                UPDATE cookies SET has_cross_site_ancestor = 1 WHERE top_frame_site_key = '' AND has_cross_site_ancestor = 0;
+                """, nil, nil, nil) == SQLITE_OK
+        }
+        if !ok { NSLog("Cra: could not repair imported cookies") }
     }
 
     private static func insertLogins(_ logins: [Pending.Login], into url: URL) -> Bool {

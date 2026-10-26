@@ -1,7 +1,9 @@
 import SwiftUI
 
-/// Arc's "top apps": a 4-wide grid of favorite tiles shared by every space.
+/// Arc's "top apps": a 4-wide grid of favorite tiles. Arc shares them between
+/// spaces; in Cra every space has its own.
 struct FavoritesGrid: View {
+    let space: Space
     let palette: SpacePalette
     @Environment(SidebarStore.self) private var store
     @Environment(SidebarUIState.self) private var ui
@@ -11,11 +13,11 @@ struct FavoritesGrid: View {
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 4)
 
     var body: some View {
-        let favorites = store.tabs(under: store.favoritesContainerID)
+        let favorites = store.tabs(under: space.favoritesContainerID)
         VStack(spacing: 0) {
             if !favorites.isEmpty {
                 LazyVGrid(columns: columns, spacing: 8) {
-                    ForEach(favorites) { item in FavoriteCell(item: item, palette: palette) }
+                    ForEach(favorites) { item in FavoriteCell(item: item, space: space, palette: palette) }
                 }
             }
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -29,7 +31,7 @@ struct FavoritesGrid: View {
                 .animation(.easeOut(duration: 0.15), value: targeted)
                 .dropDestination(for: SidebarDragItem.self) { items, _ in
                     guard let d = items.first else { return false }
-                    store.addToFavorites(d.id)
+                    store.addToFavorites(d.id, in: space.id)
                     return true
                 } isTargeted: { targeted = $0 }
         }
@@ -52,6 +54,7 @@ struct FocusRing: View {
 
 struct FavoriteCell: View {
     let item: SidebarItem
+    let space: Space
     let palette: SpacePalette
     @Environment(SidebarStore.self) private var store
     @Environment(SidebarUIState.self) private var ui
@@ -59,7 +62,7 @@ struct FavoriteCell: View {
     @State private var hover = false
     @State private var targeted = false
 
-    private var selected: Bool { store.selectedTabID == item.id }
+    private var selected: Bool { store.selectedTabID(in: space.id) == item.id }
 
     var body: some View {
         let session = ui
@@ -90,8 +93,8 @@ struct FavoriteCell: View {
         .draggable(SidebarDragItem.begin(item.id, session))
         .dropDestination(for: SidebarDragItem.self) { items, location in
             guard let d = items.first, d.id != item.id,
-                  let idx = store.item(store.favoritesContainerID)?.children.firstIndex(of: item.id) else { return false }
-            store.moveItem(d.id, to: store.favoritesContainerID, index: idx + (location.x > 30 ? 1 : 0))
+                  let idx = store.item(space.favoritesContainerID)?.children.firstIndex(of: item.id) else { return false }
+            store.moveItem(d.id, to: space.favoritesContainerID, index: idx + (location.x > 30 ? 1 : 0))
             return true
         } isTargeted: { targeted = $0 }
         .contextMenu {

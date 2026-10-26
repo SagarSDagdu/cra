@@ -408,8 +408,9 @@ final class ImportFlowModel {
             cats.append(ImportCategory(id: "tabs", title: "Tabs & Folders", symbol: "pin.fill",
                                        detail: count(selection.spaces.reduce(0) { $0 + $1.itemCount }, "tab")))
         }
-        if includeFavorites && !selection.favorites.isEmpty {
-            cats.append(ImportCategory(id: "favorites", title: "Favorites", symbol: "star.fill", detail: count(selection.favorites.count, "favorite")))
+        let favoriteCount = selection.spaces.reduce(selection.favorites.count) { $0 + $1.favorites.count }
+        if favoriteCount > 0 {
+            cats.append(ImportCategory(id: "favorites", title: "Favorites", symbol: "star.fill", detail: count(favoriteCount, "favorite")))
         }
         if includeArchive && !plan.archive.isEmpty {
             cats.append(ImportCategory(id: "archive", title: "Archive", symbol: "archivebox.fill", detail: count(plan.archive.count, "tab")))
@@ -493,7 +494,7 @@ final class ImportFlowModel {
     // MARK: Pinned tabs (Dia's PinnedTabsView)
 
     /// Shown unless the favorites grid already has a full row.
-    var offersPinnedTabs: Bool { store.tabs(under: store.favoritesContainerID).count < 4 }
+    var offersPinnedTabs: Bool { store.tabs(under: store.focusedSpace.favoritesContainerID).count < 4 }
 
     /// Dia's pre-pinnable apps (PinnedTabs/Icons/* in its Onboarding bundle).
     static let presetPins: [PinCandidate] = [
@@ -518,7 +519,7 @@ final class ImportFlowModel {
         pinsLoaded = true
         let source = self.source?.kind == .safari ? nil : (self.source ?? sources.first { $0.kind != .safari })
         let fromExport = exportTopSites
-        let existing = Set(store.tabs(under: store.favoritesContainerID).compactMap { $0.tab.flatMap { FaviconCache.key(for: $0.url) } })
+        let existing = Set(store.tabs(under: store.focusedSpace.favoritesContainerID).compactMap { $0.tab.flatMap { FaviconCache.key(for: $0.url) } })
         pinCandidates = Self.presetPins
         Task { @MainActor in
             let (sites, icons) = await Task.detached(priority: .userInitiated) { () -> ([TopSite], [String: NSImage]) in

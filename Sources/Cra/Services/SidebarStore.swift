@@ -12,7 +12,6 @@ final class SidebarStore {
     private(set) var spaces: [UUID: Space] = [:]
     private(set) var spaceOrder: [UUID] = []
     private(set) var items: [UUID: SidebarItem] = [:]
-    private(set) var favoritesContainerID: UUID = UUID()
     private(set) var archive: [ArchivedItem] = []
     var prefs = WindowPrefs() { didSet { prefsStore.save(prefs) } }
     var settings = AppSettings() { didSet { settingsStore.save(settings) } }
@@ -32,7 +31,6 @@ final class SidebarStore {
 
     init() {
         let doc = sidebarFile.load(or: SidebarDocument.fresh)
-        favoritesContainerID = doc.favoritesContainerID
         for s in doc.spaces { spaces[s.id] = s }
         spaceOrder = doc.spaceOrder.filter { spaces[$0] != nil }
         for s in doc.spaces where !spaceOrder.contains(s.id) { spaceOrder.append(s.id) }
@@ -46,16 +44,17 @@ final class SidebarStore {
         if prefs.focusedSpaceID == nil || spaces[prefs.focusedSpaceID!] == nil {
             prefs.focusedSpaceID = spaceOrder.first
         }
+        splitSharedFavorites(doc.favoritesContainerID)
     }
 
-    /// Make sure every space has its containers, favorites exist, and no item
-    /// points at a parent that is gone.
+    /// Make sure every space has its containers and no item points at a
+    /// parent that is gone.
     func repair() {
-        if items[favoritesContainerID] == nil {
-            let fav = SidebarItem.container(.favorites, id: favoritesContainerID)
-            items[fav.id] = fav
-        }
         for (id, var space) in spaces {
+            if items[space.favoritesContainerID] == nil {
+                let c = SidebarItem.container(.favorites(spaceID: id), id: space.favoritesContainerID)
+                items[c.id] = c
+            }
             if items[space.pinnedContainerID] == nil {
                 let c = SidebarItem.container(.pinned(spaceID: id), id: space.pinnedContainerID)
                 items[c.id] = c
@@ -71,7 +70,7 @@ final class SidebarStore {
             let doc = SidebarDocument.fresh()
             for s in doc.spaces { spaces[s.id] = s }
             spaceOrder = doc.spaceOrder
-            for it in doc.items where it.container != .favorites { items[it.id] = it }
+            for it in doc.items { items[it.id] = it }
         }
         // Drop children references that do not resolve and orphans.
         for (id, var it) in items {
@@ -90,16 +89,52 @@ final class SidebarStore {
         }
     }
 
+    /// Favorites used to be one set every space shared. Each space gets its own
+    /// copy of that set so nothing disappears anywhere; the focused space keeps
+    /// the original tabs, other spaces get copies.
+    private func splitSharedFavorites(_ sharedID: UUID?) {
+        guard let sharedID, let shared = items[sharedID] else { return }
+        for sid in spaceOrder {
+            guard let space = spaces[sid] else { continue }
+            var copies: [UUID: UUID] = [:]
+            for child in shared.children {
+                if sid == focusedSpaceID {
+                    items[child]?.parentID = space.favoritesContainerID
+                    items[space.favoritesContainerID]?.children.append(child)
+                } else {
+                    copySubtree(child, into: space.favoritesContainerID, copies: &copies)
+                }
+            }
+            // A favorite open in this space stays open: it is now this space's copy.
+            if let sel = prefs.selectedTabPerSpace[sid], let copy = copies[sel] { prefs.selectedTabPerSpace[sid] = copy }
+            for (old, new) in copies where prefs.expandedFolders.contains(old) { prefs.expandedFolders.insert(new) }
+        }
+        items[sharedID] = nil
+        touch()
+    }
+
+    private func copySubtree(_ id: UUID, into parent: UUID, copies: inout [UUID: UUID]) {
+        guard var it = items[id] else { return }
+        let kids = it.children
+        it.id = UUID()
+        it.parentID = parent
+        it.children = []
+        copies[id] = it.id
+        items[it.id] = it
+        items[parent]?.children.append(it.id)
+        for k in kids { copySubtree(k, into: it.id, copies: &copies) }
+    }
+
     func save() {
         let doc = SidebarDocument(version: 1, spaceOrder: spaceOrder, spaces: spaceOrder.compactMap { spaces[$0] },
-                                  favoritesContainerID: favoritesContainerID, items: Array(items.values))
+                                  items: Array(items.values))
         sidebarFile.save(doc)
         archiveFile.save(archive)
     }
 
     func saveAll() {
         let doc = SidebarDocument(version: 1, spaceOrder: spaceOrder, spaces: spaceOrder.compactMap { spaces[$0] },
-                                  favoritesContainerID: favoritesContainerID, items: Array(items.values))
+                                  items: Array(items.values))
         sidebarFile.saveNow(doc)
         archiveFile.saveNow(archive)
         prefsStore.saveNow(prefs)
@@ -167,7 +202,7 @@ final class SidebarStore {
     /// ⌘1…⌘9 index into (Arc: "Go to Sidebar Item N").
     func visibleTabs(in spaceID: UUID) -> [SidebarItem] {
         guard let space = spaces[spaceID] else { return [] }
-        return tabs(under: favoritesContainerID) + tabs(under: space.pinnedContainerID) + tabs(under: space.todayContainerID)
+        return tabs(under: space.favoritesContainerID) + tabs(under: space.pinnedContainerID) + tabs(under: space.todayContainerID)
     }
 
     /// Which container an item ultimately lives in.
@@ -183,13 +218,7 @@ final class SidebarStore {
         return nil
     }
 
-    func spaceID(ofItem id: UUID) -> UUID? {
-        switch rootContainer(of: id) {
-        case .pinned(let s), .today(let s): return s
-        case .favorites: return focusedSpaceID
-        default: return nil
-        }
-    }
+    func spaceID(ofItem id: UUID) -> UUID? { rootContainer(of: id)?.spaceID }
 
     func isPinned(_ id: UUID) -> Bool {
         switch rootContainer(of: id) {
@@ -198,7 +227,10 @@ final class SidebarStore {
         }
     }
 
-    func isFavorite(_ id: UUID) -> Bool { rootContainer(of: id) == .favorites }
+    func isFavorite(_ id: UUID) -> Bool {
+        if case .favorites? = rootContainer(of: id) { return true }
+        return false
+    }
 
     func selectedTabID(in spaceID: UUID) -> UUID? {
         guard let id = prefs.selectedTabPerSpace[spaceID], items[id]?.isTab == true else { return nil }
@@ -267,7 +299,7 @@ final class SidebarStore {
         items[id] = it
         revision &+= 1
         sidebarFile.save(SidebarDocument(version: 1, spaceOrder: spaceOrder, spaces: orderedSpaces,
-                                         favoritesContainerID: favoritesContainerID, items: Array(items.values)), delay: 2)
+                                         items: Array(items.values)), delay: 2)
     }
 
     func markUnread(_ id: UUID, _ unread: Bool = true) {
@@ -348,7 +380,7 @@ final class SidebarStore {
     func touchAfterImport() { touch() }
 
     var document: SidebarDocument {
-        SidebarDocument(version: 1, spaceOrder: spaceOrder, spaces: orderedSpaces, favoritesContainerID: favoritesContainerID, items: Array(items.values))
+        SidebarDocument(version: 1, spaceOrder: spaceOrder, spaces: orderedSpaces, items: Array(items.values))
     }
 
     /// Most recently used tab other than the current one (⌃Tab).
@@ -391,7 +423,7 @@ final class SidebarStore {
         }
         let fromParent = it.parentID
         let oldIndex = fromParent.flatMap { items[$0]?.children.firstIndex(of: id) }
-        if it.isFolder, case .today = rootContainerKind(newParent) ?? .favorites {
+        if it.isFolder, case .today? = rootContainerKind(newParent) {
             // Unpack: move the folder's tabs instead.
             let kids = it.children
             detach(id)
@@ -646,14 +678,20 @@ final class SidebarStore {
         if isPinned(id) { unpinTab(id) } else { pinTab(id) }
     }
 
-    func addToFavorites(_ id: UUID) { moveItem(id, to: favoritesContainerID, index: nil) }
+    /// Favorites belong to one space: the tab's own unless another is given.
+    func addToFavorites(_ id: UUID, in spaceID: UUID? = nil) {
+        guard let space = spaces[spaceID ?? self.spaceID(ofItem: id) ?? focusedSpaceID] else { return }
+        moveItem(id, to: space.favoritesContainerID, index: nil)
+    }
 
     func removeFromFavorites(_ id: UUID) {
-        moveItem(id, to: focusedSpace.pinnedContainerID, index: nil)
+        guard let space = spaceID(ofItem: id).flatMap({ spaces[$0] }) else { return }
+        moveItem(id, to: space.pinnedContainerID, index: nil)
     }
 
     func moveTab(_ id: UUID, toSpace sid: UUID) {
         guard let space = spaces[sid] else { return }
+        if isFavorite(id) { return moveItem(id, to: space.favoritesContainerID, index: nil) }
         let pinned = isPinned(id)
         moveItem(id, to: pinned ? space.pinnedContainerID : space.todayContainerID, index: pinned ? nil : 0)
     }
@@ -815,13 +853,15 @@ final class SidebarStore {
     @discardableResult
     func createSpace(title: String, emoji: String, theme: SpaceTheme? = nil, focus: Bool = true) -> Space {
         let id = UUID()
+        let favorites = SidebarItem.container(.favorites(spaceID: id))
         let pinned = SidebarItem.container(.pinned(spaceID: id))
         let today = SidebarItem.container(.today(spaceID: id))
+        items[favorites.id] = favorites
         items[pinned.id] = pinned
         items[today.id] = today
         let t = theme ?? SpaceTheme.presets[spaceOrder.count % SpaceTheme.presets.count]
-        let space = Space(id: id, title: title, emoji: emoji, theme: t, pinnedContainerID: pinned.id,
-                          todayContainerID: today.id, createdAt: Date())
+        let space = Space(id: id, title: title, emoji: emoji, theme: t, favoritesContainerID: favorites.id,
+                          pinnedContainerID: pinned.id, todayContainerID: today.id, createdAt: Date())
         spaces[id] = space
         spaceOrder.append(id)
         if focus { prefs.focusedSpaceID = id }
@@ -837,10 +877,11 @@ final class SidebarStore {
 
     func deleteSpace(_ id: UUID) {
         guard spaces.count > 1, let space = spaces[id] else { return }
-        for t in tabs(under: space.pinnedContainerID) + tabs(under: space.todayContainerID) {
+        for t in tabs(under: space.favoritesContainerID) + tabs(under: space.pinnedContainerID) + tabs(under: space.todayContainerID) {
             archiveTab(t.id, reason: .spaceDeleted)
         }
-        for c in children(of: space.pinnedContainerID) where c.isFolder { deleteFolder(c.id) }
+        for c in children(of: space.favoritesContainerID) + children(of: space.pinnedContainerID) where c.isFolder { deleteFolder(c.id) }
+        items[space.favoritesContainerID] = nil
         items[space.pinnedContainerID] = nil
         items[space.todayContainerID] = nil
         spaces[id] = nil

@@ -11,9 +11,10 @@ MainActor.assumeIsolated {
     // Passwords and cookies staged by the import go into the profile while no
     // Chromium has it open: before initializing, and only when no other Cra runs.
     let me = ProcessInfo.processInfo.processIdentifier
-    if CredentialImport.hasPending,
-       !NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "").contains(where: { $0.processIdentifier != me }) {
-        CredentialImport.applyPending(profileDir: AppPaths.chromiumCache.appendingPathComponent("Default", isDirectory: true))
+    if !NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "").contains(where: { $0.processIdentifier != me }) {
+        let profile = AppPaths.chromiumCache.appendingPathComponent("Default", isDirectory: true)
+        if CredentialImport.hasPending { CredentialImport.applyPending(profileDir: profile) }
+        CredentialImport.repairImportedCookies(profileDir: profile)
     }
 
     NativeMessagingHosts.link(into: AppPaths.chromiumCache)

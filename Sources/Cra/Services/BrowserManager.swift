@@ -27,6 +27,8 @@ final class TabRuntime {
 protocol BrowserManagerDelegate: AnyObject {
     func browserManagerDidUpdate(_ tabID: UUID)
     func browserManager(statusMessage: String)
+    /// Find in page results for the visible tab; -1 = no new value.
+    func browserManager(findMatches count: Int, activeMatch: Int)
     func browserManager(download: CraDownloadInfo)
     func browserManager(fullscreen: Bool, tabID: UUID)
     func browserManagerDevToolsHost(for tabID: UUID) -> NSView?
@@ -290,6 +292,11 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
 
     func browser(_ browser: CraBrowser, didChangeStatusMessage message: String) {
         delegate?.browserManager(statusMessage: message)
+    }
+
+    func browser(_ browser: CraBrowser, didFindMatches count: Int, activeMatch: Int) {
+        guard let id = tabID(of: browser), id == visibleTabID else { return }
+        delegate?.browserManager(findMatches: count, activeMatch: activeMatch)
     }
 
     func browser(_ browser: CraBrowser, didChangeFullscreen fullscreen: Bool) {

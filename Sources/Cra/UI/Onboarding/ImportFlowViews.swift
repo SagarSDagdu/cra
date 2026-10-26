@@ -246,7 +246,7 @@ private struct SpacesStep: View {
                         if !plan.favorites.isEmpty {
                             SelectableRow(c: c, checked: model.includeFavorites, toggle: { model.includeFavorites.toggle() }) {
                                 RowSymbol(name: "star.fill", c: c)
-                                RowTitle(title: "Favorites", caption: "\(plan.favorites.count) above your spaces", c: c)
+                                RowTitle(title: "Favorites", caption: "\(plan.favorites.count) in your current space", c: c)
                             }
                         }
                         if !plan.archive.isEmpty {

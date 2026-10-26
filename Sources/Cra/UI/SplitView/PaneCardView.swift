@@ -12,8 +12,8 @@ final class PaneCardView: NSView {
     let webArea = NSView()
     /// Hairline under the toolbar when the pane has no page (Arc draws it on the tinted card).
     private let hairline = NSView()
-    /// The white card behind the toolbar. A card with a page paints nothing else: under the
-    /// page window's anti-aliased corners any fill of the card's shape shows as a light rim.
+    /// The card behind the toolbar, in the toolbar's colour. A card with a page paints nothing else:
+    /// under the page window's anti-aliased corners any fill of the card's shape shows as a light rim.
     private let toolbarBackground = NSView()
     var showToolbar = true { didSet { needsLayout = true } }
     var toolbarHeight: CGFloat = CraMetrics.toolbarHeight { didSet { needsLayout = true } }
@@ -25,6 +25,9 @@ final class PaneCardView: NSView {
     /// the card by a frame or more while the window is resized quickly; in that gap the
     /// page area must look like the page, not like a white card.
     var pageColor: String? { didSet { refreshBackground() } }
+    /// The toolbar's colour (the page's theme-color, white until it reports one). A white backing
+    /// under a dark bar shows through the bar's anti-aliased left edge as a 1px light line.
+    var toolbarColor: String? { didSet { refreshBackground() } }
     /// The no-tab stand-in: toolbar on the gradient, no card at all.
     var transparent = false { didSet { refreshBackground() } }
     /// While a pane is being dragged open/closed its page keeps its last size.
@@ -58,7 +61,8 @@ final class PaneCardView: NSView {
         // Measured on Arc 1.170 (Victor theme, 2x): the empty pane is the
         // gradient plus about +9/+11/+12 per channel, i.e. a white veil at ~0.2.
         layer?.backgroundColor = transparent || hasPage ? NSColor.clear.cgColor : NSColor(white: 1, alpha: isDark ? 0.08 : 0.2).cgColor
-        toolbarBackground.layer?.backgroundColor = (hasPage && !transparent ? NSColor.white : NSColor.clear).cgColor
+        let bar = toolbarColor.map { NSColor(Color(hex: $0)) } ?? .white
+        toolbarBackground.layer?.backgroundColor = (hasPage && !transparent ? bar : NSColor.clear).cgColor
         let page = pageColor.map { NSColor(Color(hex: $0)) } ?? .white
         webArea.layer?.backgroundColor = (hasPage && !transparent ? page : NSColor.clear).cgColor
         hairline.isHidden = hasPage || transparent || !showToolbar

@@ -1,22 +1,53 @@
 import Foundation
 
 // Cra's sidebar model. Shape follows what Arc persists in StorableSidebar.json
-// (see docs/arc-reverse-engineering.md): spaces own a pinned and a "today"
-// container, favorites live in one shared container, tabs/folders are items in
-// a tree keyed by id with explicit child ordering.
+// (see docs/arc-reverse-engineering.md): spaces own a favorites, a pinned and a
+// "today" container, tabs/folders are items in a tree keyed by id with explicit
+// child ordering. Unlike Arc, favorites are not shared between spaces.
 
 typealias ItemID = UUID
 
 enum ContainerKind: Codable, Equatable, Hashable {
-    case favorites
+    case favorites(spaceID: UUID)
     case pinned(spaceID: UUID)
     case today(spaceID: UUID)
 
-    var spaceID: UUID? {
+    var spaceID: UUID {
         switch self {
-        case .favorites: return nil
-        case .pinned(let id), .today(let id): return id
+        case .favorites(let id), .pinned(let id), .today(let id): return id
         }
+    }
+
+    /// Stands in for the space of the favorites container every space shared
+    /// before favorites became per space; SidebarStore splits it up on load.
+    static let sharedFavoritesSpaceID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+    private enum CodingKeys: String, CodingKey { case favorites, pinned, today }
+    private enum SpaceKeys: String, CodingKey { case spaceID }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        guard let key = c.allKeys.first else {
+            throw DecodingError.dataCorrupted(.init(codingPath: c.codingPath, debugDescription: "No container kind"))
+        }
+        let s = try c.nestedContainer(keyedBy: SpaceKeys.self, forKey: key)
+        switch key {
+        case .favorites: self = .favorites(spaceID: try s.decodeIfPresent(UUID.self, forKey: .spaceID) ?? Self.sharedFavoritesSpaceID)
+        case .pinned: self = .pinned(spaceID: try s.decode(UUID.self, forKey: .spaceID))
+        case .today: self = .today(spaceID: try s.decode(UUID.self, forKey: .spaceID))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        let key: CodingKeys
+        switch self {
+        case .favorites: key = .favorites
+        case .pinned: key = .pinned
+        case .today: key = .today
+        }
+        var s = c.nestedContainer(keyedBy: SpaceKeys.self, forKey: key)
+        try s.encode(spaceID, forKey: .spaceID)
     }
 }
 
@@ -214,6 +245,7 @@ struct Space: Identifiable, Codable, Equatable {
     var title: String
     var emoji: String
     var theme: SpaceTheme
+    var favoritesContainerID: UUID
     var pinnedContainerID: UUID
     var todayContainerID: UUID
     var createdAt: Date
@@ -223,18 +255,19 @@ struct SidebarDocument: Codable {
     var version: Int = 1
     var spaceOrder: [UUID]
     var spaces: [Space]
-    var favoritesContainerID: UUID
+    /// The favorites container all spaces shared in older files. Only read, to
+    /// split it up between the spaces; new files leave it out.
+    var favoritesContainerID: UUID?
     var items: [SidebarItem]
 
     static func fresh() -> SidebarDocument {
-        let fav = SidebarItem.container(.favorites)
         let spaceID = UUID()
+        let fav = SidebarItem.container(.favorites(spaceID: spaceID))
         let pinned = SidebarItem.container(.pinned(spaceID: spaceID))
         let today = SidebarItem.container(.today(spaceID: spaceID))
-        let space = Space(id: spaceID, title: "Personal", emoji: "🌱", theme: SpaceTheme.presets[0],
+        let space = Space(id: spaceID, title: "Personal", emoji: "🌱", theme: SpaceTheme.presets[0], favoritesContainerID: fav.id,
                           pinnedContainerID: pinned.id, todayContainerID: today.id, createdAt: Date())
-        return SidebarDocument(spaceOrder: [spaceID], spaces: [space], favoritesContainerID: fav.id,
-                               items: [fav, pinned, today])
+        return SidebarDocument(spaceOrder: [spaceID], spaces: [space], items: [fav, pinned, today])
     }
 }
 
@@ -409,6 +442,21 @@ extension WindowPrefs {
         selectedTabPerSpace = try c.decodeIfPresent([UUID: UUID].self, forKey: .selectedTabPerSpace) ?? [:]
         windowFrame = try c.decodeIfPresent(String.self, forKey: .windowFrame)
         littleWindowSize = try c.decodeIfPresent(String.self, forKey: .littleWindowSize)
+    }
+}
+
+extension Space {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        emoji = try c.decode(String.self, forKey: .emoji)
+        theme = try c.decode(SpaceTheme.self, forKey: .theme)
+        // Spaces saved while favorites were shared get a container on load (SidebarStore.repair).
+        favoritesContainerID = try c.decodeIfPresent(UUID.self, forKey: .favoritesContainerID) ?? UUID()
+        pinnedContainerID = try c.decode(UUID.self, forKey: .pinnedContainerID)
+        todayContainerID = try c.decode(UUID.self, forKey: .todayContainerID)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
     }
 }
 

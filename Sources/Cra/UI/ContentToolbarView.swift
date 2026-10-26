@@ -210,9 +210,8 @@ struct ContentToolbarView: View {
         .onTapGesture { editURL() }
         .background(onCard ? cardFill : (isEmptyPane ? Color.clear : (palette.isDark ? Color.white.opacity(0.025) : Color.black.opacity(0.03))))
         .overlay(alignment: .bottom) {
-            // Arc draws a 1 px hairline under the bar on the card too (45/45/45 on a 34 bar, 242 on white).
-            if onCard { Rectangle().fill(cardIsLight ? Color.black.opacity(0.05) : Color.white.opacity(0.05)).frame(height: 1) }
-            else if !isEmptyPane { Rectangle().fill(palette.isDark ? Color.white.opacity(0.07) : Color.black.opacity(0.07)).frame(height: 1) }
+            // No hairline under the bar on the card: the bar and the page read as one surface (Arc draws one).
+            if !onCard, !isEmptyPane { Rectangle().fill(palette.isDark ? Color.white.opacity(0.07) : Color.black.opacity(0.07)).frame(height: 1) }
         }
         .ignoresSafeArea()
     }
