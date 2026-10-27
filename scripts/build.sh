@@ -4,6 +4,8 @@
 #   scripts/build.sh debug      debug build
 #   CRA_SIGN_IDENTITY="Developer ID Application: …" scripts/build.sh
 #                               distributable build (see docs/release.md)
+#   CRA_PROVISIONING_PROFILE=<path> (with CRA_SIGN_IDENTITY)
+#                               adds the passkey entitlements the profile grants
 #   CRA_INSTALL_DIR=<dir> scripts/build.sh
 #                               also copies the app to <dir>/Cra.app
 # Dev builds are version 0.0.0-dev and stay unregistered with LaunchServices, so
@@ -83,7 +85,34 @@ sign "$SPARKLE/Versions/B/Autoupdate"
 sign "$SPARKLE/Versions/B/Updater.app"
 sign "$SPARKLE"
 for h in "$APP"/Contents/Frameworks/*.app; do sign "$h" "$ROOT/resources/CraHelper.entitlements"; done
-sign "$APP" "$ROOT/resources/Cra.entitlements"
+# Passkeys need entitlements only a provisioning profile can grant: the Touch ID
+# keychain group ("<app id>.webauthn", scripts/cef-patches) and, once Apple approves
+# it, iCloud Keychain (web-browser.public-key-credential). With
+# CRA_PROVISIONING_PROFILE=<Developer ID profile> the app embeds it and claims what
+# it allows; macOS refuses to launch an app that claims more. See docs/release.md.
+APP_ENTITLEMENTS="$ROOT/resources/Cra.entitlements"
+if [ -n "${CRA_PROVISIONING_PROFILE:-}" ] && [ "$IDENTITY" != "-" ]; then
+  PB=/usr/libexec/PlistBuddy
+  PROFILE="$STAGE/profile.plist"
+  security cms -D -i "$CRA_PROVISIONING_PROFILE" -o "$PROFILE"
+  APP_ID="$($PB -c "Print :Entitlements:com.apple.application-identifier" "$PROFILE")"
+  BUNDLE_ID="$($PB -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist")"
+  [ "${APP_ID#*.}" = "$BUNDLE_ID" ] || { echo "Provisioning profile is for $APP_ID, not $BUNDLE_ID" >&2; exit 1; }
+  cp "$CRA_PROVISIONING_PROFILE" "$APP/Contents/embedded.provisionprofile"
+  APP_ENTITLEMENTS="$STAGE/Cra.entitlements"
+  cp "$ROOT/resources/Cra.entitlements" "$APP_ENTITLEMENTS"
+  $PB -c "Add :com.apple.application-identifier string $APP_ID" \
+      -c "Add :com.apple.developer.team-identifier string ${APP_ID%%.*}" "$APP_ENTITLEMENTS"
+  if $PB -c "Print :Entitlements:keychain-access-groups" "$PROFILE" >/dev/null 2>&1; then
+    $PB -c "Add :keychain-access-groups array" -c "Add :keychain-access-groups:0 string $APP_ID.webauthn" "$APP_ENTITLEMENTS"
+  fi
+  if [ "$($PB -c "Print :Entitlements:com.apple.developer.web-browser.public-key-credential" "$PROFILE" 2>/dev/null)" = true ]; then
+    $PB -c "Add :com.apple.developer.web-browser.public-key-credential bool true" "$APP_ENTITLEMENTS"
+  else
+    echo "Note: the provisioning profile has no web-browser.public-key-credential; iCloud Keychain passkeys stay off" >&2
+  fi
+fi
+sign "$APP" "$APP_ENTITLEMENTS"
 if [ "$IDENTITY" != "-" ]; then
   codesign --verify --deep --strict --verbose=2 "$APP"
 fi

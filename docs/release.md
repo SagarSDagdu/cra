@@ -27,6 +27,7 @@ Everything is scripted; the only manual part is obtaining the certificate once.
    | `APPLE_ID` | the Apple ID email |
    | `APPLE_TEAM_ID` | the 10-character team id |
    | `APPLE_APP_PASSWORD` | the app-specific password |
+   | `MACOS_PROVISIONING_PROFILE` | optional, for passkeys (see [Passkeys](#passkeys)) |
 
 Until these exist the Release workflow still runs: it publishes an ad-hoc build as a
 regular release (pre-releases are invisible to `releases/latest`) with the install
@@ -103,6 +104,34 @@ Order matters because each signature seals what is inside it:
 The entitlements are the hardened-runtime exceptions Chromium needs (JIT, unsigned
 executable memory, library validation off, dyld environment variables), plus camera,
 microphone and location so sites can ask for them.
+
+## Passkeys
+
+Security keys and phones (the QR code in Chrome's "Passkeys & Security Keys" dialog)
+work in every build. Passkeys kept on the Mac need entitlements macOS only honours
+with a provisioning profile, the way Chrome, Arc and Dia ship:
+
+| Entitlement | Turns on |
+|---|---|
+| `keychain-access-groups` = `<team>.dk.kildahl.cra.webauthn` | Chromium's Touch ID passkeys, stored in Cra's keychain group. `scripts/cef-patches/webauthn-keychain-access-group.patch` derives the group from the app's `application-identifier` (Chromium's branding has no team ID). |
+| `com.apple.developer.web-browser.public-key-credential` | iCloud Keychain passkeys (Passwords app), through Chromium's own iCloud Keychain code. Managed: Apple must approve it. |
+
+One-time setup, as the Account Holder:
+
+1. Request the entitlement for `dk.kildahl.cra` at
+   https://developer.apple.com/contact/request/macos-browsers-passkeys/ (Account Holder
+   only). Apple reviews it and adds it as a managed capability, which then shows under
+   the App ID's Additional Capabilities. The Touch ID group needs no approval.
+2. Create a **Developer ID** provisioning profile for the explicit App ID
+   `dk.kildahl.cra` and download it. Once the entitlement is approved, regenerate it and
+   check that it is included: `security cms -D -i Cra.provisionprofile | grep -A1 public-key`.
+3. Locally: `CRA_PROVISIONING_PROFILE=Cra.provisionprofile` next to `CRA_SIGN_IDENTITY`.
+   In CI: the `MACOS_PROVISIONING_PROFILE` secret, `base64 -i Cra.provisionprofile | pbcopy`.
+
+`build.sh` embeds the profile as `Contents/embedded.provisionprofile` and adds to
+`Cra.entitlements` only what the profile grants (application and team identifier,
+the keychain group, iCloud Keychain once approved), because macOS refuses to launch an
+app that claims an entitlement its profile lacks. Ad-hoc builds never get them.
 
 ## Updates
 
