@@ -900,10 +900,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
         let help = NSMenu(title: "Help")
         help.addItem(withTitle: "Chromium \(CraCEFRuntime.chromiumVersion()) · CEF \(CraCEFRuntime.cefVersion())", action: nil, keyEquivalent: "")
+        help.addItem(.separator())
+        for (title, url) in [("Cra Help", "https://crabrowser.app/help"), ("Release Notes", "https://crabrowser.app/release-notes"),
+                             ("Report an Issue…", "https://github.com/VictorKildahl/cra/issues"), ("Support Cra…", "https://crabrowser.app/support")] {
+            let link = NSMenuItem(title: title, action: #selector(openHelpLink(_:)), keyEquivalent: "")
+            link.target = self
+            link.representedObject = url
+            help.addItem(link)
+        }
         menubar.addItem(submenu: help, title: "Help")
         NSApp.helpMenu = help
 
         NSApp.mainMenu = menubar
+    }
+
+    /// Help menu links open as a tab in the normal window in use, like Arc's.
+    @objc private func openHelpLink(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? String else { return }
+        useNormalWindow()
+        store.createTab(url: url, select: true)
+        main.showWindow(nil)
     }
 
     @objc private func showAbout() {

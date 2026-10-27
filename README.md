@@ -23,6 +23,14 @@ like any other app, and from then on it keeps itself up to date (Cra ▸ Check f
 
     curl -fsSL https://raw.githubusercontent.com/VictorKildahl/cra/main/scripts/install.sh | bash
 
+## Support Cra
+
+Cra is free, open source and has no investors or ads. If it earns a place on your Mac,
+[sponsor it on GitHub](https://github.com/sponsors/VictorKildahl): it pays for the Chromium
+updates, the Apple signing and the time it takes to keep a browser going. Sponsoring unlocks
+nothing in the app; every feature stays free for everyone.
+[Where the money goes](https://crabrowser.app/support).
+
 ## Build
 
     scripts/build.sh          # fetches CEF on first run, builds build/Cra.app
