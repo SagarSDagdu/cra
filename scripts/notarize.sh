@@ -17,12 +17,23 @@ else
   echo "No notarization credentials in the environment. Set NOTARY_KEYCHAIN_PROFILE or APPLE_ID, APPLE_TEAM_ID and APPLE_APP_PASSWORD." >&2
   exit 1
 fi
+# The stapler fetches the ticket from Apple's CloudKit, and from GitHub's runners that
+# connection often drops (NSURLErrorDomain -1005, exit 68) after notarization succeeded.
+staple() {
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    xcrun stapler staple "$1" && return 0
+    echo "Stapling $(basename "$1") failed (attempt $attempt), retrying…" >&2
+    sleep $((attempt * 10))
+  done
+  return 1
+}
 echo "Notarizing $(basename "$FILE")…"
 xcrun notarytool submit "$FILE" "${AUTH[@]}" --wait --timeout 30m
 case "$FILE" in
-  *.dmg) xcrun stapler staple "$FILE" ;;
+  *.dmg) staple "$FILE" ;;
 esac
 if [ -n "$STAPLE_APP" ]; then
-  xcrun stapler staple "$STAPLE_APP"
+  staple "$STAPLE_APP"
 fi
 echo "Notarized."
