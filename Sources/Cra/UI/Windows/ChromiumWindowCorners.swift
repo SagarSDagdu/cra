@@ -38,10 +38,15 @@ enum ChromiumWindowCorners {
         overrideBool(cls, "bottomCornerRounded", squareValue: false)
         overrideFloat(cls, "_cornerRadius", squareValue: 0)
         overrideFloat(cls, "_getCachedWindowCornerRadius", squareValue: 0)
+        // Linked against a pre-26 SDK (release builds on GitHub's macos-15 runners), macOS 26
+        // ignores the queries above and masks the window with a 12 pt corner image of its own,
+        // which rounded the page's top corners under the toolbar. No mask means square.
+        overrideObject(cls, "_cornerMask", squareValue: nil)
     }
 
     private typealias BoolIMP = @convention(c) (AnyObject, Selector) -> Bool
     private typealias FloatIMP = @convention(c) (AnyObject, Selector) -> CGFloat
+    private typealias ObjectIMP = @convention(c) (AnyObject, Selector) -> Unmanaged<AnyObject>?
 
     private static func overrideBool(_ cls: AnyClass, _ name: String, squareValue: Bool) {
         let sel = NSSelectorFromString(name)
@@ -61,6 +66,17 @@ enum ChromiumWindowCorners {
         let original = unsafeBitCast(method_getImplementation(method), to: FloatIMP.self)
         let block: @convention(block) (AnyObject) -> CGFloat = { obj in
             MainActor.assumeIsolated { isSquare(obj) } ? squareValue : original(obj, sel)
+        }
+        let imp = imp_implementationWithBlock(block)
+        if !class_addMethod(cls, sel, imp, types) { method_setImplementation(method, imp) }
+    }
+
+    private static func overrideObject(_ cls: AnyClass, _ name: String, squareValue: AnyObject?) {
+        let sel = NSSelectorFromString(name)
+        guard let method = class_getInstanceMethod(cls, sel), let types = method_getTypeEncoding(method) else { return }
+        let original = unsafeBitCast(method_getImplementation(method), to: ObjectIMP.self)
+        let block: @convention(block) (AnyObject) -> Unmanaged<AnyObject>? = { obj in
+            MainActor.assumeIsolated { isSquare(obj) } ? squareValue.map { Unmanaged.passUnretained($0) } : original(obj, sel)
         }
         let imp = imp_implementationWithBlock(block)
         if !class_addMethod(cls, sel, imp, types) { method_setImplementation(method, imp) }

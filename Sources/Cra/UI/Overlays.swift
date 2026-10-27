@@ -8,6 +8,9 @@ struct DownloadToast: Identifiable, Equatable {
     var percent: Int
     var state: Int
     var path: String
+    var totalBytes: Int64 = -1
+    /// When Chromium last reported on it (see MainWindowController.checkStalledDownloads).
+    var updated = Date()
 }
 
 /// Overlay state shown on top of the web content: link status, find bar,
@@ -100,6 +103,7 @@ final class FindBarPanel: NSPanel {
 
 struct ToastStack: View {
     let overlay: OverlayState
+    let onDismiss: (UInt32) -> Void
     var body: some View {
         VStack(alignment: .trailing, spacing: 6) {
             ForEach(overlay.toasts) { t in
@@ -114,10 +118,17 @@ struct ToastStack: View {
                             Text(t.state == 1 ? "Downloaded" : (t.state == 2 ? "Cancelled" : "Failed")).font(.system(size: 11)).foregroundStyle(.secondary)
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     if t.state == 1 {
                         Button("Show") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: t.path)]) }
                             .controlSize(.small)
                     }
+                    // Hides the toast only; the download carries on (the Library still has it).
+                    Button { onDismiss(t.id) } label: {
+                        Image(systemName: "xmark").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+                            .frame(width: 16, height: 16).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                 }
                 .padding(10)
                 .frame(width: 300)

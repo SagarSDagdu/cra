@@ -12,7 +12,8 @@ concurrency:
 jobs:
   build:
     name: Build Cra.app
-    runs-on: macos-15
+    # Same runner as release.yml, so CI builds what ships.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v7
 

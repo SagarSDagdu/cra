@@ -87,7 +87,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
                           toolbar: env(AnyView(ContentToolbarView(palette: palette))),
                           placeholder: AnyView(EmptyContentView(space: focusedSpace)),
                           status: AnyView(StatusBubble(overlay: overlay)),
-                          toasts: AnyView(ToastStack(overlay: overlay)),
+                          toasts: AnyView(ToastStack(overlay: overlay, onDismiss: { [weak self] id in self?.removeToast(id) })),
                           find: AnyView(FindBar(overlay: overlay, onFind: { [weak self] q, fwd in self?.find(q, forward: fwd) },
                                                 onClose: { [weak self] in self?.hideFindBar() })))
         shell.sidebarWidth = CGFloat(store.prefs.sidebarWidth)
@@ -399,7 +399,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
 
     func browserManager(download: CraDownloadInfo) {
         let name = (download.fullPath as NSString).lastPathComponent.isEmpty ? download.suggestedName : (download.fullPath as NSString).lastPathComponent
-        let toast = DownloadToast(id: download.identifier, name: name, percent: download.percent, state: download.state.rawValue, path: download.fullPath)
+        let toast = DownloadToast(id: download.identifier, name: name, percent: download.percent, state: download.state.rawValue,
+                                  path: download.fullPath, totalBytes: download.totalBytes)
         if let i = overlay.toasts.firstIndex(where: { $0.id == toast.id }) { overlay.toasts[i] = toast } else {
             overlay.toasts.append(toast)
             ChromeDownloadAnimation.suppress()
@@ -409,18 +410,59 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         if download.state == .complete, !download.fullPath.isEmpty, finishedDownloads.insert(download.identifier).inserted {
             DownloadHistory.shared.add(path: download.fullPath)
         }
+        layoutToasts()
+        if download.state != .inProgress {
+            let id = toast.id
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in self?.removeToast(id) }
+        } else if downloadWatchdog == nil {
+            downloadWatchdog = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.checkStalledDownloads() }
+            }
+        }
+    }
+
+    private func removeToast(_ id: UInt32) {
+        guard overlay.toasts.contains(where: { $0.id == id }) else { return }
+        overlay.toasts.removeAll { $0.id == id }
+        layoutToasts()
+    }
+
+    private func layoutToasts() {
         shell.toastCount = overlay.toasts.count
         shell.layoutContentChildren()
         layoutToastPanel()
-        if download.state != .inProgress {
-            let id = toast.id
-            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
-                guard let self else { return }
-                self.overlay.toasts.removeAll { $0.id == id }
-                self.shell.toastCount = self.overlay.toasts.count
-                self.shell.layoutContentChildren()
-                self.layoutToastPanel()
-            }
+    }
+
+    private var downloadWatchdog: Timer?
+
+    /// Chromium stops reporting a download once the tab that started it is gone (the
+    /// download carries on, or ends, silently), which left its toast "in progress" for
+    /// good. A toast that hasn't heard from Chromium for a while reads the file instead:
+    /// gone means it ended, the full size with no .crdownload beside it means it's done.
+    private func checkStalledDownloads() {
+        let inProgress = overlay.toasts.filter { $0.state == CraDownloadState.inProgress.rawValue }
+        guard !inProgress.isEmpty else {
+            downloadWatchdog?.invalidate()
+            downloadWatchdog = nil
+            return
+        }
+        let fm = FileManager.default
+        for t in inProgress where !t.path.isEmpty && Date().timeIntervalSince(t.updated) > 5 {
+            guard !fm.fileExists(atPath: t.path + ".crdownload") else { continue }
+            let size = (try? fm.attributesOfItem(atPath: t.path))?[.size] as? Int64
+            let state: CraDownloadState
+            if size == nil { state = .cancelled }
+            else if let size, t.totalBytes > 0, size >= t.totalBytes { state = .complete }
+            else { continue }
+            let info = CraDownloadInfo()
+            info.identifier = t.id
+            info.fullPath = t.path
+            info.suggestedName = t.name
+            info.totalBytes = t.totalBytes
+            info.receivedBytes = size ?? 0
+            info.percent = state == .complete ? 100 : t.percent
+            info.state = state
+            browserManager(download: info)
         }
     }
 

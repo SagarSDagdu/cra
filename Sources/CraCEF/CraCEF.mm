@@ -55,6 +55,8 @@ static NSMutableArray<CraBrowser*>* g_pendingCreation = nil;
 static void (^g_relaunchHandler)(NSArray<NSString*>*) = nil;
 static BOOL g_alreadyRunning = NO;
 static NSHashTable<CraBrowser*>* g_allBrowsers = nil;
+/// Closed tabs whose page stays alive until its downloads end (see -[CraBrowser close]).
+static NSMutableSet<CraBrowser*>* g_parkedBrowsers = nil;
 static void (^g_strayPageHandler)(NSString*) = nil;
 
 static NSString* NSStringFromCef(const CefString& s) {
@@ -113,6 +115,7 @@ static CraClient* AsCraClient(CefClient* c) {
 - (void)devToolsBrowserCreated:(CefRefPtr<CefBrowser>)browser;
 - (void)devToolsBrowserClosed;
 - (void)browserClosed;
+- (void)downloadUpdated:(CraDownloadInfo*)download;
 - (CefRefPtr<CefBrowser>)cefBrowser;
 - (CefRefPtr<CefClient>)cefClient;
 - (void)createNow;
@@ -1135,7 +1138,7 @@ public:
         else if (item->IsCanceled()) info.state = CraDownloadStateCancelled;
         else if (item->IsInterrupted()) info.state = CraDownloadStateInterrupted;
         else info.state = CraDownloadStateInProgress;
-        [o.delegate browser:o didUpdateDownload:info];
+        [o downloadUpdated:info];
     }
 
     // Focus ---------------------------------------------------------------
@@ -1322,6 +1325,8 @@ class CraDevToolsObserver : public CefDevToolsMessageObserver {
     NSString* _pendingURL;
     BOOL _pendingFocus;
     BOOL _isPopupHost;
+    NSMutableSet<NSNumber*>* _activeDownloads;
+    BOOL _parked;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame url:(NSString*)url delegate:(id<CraBrowserDelegate>)delegate {
@@ -1412,8 +1417,38 @@ class CraDevToolsObserver : public CefDevToolsMessageObserver {
     self.isClosed = YES;
     self.closedByPage = !self.closeRequested && !g_quitting;
     [g_allBrowsers removeObject:self];
+    if (_parked) {
+        // Already reported closed when it was parked. Last: this may release self.
+        [g_parkedBrowsers removeObject:self];
+        return;
+    }
     id<CraBrowserDelegate> d = self.delegate;
     [d browserDidClose:self];
+}
+
+- (void)downloadUpdated:(CraDownloadInfo*)download {
+    if (!_activeDownloads) _activeDownloads = [NSMutableSet set];
+    if (download.state == CraDownloadStateInProgress) [_activeDownloads addObject:@(download.identifier)];
+    else [_activeDownloads removeObject:@(download.identifier)];
+    [self.delegate browser:self didUpdateDownload:download];
+    if (_parked && _activeDownloads.count == 0 && _browser) _browser->GetHost()->CloseBrowser(true);
+}
+
+/// Hides the page and reports it closed, but keeps the browser on about:blank until its
+/// downloads end: Chromium cancels a download when the browser that started it closes
+/// (Chrome keeps it going), and only that browser hears how the download goes.
+- (void)park {
+    _parked = YES;
+    if (!g_parkedBrowsers) g_parkedBrowsers = [NSMutableSet set];
+    [g_parkedBrowsers addObject:self];
+    [g_allBrowsers removeObject:self];
+    _browser->GetHost()->SetAudioMuted(true);
+    _browser->GetMainFrame()->LoadURL("about:blank");
+    if (NSWindow* host = self.hostWindow) {
+        [host.parentWindow removeChildWindow:host];
+        [host orderOut:nil];
+    }
+    [self.delegate browserDidClose:self];
 }
 
 - (BOOL)hasDevTools { return _browser ? _browser->GetHost()->HasDevTools() : NO; }
@@ -1657,9 +1692,11 @@ static NSView* FindRenderWidgetHostView(NSView* root) {
 - (void)notifyMoveOrResizeStarted { if (_browser) _browser->GetHost()->NotifyMoveOrResizeStarted(); }
 
 - (void)close {
-    if (_isClosed) return;
+    if (_isClosed || _parked) return;
     self.closeRequested = YES;
-    if (_browser) {
+    if (_browser && _activeDownloads.count && !g_quitting) {
+        [self park];
+    } else if (_browser) {
         _browser->GetHost()->CloseBrowser(true);
     } else {
         // Never created; drop it from the pending list and report closed.
@@ -1831,11 +1868,12 @@ static void MarkProfileExitedCleanly(NSString* profileDir) {
     g_quitting = true;
     if (g_strayClient) g_strayClient->CloseWindows();
     NSArray<CraBrowser*>* all = [g_allBrowsers allObjects];
-    if (all.count == 0 || g_liveBrowsers <= 0) {
+    if ((all.count == 0 && g_parkedBrowsers.count == 0) || g_liveBrowsers <= 0) {
         CraQuitMessageLoop();
         return;
     }
     for (CraBrowser* b in all) [b close];
+    for (CraBrowser* b in [g_parkedBrowsers allObjects]) if (CefRefPtr<CefBrowser> cef = [b cefBrowser]) cef->GetHost()->CloseBrowser(true);
 }
 
 + (NSInteger)liveBrowserCount { return g_liveBrowsers; }
