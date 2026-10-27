@@ -112,7 +112,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         // AppKit asks the view under a press whether it may move the window. In the
         // sidebar's list that is SwiftUI's scroll container, which always says yes,
         // so the window's own flag is what keeps a row press for the row's drag.
-        sidebarUI.onPointerOverDraggableChange = { [weak window] over in window?.isMovableByWindowBackground = !over }
+        sidebarUI.onPointerOverDraggableChange = { [weak window] over in
+            guard let window, !window.holdingPress else { return }
+            window.isMovableByWindowBackground = !over
+        }
+        window.holdsPress = { [weak window, weak sidebarUI] point in
+            guard let strip = sidebarUI?.spaceDockStrip, strip.window === window else { return false }
+            return strip.bounds.contains(strip.convert(point, from: nil))
+        }
+        window.movableAfterPress = { [weak sidebarUI] in !(sidebarUI?.pointerOverDraggable ?? false) }
         browsers.paneHost = { [weak self] id in self?.shell.card(for: id)?.webArea }
         shell.makeToolbar = { [weak self] id in
             guard let self else { return AnyView(EmptyView()) }
@@ -1672,7 +1680,25 @@ final class CraWindow: NSWindow {
     /// here: a double-click runs the title bar action, anything else drags the window.
     private static let titleStripHeight = CraMetrics.contentInset + 4
 
+    /// Presses that belong to sidebar controls and must never drag the window (the space
+    /// dock). The sidebar's hover flag alone misses a pointer that left a control mid-drag
+    /// and jumped back in, so these are checked where the press lands.
+    var holdsPress: (NSPoint) -> Bool = { _ in false }
+    /// Movable-by-background once a held press ends.
+    var movableAfterPress: () -> Bool = { true }
+    private(set) var holdingPress = false
+
     override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown, holdsPress(event.locationInWindow) {
+            holdingPress = true
+            isMovableByWindowBackground = false
+        }
+        defer {
+            if event.type == .leftMouseUp, holdingPress {
+                holdingPress = false
+                isMovableByWindowBackground = movableAfterPress()
+            }
+        }
         if event.type == .leftMouseDown, !styleMask.contains(.fullScreen),
            let content = contentView, event.locationInWindow.y >= content.bounds.height - Self.titleStripHeight,
            isTitleStrip(content.hitTest(content.convert(event.locationInWindow, from: nil))) {

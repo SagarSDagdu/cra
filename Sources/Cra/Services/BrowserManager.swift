@@ -209,31 +209,41 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
     }
 
     /// The visible viewport, cropped to the switcher's thumbnail shape from the top.
+    /// No `clip`: a clipped screenshot makes Chromium emulate the clip's size and scale on
+    /// the live page, which drew the page shrunk into its corner for a few frames, a
+    /// second after every tab switch and page load. Without one it copies the frame
+    /// already on screen, and the crop and downscale happen here instead.
     func captureSnapshot(_ id: UUID, completion: (() -> Void)? = nil) {
         guard let rt = runtimes[id], visibleTabIDs.contains(id) else { completion?(); return }
-        let b = rt.browser
-        b.sendDevToolsMethod("Page.getLayoutMetrics", params: "{}") { result, _ in
-            guard let result, let m = try? JSONSerialization.jsonObject(with: Data(result.utf8)) as? [String: Any],
-                  let vp = m["cssVisualViewport"] as? [String: Any],
-                  let x = vp["pageX"] as? Double, let y = vp["pageY"] as? Double,
-                  let w = vp["clientWidth"] as? Double, let h = vp["clientHeight"] as? Double, w > 0, h > 0 else {
-                DispatchQueue.main.async { completion?() }
-                return
-            }
-            let thumb = TabSwitcherMetrics.thumbnail
-            let aspect = Double(thumb.width / thumb.height)
-            let cw = min(w, h * aspect), ch = cw / aspect
-            let scale = min(1, Double(thumb.width) * 2 / cw)
-            let params = #"{"format":"jpeg","quality":80,"clip":{"x":\#(x + (w - cw) / 2),"y":\#(y),"width":\#(cw),"height":\#(ch),"scale":\#(scale)}}"#
-            b.sendDevToolsMethod("Page.captureScreenshot", params: params) { [weak self] shot, _ in
+        rt.browser.sendDevToolsMethod("Page.captureScreenshot", params: #"{"format":"jpeg","quality":80,"optimizeForSpeed":true}"#) { [weak self] shot, _ in
+            DispatchQueue.global(qos: .utility).async {
                 let image = shot.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
-                    .flatMap { $0["data"] as? String }.flatMap { Data(base64Encoded: $0) }.flatMap(NSImage.init(data:))
+                    .flatMap { $0["data"] as? String }.flatMap { Data(base64Encoded: $0) }.flatMap(Self.thumbnail(fromViewport:))
                 DispatchQueue.main.async {
                     if let image { self?.runtimes[id]?.snapshot = image }
                     completion?()
                 }
             }
         }
+    }
+
+    /// The top of the viewport at the thumbnail's aspect ratio, centred horizontally,
+    /// at most twice the thumbnail's width in pixels.
+    nonisolated private static func thumbnail(fromViewport data: Data) -> NSImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let full = CGImageSourceCreateImageAtIndex(source, 0, nil), full.width > 0, full.height > 0 else { return nil }
+        let thumb = TabSwitcherMetrics.thumbnail
+        let aspect = thumb.width / thumb.height
+        let w = CGFloat(full.width), h = CGFloat(full.height)
+        let cw = min(w, h * aspect), ch = cw / aspect
+        guard let crop = full.cropping(to: CGRect(x: ((w - cw) / 2).rounded(), y: 0, width: cw.rounded(), height: ch.rounded())) else { return nil }
+        let outW = Int(min(cw, thumb.width * 2).rounded()), outH = Int((CGFloat(outW) / aspect).rounded())
+        guard outW > 0, outH > 0,
+              let ctx = CGContext(data: nil, width: outW, height: outH, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        ctx.interpolationQuality = .high
+        ctx.draw(crop, in: CGRect(x: 0, y: 0, width: outW, height: outH))
+        return ctx.makeImage().map { NSImage(cgImage: $0, size: NSSize(width: outW, height: outH)) }
     }
 
     func browser(_ browser: CraBrowser, didCreateHostWindow window: NSWindow) {

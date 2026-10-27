@@ -30,6 +30,8 @@ final class SidebarUIState {
     var recentDownload: RecentDownload?
     /// The Library button's view, where download flights land.
     @ObservationIgnored weak var libraryAnchor: NSView?
+    /// The space dock's strip of space cells; a press there never drags the window.
+    @ObservationIgnored weak var spaceDockStrip: NSView?
     /// Arc's downloads list over the bottom of the sidebar, open while the Library
     /// button (or the list) is hovered.
     var downloadsListOpen = false

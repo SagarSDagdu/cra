@@ -1486,3 +1486,29 @@ strings "Opens the tab switcher, where you can cycle through recent tabs like Co
 - **Cra test (CraTK, pid-targeted keys):** geometry, borders, text and favicon position match Arc's captures to the
   pixel. Thumbnails come from `Page.captureScreenshot` of the visible viewport (Chromium draws nothing for hidden
   pages), taken 1 s after a tab shows or finishes loading and again for the current tab when the switcher opens.
+
+### Space dock: press area, fills and reordering (Arc 1.170, 27 Oct 2026, ObjC metadata + AX tree + captures)
+
+- [O static] `SidebarDock.SidebarDockView` holds an NSCollectionView (`SidebarDockCollectionViewLayout`, with
+  `draggingIndexPaths`, `proposedDropIndexPath`, `dropTargets`, `layoutAttributesForInterItemGapBeforeIndexPath:`,
+  `layoutAttributesForDropTargetAtPoint:`), so spaces reorder through the collection view's own drag and drop
+  with a gap opening at the proposed index. `SidebarDockItemView` overrides `mouseDown:`/`mouseUp:` and has a
+  `backgroundLayer`, `_controlState`, `activeIconView`/`inactiveIconView`, a `pageIndicator` and `menuForEvent:`.
+  It has no tracking-area methods of its own.
+- [O static] "Drag to Reorder Space" ("Tooltip; Drag target to reorder a space.") belongs to `Arc.SpaceControlsView`
+  (the space header controls), not to the dock.
+- [O AX, 1728×1084 window] each space is an AXButton (role description "Space", title = space name), frame 36×34 on
+  a 34 pt pitch inside a 68×32 section for two spaces, so the hit cells (34×32) touch with no gap. The strip is a
+  263×50 scroll area centred between the 32×32 Library button (x 8, 9 pt above the bottom) and the 32×32 "+" button
+  (8 pt from the sidebar edge).
+- [O capture, Victor's screenshot] pressed cell: 34×32, ~6 pt circular corners, fill 39,33,51 over 21,14,34, i.e. white
+  at ~7.8%.
+- [U] Arc's hover fill could not be recorded (live pointer runs were cut short while Victor was at the Mac); the pressed
+  value is used for hover too, and the light-theme fill (black 5%) is a guess. Arc's drag image follows the pointer
+  freely (system drag session); Cra keeps the dragged icon on the dock's row.
+- Cra: `SpaceDock` uses 34×32 contiguous cells with one `DragGesture` per cell: fill on hover and press, release inside
+  the cell switches space, a horizontal drag reorders (neighbours slide a cell aside, the icon settles, then
+  `moveSpace`). `CraWindow.holdsPress` turns movable-by-background off for any press inside the strip until mouse-up,
+  because the hover flag (`hoverDraggable`) missed a pointer that left the strip mid-drag and jumped back in. Verified
+  on a renamed test bundle: presses, shaky clicks and drags in the strip never move the window; a drag on empty
+  sidebar background still does.
