@@ -56,6 +56,12 @@ final class SoftwareUpdater: NSObject {
         didSet { updater?.automaticallyDownloadsUpdates = automaticallyUpdates }
     }
     private(set) var isAvailable = false
+    /// Settings ▸ Advanced, next to Check for Updates: when Sparkle last looked.
+    var lastCheckSummary: String {
+        guard isAvailable else { return "Development builds don’t update." }
+        guard let date = updater?.lastUpdateCheckDate else { return "Not checked yet." }
+        return "Last checked " + RelativeDateTimeFormatter().localizedString(for: date, relativeTo: Date()) + "."
+    }
     /// This launch came from an automatic restart, so it should not take focus.
     private(set) var launchedByAutoUpdate = false
 

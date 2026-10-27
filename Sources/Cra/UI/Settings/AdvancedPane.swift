@@ -16,6 +16,11 @@ struct AdvancedPane: View {
             SettingsFormRow(label: "General:") {
                 SettingsCheckbox(title: "Automatically update Cra", isOn: $updater.automaticallyUpdates)
                     .disabled(!updater.isAvailable)
+                HStack(spacing: 8) {
+                    Button("Check for Updates…") { updater.checkForUpdates(nil) }
+                        .disabled(!updater.isAvailable)
+                    Text(updater.lastCheckSummary).font(.system(size: 11)).foregroundStyle(.secondary)
+                }
                 SettingsCheckbox(title: "Chrome engine for pages (extensions, Chrome DevTools)", isOn: $store.settings.chromeEngine)
                 Text("Restart Cra to apply an engine change.").font(.system(size: 11)).foregroundStyle(.secondary)
             }

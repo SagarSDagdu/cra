@@ -18,6 +18,8 @@ final class TabRuntime {
     /// The tab switcher's thumbnail, taken while the page was last on screen.
     var snapshot: NSImage?
     var snapshotWork: DispatchWorkItem?
+    /// When the page last went off screen (nil while shown); tab sleeping counts from here.
+    var hiddenAt: Date? = Date()
     /// Chrome-style hosting: the page's own window (nil until created, or for Alloy).
     var hostWindow: NSWindow? { browser.hostWindow }
     init(tabID: UUID, browser: CraBrowser) {
@@ -163,12 +165,16 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
     /// Show several tabs at once (split view); `focused` gets keyboard focus.
     func show(_ tabIDs: [UUID], focused: UUID?, focus: Bool) {
         let newSet = Set(tabIDs)
-        for previous in visibleTabIDs where !newSet.contains(previous) { leaveTab(previous) }
+        for previous in visibleTabIDs where !newSet.contains(previous) {
+            leaveTab(previous)
+            runtimes[previous]?.hiddenAt = Date()
+        }
         let wasVisible = Set(visibleTabIDs)
         var shown: [UUID] = []
         for id in tabIDs {
             guard let rt = ensureRuntime(for: id) else { shown.append(id); continue }
             if !wasVisible.contains(id) { returnToTab(rt) }
+            rt.hiddenAt = nil
             let v = rt.browser.containerView
             // Alloy hosting only: the Chromium view moves into its pane. Chrome-style
             // pages live in their own windows; re-parenting their view makes Chrome
@@ -256,6 +262,55 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
         visibleTabIDs.removeAll { $0 == tabID }
         rt.browser.containerView.isHidden = true
         rt.browser.close()
+    }
+
+    // MARK: Tab sleeping
+
+    /// Settings ▸ Tabs ▸ "Sleep tabs I haven't looked at in": a page off screen that long
+    /// closes, like a closed pinned tab, and loads its URL again when shown. Pages that are
+    /// loading, playing sound, recording, in Picture in Picture or DevTools, holding typed
+    /// text or asking before they close (beforeunload) stay awake.
+    func sleepIdleTabs(hiddenLongerThan seconds: TimeInterval) {
+        let cutoff = Date().addingTimeInterval(-seconds)
+        for (id, rt) in runtimes {
+            let b = rt.browser
+            guard let hidden = rt.hiddenAt, hidden < cutoff, b.isCreated, !b.isLoading, !b.isInPictureInPicture,
+                  !b.isCapturingMedia, !b.hasDevTools else { continue }
+            b.sendDevToolsMethod("Runtime.evaluate", params: Self.sleepProbe) { [weak self] result, _ in
+                DispatchQueue.main.async {
+                    guard let self, self.runtimes[id]?.browser === b, let h = self.runtimes[id]?.hiddenAt, h < cutoff,
+                          Self.probeSaysIdle(result) else { return }
+                    self.unload(id)
+                }
+            }
+        }
+    }
+
+    /// true when the page has nothing to lose: no audible media, no edited fields, no
+    /// beforeunload handler (closing would ask "Leave site?" on a page nobody is looking at).
+    private static let sleepProbe: String = {
+        let js = """
+        (() => {
+          const playing = [...document.querySelectorAll('video,audio')].some(m => !m.paused && !m.ended && !m.muted && m.volume > 0);
+          const typed = [...document.querySelectorAll('input,textarea,select')].some(e =>
+            e.type === 'checkbox' || e.type === 'radio' ? e.checked !== e.defaultChecked
+            : e.tagName === 'SELECT' ? [...e.options].some(o => o.selected !== o.defaultSelected)
+            : !['hidden','submit','button','reset','image','file','search'].includes(e.type) && e.value !== e.defaultValue);
+          const editing = document.activeElement?.isContentEditable === true;
+          const guarded = !!window.onbeforeunload || (getEventListeners(window).beforeunload || []).length > 0;
+          return !(playing || typed || editing || guarded);
+        })()
+        """
+        let params: [String: Any] = ["expression": js, "returnByValue": true, "includeCommandLineAPI": true]
+        return String(data: try! JSONSerialization.data(withJSONObject: params), encoding: .utf8)!
+    }()
+
+    private static func probeSaysIdle(_ result: String?) -> Bool {
+        guard let data = result?.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              json["exceptionDetails"] == nil,
+              let value = (json["result"] as? [String: Any])?["value"] as? Bool else { return false }
+        return value
     }
 
     /// Drop runtimes whose tabs no longer exist (archived, deleted). A page can't change
@@ -359,6 +414,7 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
         // Our own error page is a data: URL; keep the real address in the model.
         if url.hasPrefix("data:text/html;base64,") { return }
         store.updateTab(id, url: url)
+        if !browser.isIncognito { LiveFolderManager.shared.pageChanged(tab: id, to: url) }
         delegate?.browserManagerDidUpdate(id)
     }
 

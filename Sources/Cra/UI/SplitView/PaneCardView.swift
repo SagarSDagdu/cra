@@ -36,6 +36,16 @@ final class PaneCardView: NSView {
     var transparent = false { didSet { refreshBackground() } }
     /// While a pane is being dragged open/closed its page keeps its last size.
     var frozenWebBounds: NSRect?
+    /// The page is on screen in another window: Arc keeps the tab selected here and shows a
+    /// blurred snapshot of it (BlurredItemContent) until this window is used again.
+    var elsewhereSnapshot: NSImage? {
+        didSet {
+            guard elsewhereSnapshot !== oldValue else { return }
+            elsewhereView.layer?.contents = elsewhereSnapshot.flatMap(Self.blurred)
+        }
+    }
+    var showsElsewhere = false { didSet { elsewhereView.isHidden = !showsElsewhere } }
+    private let elsewhereView = NSView()
 
     init(tabID: UUID, toolbar: AnyView) {
         self.tabID = tabID
@@ -53,7 +63,13 @@ final class PaneCardView: NSView {
         toolbarBackground.wantsLayer = true
         hairline.wantsLayer = true
         hairline.isHidden = true
+        elsewhereView.wantsLayer = true
+        elsewhereView.layer?.contentsGravity = .resizeAspectFill
+        elsewhereView.layer?.cornerCurve = .continuous
+        elsewhereView.layer?.masksToBounds = true
+        elsewhereView.isHidden = true
         addSubview(pageBackground)
+        addSubview(elsewhereView)
         addSubview(webArea)
         addSubview(toolbarBackground)
         addSubview(hairline)
@@ -97,7 +113,22 @@ final class PaneCardView: NSView {
         pageBackground.layer?.cornerRadius = rounded ? cornerRadius : 0
         pageBackground.layer?.maskedCorners = th == 0 ? [.layerMinXMinYCorner, .layerMaxXMinYCorner, .layerMinXMaxYCorner, .layerMaxXMaxYCorner]
                                                       : [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        elsewhereView.frame = fill
+        elsewhereView.layer?.cornerRadius = pageBackground.layer?.cornerRadius ?? 0
+        elsewhereView.layer?.maskedCorners = pageBackground.layer?.maskedCorners ?? []
         let wb = frozenWebBounds ?? webArea.bounds
         for sub in webArea.subviews where sub.frame != wb { sub.frame = wb }
+    }
+
+    /// The snapshot (the tab switcher's thumbnail of the top of the page), blurred hard enough
+    /// that its low resolution doesn't show, cropped back to its own size so the edges stay opaque.
+    private static func blurred(_ image: NSImage) -> CGImage? {
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let input = CIImage(cgImage: cg)
+        let radius = Double(cg.width) * 0.03
+        guard let filter = CIFilter(name: "CIGaussianBlur", parameters: [kCIInputImageKey: input.clampedToExtent(), kCIInputRadiusKey: radius]),
+              let output = filter.outputImage?.cropped(to: input.extent),
+              let result = CIContext().createCGImage(output, from: input.extent) else { return nil }
+        return result
     }
 }

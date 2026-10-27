@@ -182,6 +182,10 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 /// the next request, any time, from any thread. Off until enabled.
 + (void)setContentBlockingEnabled:(BOOL)enabled;
 + (BOOL)contentBlockingEnabled;
+/// Chrome's HTTPS-Only Mode ("Always use secure connections") in every profile:
+/// http:// navigations are upgraded, and a site without HTTPS shows Chrome's warning
+/// page before it loads. Profiles that load later get it too. Off until enabled.
++ (void)setHttpsOnlyModeEnabled:(BOOL)enabled;
 /// Replaces the blocked list (bare domains; a domain also covers its subdomains).
 + (void)setBlockedDomains:(NSArray<NSString *> *)domains;
 /// Reads and installs a list file off the main thread: one domain per line or
@@ -227,6 +231,13 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 /// Browser-level DevTools protocol call (Target.*, Extensions.*) over the private pipe.
 + (void)sendBrowserDevToolsMethod:(NSString *)method params:(NSString *)params
                        completion:(void (^)(NSString * _Nullable result, NSString * _Nullable error))completion;
+/// A GET made by the browser itself with a profile's cookies (nil is Default), as a
+/// page of that profile would make it: how Arc's and Dia's live folders read github.com
+/// with the user's own session. The completion gets the HTTP status (0 when the request
+/// failed), the URL after redirects, the MIME type and the body as UTF-8, on the main queue.
++ (void)fetchURL:(NSString *)url headers:(nullable NSDictionary<NSString *, NSString *> *)headers
+     profilePath:(nullable NSString *)profilePath
+      completion:(void (^)(NSInteger status, NSString *finalURL, NSString *mimeType, NSString *body))completion;
 /// Same, inside an attached target's session (Target.attachToTarget with flatten).
 + (void)sendBrowserDevToolsMethod:(NSString *)method params:(NSString *)params sessionID:(nullable NSString *)sessionID
                        completion:(void (^)(NSString * _Nullable result, NSString * _Nullable error))completion;

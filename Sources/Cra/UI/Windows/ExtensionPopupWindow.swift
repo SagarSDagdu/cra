@@ -79,6 +79,23 @@ final class ExtensionPopupWindow: NSWindow {
         w.observers.append(NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: bubble, queue: .main) { [weak w] _ in
             MainActor.assumeIsolated { w?.dismiss(closingBubble: false) }
         })
+        // Chrome closes its popup when the popup loses focus, but only once it had focus: shown
+        // while the page's own window wasn't key (the button is in Cra's sidebar, or Cra was in
+        // the background) it never closed. Give it focus, and close it when another Cra window
+        // takes focus or Cra goes to the background, as a focused popup does.
+        bubble.makeKey()
+        let shownAt = Date()
+        w.observers.append(NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak w] note in
+            MainActor.assumeIsolated {
+                // The click that opened the popup can still be making its window key.
+                guard let w, let bubble = w.bubble, let key = note.object as? NSWindow, key !== bubble, key.parent !== bubble,
+                      Date().timeIntervalSince(shownAt) > 0.3 else { return }
+                w.dismiss(closingBubble: true)
+            }
+        })
+        w.observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak w] _ in
+            MainActor.assumeIsolated { w?.dismiss(closingBubble: true) }
+        })
         w.observers.append(NotificationCenter.default.addObserver(forName: NSWindow.willMoveNotification, object: w, queue: .main) { [weak w] _ in
             MainActor.assumeIsolated { w?.dragging = true }
         })

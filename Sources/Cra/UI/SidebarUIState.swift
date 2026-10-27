@@ -30,14 +30,16 @@ final class SidebarUIState {
     var recentDownload: RecentDownload?
     /// The Library button's view, where download flights land.
     @ObservationIgnored weak var libraryAnchor: NSView?
-    /// The space dock's strip of space cells; a press there never drags the window.
-    @ObservationIgnored weak var spaceDockStrip: NSView?
     /// Arc's downloads list over the bottom of the sidebar, open while the Library
     /// button (or the list) is hovered.
     var downloadsListOpen = false
     @ObservationIgnored var libraryHovered = false
     @ObservationIgnored var downloadsListHovered = false
     @ObservationIgnored var downloadsListWork: DispatchWorkItem?
+    /// The Library page this window's sidebar shows, nil while it shows the tabs (Arc keeps the
+    /// Library per window and reopens it on the page last shown).
+    var libraryPage: LibraryPage?
+    @ObservationIgnored var lastLibraryPage: LibraryPage = .downloads
     /// Tab chosen from the keyboard; Arc draws its yellow/black dashed ring
     /// around it until the mouse picks another tab.
     var keyboardFocusID: UUID?
@@ -160,7 +162,11 @@ final class SidebarActions {
     var reload: () -> Void = {}
     var editSpace: (Space?) -> Void = { _ in }
     var toggleSidebar: () -> Void = {}
-    var showArchive: () -> Void = {}
+    var toggleLibrary: () -> Void = {}
+    /// The Library in the sidebar: open it on a page, leave it, restore an archived tab from it.
+    var showLibrary: (LibraryPage) -> Void = { _ in }
+    var closeLibrary: () -> Void = {}
+    var restoreArchived: (UUID) -> Void = { _ in }
     var resetPinnedTab: (UUID) -> Void = { _ in }
     var openURL: (String) -> Void = { _ in }
     var performAction: (String) -> Void = { _ in }

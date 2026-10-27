@@ -126,6 +126,11 @@ The entitlements are the hardened-runtime exceptions Chromium needs (JIT, unsign
 executable memory, library validation off, dyld environment variables), plus camera,
 microphone and location so sites can ask for them.
 
+The helpers run in Chromium's own macOS sandbox (seatbelt): `CraHelper` enters it through
+`CefScopedSandboxContext` (which loads the framework's `Libraries/libcef_sandbox.dylib`)
+before loading CEF, and `CefSettings.no_sandbox` is off. Renderer, GPU, network, storage
+and audio processes are sandboxed, video capture is not (Chrome's choice too).
+
 ## Passkeys
 
 Security keys and phones (the QR code in Chrome's "Passkeys & Security Keys" dialog)

@@ -86,6 +86,8 @@ final class ShellView: NSView {
     }
 
     var sidebarWidth: CGFloat = CraMetrics.sidebarDefaultWidth { didSet { needsLayout = true } }
+    /// Off while the Library has the sidebar: its width is not the user's to drag.
+    var sidebarResizable = true { didSet { needsLayout = true } }
     var sidebarVisible = true { didSet { needsLayout = true } }
     var floatingSidebar = false { didSet { needsLayout = true } }
     var contentFullscreen = false { didSet { needsLayout = true } }
@@ -488,7 +490,7 @@ final class ShellView: NSView {
     func apply(_ f: Frames) {
         if !sidebarDetached { sidebarHost.frame = f.sidebar }
         resizeHandle.frame = f.handle
-        resizeHandle.isHidden = f.handle.isEmpty
+        resizeHandle.isHidden = f.handle.isEmpty || !sidebarResizable
         contentContainer.frame = f.content
         cardCornerRadius = f.cornerRadius
         sidebarHost.layer?.cornerRadius = f.sidebarCorner
@@ -641,7 +643,39 @@ final class ShellView: NSView {
 /// Hosts the SwiftUI sidebar. The window is movable by its background; while
 /// the pointer is over a draggable row or tile the window controller turns that
 /// off, so a press starts SwiftUI's `.draggable` instead of a window drag.
-final class SidebarHostingView: NSHostingView<AnyView> {}
+final class SidebarHostingView: NSHostingView<AnyView> {
+    /// SwiftUI's hosting view turns down the click that brings an inactive window forward, so
+    /// that click only activates Cra. Controls marked `.actsOnFirstClick()` take it too: after
+    /// an automatic update Cra restarts in the background, and "See What's New" took two clicks.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        if let event, FirstClickArea.Anchor.contains(event) { return true }
+        return super.acceptsFirstMouse(for: event)
+    }
+}
+
+/// Marks the area of a sidebar control that acts on the window's activating click.
+private struct FirstClickArea: NSViewRepresentable {
+    func makeNSView(context: Context) -> Anchor { Anchor() }
+    func updateNSView(_ nsView: Anchor, context: Context) {}
+
+    final class Anchor: NSView {
+        private static let all = NSHashTable<Anchor>.weakObjects()
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            Self.all.add(self)
+        }
+        required init?(coder: NSCoder) { fatalError() }
+
+        static func contains(_ event: NSEvent) -> Bool {
+            all.allObjects.contains { $0.window === event.window && $0.bounds.contains($0.convert(event.locationInWindow, from: nil)) }
+        }
+    }
+}
+
+extension View {
+    func actsOnFirstClick() -> some View { background(FirstClickArea().allowsHitTesting(false)) }
+}
 
 /// Thin vertical strip between sidebar and content that drags the width.
 final class ResizeHandleView: NSView {

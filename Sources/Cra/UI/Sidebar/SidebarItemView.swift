@@ -18,6 +18,7 @@ struct SidebarItemView: View {
                     SidebarItemView(item: child, depth: depth + 1, palette: palette, section: section)
                         .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: -6)), removal: .opacity))
                 }
+                if item.isLiveFolder { LiveFolderStatusRow(item: item, depth: depth + 1, palette: palette) }
             }
         } else if item.isTab {
             TabRow(item: item, depth: depth, palette: palette, section: section)
@@ -83,6 +84,8 @@ struct TabRow: View {
     /// Arc shows the host under a pinned tab only when it has left the pinned
     /// site (navigating within the same host shows nothing).
     private var subtitle: String? {
+        // A live folder's pull request by someone else shows its author (Arc's sidebarItemSubtitleTextField).
+        if let author = tab.liveSubtitle, URL(string: tab.url)?.host == "github.com" { return author }
         guard navigatedAway, let host = URL(string: tab.url)?.host, let saved = URL(string: tab.savedURL)?.host,
               host.replacingOccurrences(of: "www.", with: "") != saved.replacingOccurrences(of: "www.", with: "") else { return nil }
         return host.replacingOccurrences(of: "www.", with: "")
@@ -91,8 +94,14 @@ struct TabRow: View {
     var body: some View {
         let session = ui
         HStack(spacing: 11) {
-            FaviconView(key: tab.iconKey, palette: palette)
-                .frame(width: CraMetrics.favicon)
+            Group {
+                if tab.liveItemURL != nil && tab.customIconKey == nil {
+                    GitHubMarkIcon(palette: palette)
+                } else {
+                    FaviconView(key: tab.iconKey, palette: palette)
+                }
+            }
+            .frame(width: CraMetrics.favicon)
             if editing {
                 TextField("", text: $draft)
                     .textFieldStyle(.plain)
@@ -168,7 +177,11 @@ struct TabRow: View {
         )
         .overlay { if ui.keyboardFocusID == item.id { FocusRing(radius: CraMetrics.rowCorner) } }
         .contentShape(Rectangle())
-        .onHover { hover = $0; ui.hoverDraggable(item.id, $0) }
+        .onHover { inside in
+            hover = inside
+            ui.hoverDraggable(item.id, inside)
+            if inside { ui.hoveredTabID = item.id } else if ui.hoveredTabID == item.id { ui.hoveredTabID = nil }
+        }
         .onTapGesture {
             let event = NSApp.currentEvent
             let flags = event?.modifierFlags.intersection([.command, .shift]) ?? []
@@ -241,7 +254,7 @@ struct TabRow: View {
     /// Move to Folder / New Folder for this tab, or for every picked tab.
     @ViewBuilder
     private func folderMenu(_ ids: [UUID]) -> some View {
-        let folders = store.children(of: store.focusedSpace(window: ui.windowID).pinnedContainerID).filter { $0.isFolder }
+        let folders = store.children(of: store.focusedSpace(window: ui.windowID).pinnedContainerID).filter { $0.isFolder && !$0.isLiveFolder }
         if !folders.isEmpty {
             Menu(ids.count > 1 ? "Move \(ids.count) Tabs to Folder" : "Move to Folder") {
                 ForEach(folders) { f in
@@ -318,14 +331,18 @@ struct FolderRow: View {
         let session = ui
         let glyph = palette.folderColors(item.folderIcon)
         HStack(spacing: 11) {
-            ZStack {
-                if !expanded {
-                    Image(systemName: "folder.fill").foregroundStyle(glyph.fill)
+            if item.isLiveFolder {
+                LiveFolderIcon(palette: palette, style: item.folderIcon, expanded: expanded).frame(width: CraMetrics.favicon)
+            } else {
+                ZStack {
+                    if !expanded {
+                        Image(systemName: "folder.fill").foregroundStyle(glyph.fill)
+                    }
+                    Image(systemName: "folder").foregroundStyle(glyph.tint)
                 }
-                Image(systemName: "folder").foregroundStyle(glyph.tint)
+                .font(.system(size: 15, weight: .regular))
+                .frame(width: CraMetrics.favicon)
             }
-            .font(.system(size: 15, weight: .regular))
-            .frame(width: CraMetrics.favicon)
             if editing {
                 TextField("", text: $draft)
                     .textFieldStyle(.plain)
@@ -341,7 +358,10 @@ struct FolderRow: View {
                     .lineLimit(1)
             }
             Spacer()
-            if hover && !expanded {
+            if item.isLiveFolder {
+                LiveFolderAccessory(item: item, palette: palette, hover: hover && !editing)
+                    .padding(.trailing, 7)
+            } else if hover && !expanded {
                 Text("\(store.tabs(under: item.id).count)")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(palette.textTertiary)
@@ -363,21 +383,30 @@ struct FolderRow: View {
         }
         .draggable(SidebarDragItem.begin(item.id, session))
         .contextMenu {
-            Button("Rename…") { ui.renamingID = item.id }
-            Button("New Folder Inside") {
-                let f = store.createFolder(named: "New Folder", in: item.id, index: 0)
-                store.setExpanded(item.id, true)
-                ui.renamingID = f.id
+            if item.isLiveFolder {
+                LiveFolderMenu(item: item)
+            } else {
+                folderMenu
             }
-            Picker("Icon Color", selection: Binding(get: { item.folderIcon }, set: { store.setFolderIcon($0, for: item.id) })) {
-                Text("Auto").tag(FolderIconStyle?.none)
-                Text("White").tag(FolderIconStyle?.some(.white))
-                Text("Black").tag(FolderIconStyle?.some(.black))
-            }
-            Divider()
-            Button("Delete Folder (archives tabs)") { store.deleteFolder(item.id) }
         }
         .modifier(SidebarDropPreview(id: item.id, palette: palette))
+    }
+
+    @ViewBuilder
+    private var folderMenu: some View {
+        Button("Rename…") { ui.renamingID = item.id }
+        Button("New Folder Inside") {
+            let f = store.createFolder(named: "New Folder", in: item.id, index: 0)
+            store.setExpanded(item.id, true)
+            ui.renamingID = f.id
+        }
+        Picker("Icon Color", selection: Binding(get: { item.folderIcon }, set: { store.setFolderIcon($0, for: item.id) })) {
+            Text("Auto").tag(FolderIconStyle?.none)
+            Text("White").tag(FolderIconStyle?.some(.white))
+            Text("Black").tag(FolderIconStyle?.some(.black))
+        }
+        Divider()
+        Button("Delete Folder (archives tabs)") { store.deleteFolder(item.id) }
     }
 
     private func commitRename() {

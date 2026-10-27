@@ -8,6 +8,7 @@
 #include <crt_externs.h>
 #include <atomic>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,7 @@
 #include "include/cef_request_context.h"
 #include "include/cef_request_handler.h"
 #include "include/cef_resource_request_handler.h"
+#include "include/cef_urlrequest.h"
 #include "include/cef_version.h"
 #include "CraContentBlocker.h"
 #include "include/wrapper/cef_helpers.h"
@@ -305,9 +307,23 @@ static void HideDownloadBubble(CefRefPtr<CefRequestContext> context) {
     }
 }
 
+static bool g_httpsOnly = false;
+static bool g_incognitoReady = false;
+
+/// Chrome's "Always use secure connections" (Settings ▸ Privacy in Cra).
+static void ApplyHttpsOnly(CefRefPtr<CefRequestContext> context) {
+    CefRefPtr<CefValue> value = CefValue::Create();
+    value->SetBool(g_httpsOnly);
+    CefString error;
+    if (!context->SetPreference("https_only_mode_enabled", value, error)) {
+        NSLog(@"CraCEF: https_only_mode_enabled: %s", error.ToString().c_str());
+    }
+}
+
 static void ApplyProfilePreferences(CefRefPtr<CefRequestContext> context) {
     ApplyWebRTCPolicy(context);
     HideDownloadBubble(context);
+    ApplyHttpsOnly(context);
 }
 
 /// Profiles other than the global Default one get the same preferences once they load,
@@ -317,7 +333,7 @@ public:
     explicit ProfileContextHandler(NSString* path = nil) : path_([path copy]) {}
     void OnRequestContextInitialized(CefRefPtr<CefRequestContext> context) override {
         ApplyProfilePreferences(context);
-        if (!path_) return;
+        if (!path_) { g_incognitoReady = true; return; }
         if (!g_readyProfiles) g_readyProfiles = [NSMutableSet set];
         [g_readyProfiles addObject:path_];
         NSArray<CraBrowser*>* waiting = [g_waitingForProfile[path_] copy];
@@ -490,6 +506,47 @@ public:
 private:
     __weak CraBrowser* owner_;
     IMPLEMENT_REFCOUNTING(FaviconCallback);
+};
+
+// MARK: - Browser fetch
+
+typedef void (^CraFetchCompletion)(NSInteger, NSString*, NSString*, NSString*);
+
+/// Collects a CefURLRequest's body. Requests made on the UI thread call back on it.
+class FetchClient : public CefURLRequestClient {
+public:
+    explicit FetchClient(CraFetchCompletion completion) : completion_([completion copy]) {}
+
+    void OnDownloadData(CefRefPtr<CefURLRequest> request, const void* data, size_t length) override {
+        body_.append(static_cast<const char*>(data), length);
+    }
+    void OnRequestComplete(CefRefPtr<CefURLRequest> request) override {
+        CefRefPtr<CefResponse> response = request->GetResponse();
+        bool ok = request->GetRequestStatus() == UR_SUCCESS && response;
+        NSInteger status = ok ? response->GetStatus() : 0;
+        NSString* finalURL = response ? NSStringFromCef(response->GetURL()) : @"";
+        if (!finalURL.length) finalURL = NSStringFromCef(request->GetRequest()->GetURL());
+        NSString* mime = response ? NSStringFromCef(response->GetMimeType()) : @"";
+        NSString* body = [[NSString alloc] initWithBytes:body_.data() length:body_.size() encoding:NSUTF8StringEncoding] ?: @"";
+        CraFetchCompletion done = completion_;
+        completion_ = nil;
+        CefRefPtr<CefURLRequest> finished = request;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            InFlight().erase(finished);
+            if (done) done(status, finalURL, mime, body);
+        });
+    }
+    /// Requests stay referenced until they complete.
+    static std::set<CefRefPtr<CefURLRequest>>& InFlight() { static std::set<CefRefPtr<CefURLRequest>> s; return s; }
+    void OnUploadProgress(CefRefPtr<CefURLRequest> request, int64_t current, int64_t total) override {}
+    void OnDownloadProgress(CefRefPtr<CefURLRequest> request, int64_t current, int64_t total) override {}
+    bool GetAuthCredentials(bool isProxy, const CefString& host, int port, const CefString& realm, const CefString& scheme,
+                            CefRefPtr<CefAuthCallback> callback) override { return false; }
+
+private:
+    CraFetchCompletion completion_;
+    std::string body_;
+    IMPLEMENT_REFCOUNTING(FetchClient);
 };
 
 // MARK: - DevTools client
@@ -1769,6 +1826,18 @@ static void MarkProfileExitedCleanly(NSString* profileDir) {
 
 + (void)setContentBlockingEnabled:(BOOL)enabled { cra_blocker::Enabled().store(enabled); }
 + (BOOL)contentBlockingEnabled { return cra_blocker::Enabled().load(); }
+
+/// Only contexts that finished loading take preferences (an uninitialised one is fatal);
+/// the rest get it from ApplyProfilePreferences when they load.
++ (void)setHttpsOnlyModeEnabled:(BOOL)enabled {
+    g_httpsOnly = enabled;
+    if (!g_contextInitialized) return;
+    ApplyHttpsOnly(CefRequestContext::GetGlobalContext());
+    for (auto& [path, context] : g_profileContexts) {
+        if ([g_readyProfiles containsObject:@(path.c_str())]) ApplyHttpsOnly(context);
+    }
+    if (g_incognitoContext && g_incognitoReady) ApplyHttpsOnly(g_incognitoContext);
+}
 + (void)setBlockedDomains:(NSArray<NSString*>*)domains {
     auto* set = new cra_blocker::DomainSet();
     set->reserve(domains.count);
@@ -1821,7 +1890,9 @@ static void MarkProfileExitedCleanly(NSString* profileDir) {
 
     CefMainArgs mainArgs(*_NSGetArgc(), *_NSGetArgv());
     CefSettings settings;
-    settings.no_sandbox = true;
+    // Renderer, GPU and utility processes run in Chromium's seatbelt sandbox
+    // (CraHelper enters it before loading the framework).
+    settings.no_sandbox = false;
     CefString(&settings.cache_path) = CefStringFromNS(cachePath);
     CefString(&settings.root_cache_path) = CefStringFromNS(cachePath);
     settings.persist_session_cookies = true;
@@ -1877,7 +1948,7 @@ static void MarkProfileExitedCleanly(NSString* profileDir) {
 }
 
 + (NSInteger)liveBrowserCount { return g_liveBrowsers; }
-+ (void)endIncognitoSession { g_incognitoContext = nullptr; }
++ (void)endIncognitoSession { g_incognitoContext = nullptr; g_incognitoReady = false; }
 + (NSString*)chromiumVersion {
     return [NSString stringWithFormat:@"%d.%d.%d.%d", CHROME_VERSION_MAJOR, CHROME_VERSION_MINOR,
             CHROME_VERSION_BUILD, CHROME_VERSION_PATCH];
@@ -1890,6 +1961,34 @@ static void MarkProfileExitedCleanly(NSString* profileDir) {
 + (void)sendBrowserDevToolsMethod:(NSString*)method params:(NSString*)params
                        completion:(void (^)(NSString* _Nullable, NSString* _Nullable))completion {
     [self sendBrowserDevToolsMethod:method params:params sessionID:nil completion:completion];
+}
++ (void)fetchURL:(NSString*)url headers:(NSDictionary<NSString*, NSString*>*)headers profilePath:(NSString*)profilePath
+      completion:(void (^)(NSInteger, NSString*, NSString*, NSString*))completion {
+    [self fetchURL:url headers:headers profilePath:profilePath attempt:0 completion:completion];
+}
++ (void)fetchURL:(NSString*)url headers:(NSDictionary<NSString*, NSString*>*)headers profilePath:(NSString*)profilePath
+         attempt:(int)attempt completion:(void (^)(NSInteger, NSString*, NSString*, NSString*))completion {
+    // Chromium's profiles load asynchronously; a fetch waits for its profile like a page does.
+    BOOL ready = g_contextInitialized && (!profilePath.length || (ProfileContext(profilePath), [g_readyProfiles containsObject:profilePath]));
+    if (!ready) {
+        if (attempt >= 60) { completion(0, url, @"", @""); return; }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self fetchURL:url headers:headers profilePath:profilePath attempt:attempt + 1 completion:completion];
+        });
+        return;
+    }
+    CefRefPtr<CefRequest> request = CefRequest::Create();
+    request->SetURL(CefStringFromNS(url));
+    request->SetMethod("GET");
+    // Sent like the page's own navigation: stored cookies, first party = the site itself.
+    request->SetFlags(UR_FLAG_ALLOW_STORED_CREDENTIALS | UR_FLAG_SKIP_CACHE);
+    request->SetFirstPartyForCookies(CefStringFromNS(url));
+    CefRequest::HeaderMap map;
+    for (NSString* name in headers) map.insert({CefStringFromNS(name), CefStringFromNS(headers[name])});
+    request->SetHeaderMap(map);
+    CefRefPtr<CefRequestContext> context = profilePath.length ? ProfileContext(profilePath) : CefRequestContext::GetGlobalContext();
+    CefRefPtr<CefURLRequest> r = CefURLRequest::Create(request, new FetchClient(completion), context);
+    if (r) FetchClient::InFlight().insert(r); else completion(0, url, @"", @"");
 }
 + (void)sendBrowserDevToolsMethod:(NSString*)method params:(NSString*)params sessionID:(NSString*)sessionID
                        completion:(void (^)(NSString* _Nullable, NSString* _Nullable))completion {

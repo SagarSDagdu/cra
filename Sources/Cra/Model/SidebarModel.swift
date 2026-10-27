@@ -68,6 +68,12 @@ struct TabData: Codable, Equatable {
     var customIconKey: String?
     /// Favorite tile background as "#RRGGBB". nil is the theme's tile fill.
     var tileColor: String?
+    /// The live folder item this tab shows (Arc: liveItemID.url), e.g. a pull request URL.
+    var liveItemURL: String?
+    /// Line under the title that the live folder writes (a pull request's author).
+    var liveSubtitle: String?
+    /// When its pull request left the live folder's results; the tab goes after a grace period.
+    var liveGoneAt: Date?
 
     var iconKey: String? { customIconKey ?? faviconKey }
 
@@ -128,6 +134,8 @@ struct SidebarItem: Identifiable, Codable, Equatable {
     var data: ItemData
     /// A folder's glyph colour; nil is Auto (it follows the theme).
     var folderIcon: FolderIconStyle? = nil
+    /// Set on a folder that fills itself (Arc: list.automaticLiveFolderData).
+    var liveFolder: LiveFolderData? = nil
 
     var tab: TabData? {
         if case .tab(let t) = data { return t }
@@ -135,6 +143,7 @@ struct SidebarItem: Identifiable, Codable, Equatable {
     }
     var isTab: Bool { tab != nil }
     var isFolder: Bool { if case .folder = data { return true }; return false }
+    var isLiveFolder: Bool { isFolder && liveFolder != nil }
     var split: SplitData? {
         if case .split(let s) = data { return s }
         return nil
@@ -338,6 +347,27 @@ enum AutoArchiveThreshold: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum TabSleepThreshold: String, Codable, CaseIterable, Identifiable {
+    case fifteenMinutes, oneHour, fourHours, twelveHours
+    var id: String { rawValue }
+    var seconds: TimeInterval {
+        switch self {
+        case .fifteenMinutes: return 15 * 60
+        case .oneHour: return 3600
+        case .fourHours: return 4 * 3600
+        case .twelveHours: return 12 * 3600
+        }
+    }
+    var label: String {
+        switch self {
+        case .fifteenMinutes: return "15 minutes"
+        case .oneHour: return "1 hour"
+        case .fourHours: return "4 hours"
+        case .twelveHours: return "12 hours"
+        }
+    }
+}
+
 enum SearchEngine: String, Codable, CaseIterable, Identifiable {
     case google, duckduckgo, bing, kagi
     var id: String { rawValue }
@@ -398,6 +428,12 @@ struct AppSettings: Codable, Equatable {
     /// Dia's Tabs ▸ "Clean up tabs I haven't used in:" checkbox; `autoArchive` keeps the
     /// threshold while this is off.
     var autoArchiveEnabled: Bool = true
+    /// Tabs ▸ "Sleep tabs I haven't looked at in:": a page hidden that long closes and
+    /// loads again when shown (BrowserManager.sleepIdleTabs). Off by default.
+    var tabSleepEnabled: Bool = false
+    var tabSleep: TabSleepThreshold = .oneHour
+    /// Privacy ▸ "Always use secure connections": Chrome's HTTPS-Only Mode.
+    var httpsOnly: Bool = false
 
     init() {}
 
@@ -495,6 +531,9 @@ extension AppSettings {
         hapticFeedbackOnReorder = try c.decodeIfPresent(Bool.self, forKey: .hapticFeedbackOnReorder) ?? true
         warnBeforeQuitting = try c.decodeIfPresent(Bool.self, forKey: .warnBeforeQuitting) ?? false
         autoArchiveEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoArchiveEnabled) ?? true
+        tabSleepEnabled = try c.decodeIfPresent(Bool.self, forKey: .tabSleepEnabled) ?? false
+        tabSleep = (try? c.decodeIfPresent(TabSleepThreshold.self, forKey: .tabSleep)) ?? .oneHour
+        httpsOnly = try c.decodeIfPresent(Bool.self, forKey: .httpsOnly) ?? false
     }
 }
 
@@ -559,5 +598,8 @@ extension TabData {
         faviconKey = try c.decodeIfPresent(String.self, forKey: .faviconKey) ?? URL(string: url)?.host
         customIconKey = try c.decodeIfPresent(String.self, forKey: .customIconKey)
         tileColor = try c.decodeIfPresent(String.self, forKey: .tileColor)
+        liveItemURL = try c.decodeIfPresent(String.self, forKey: .liveItemURL)
+        liveSubtitle = try c.decodeIfPresent(String.self, forKey: .liveSubtitle)
+        liveGoneAt = try c.decodeIfPresent(Date.self, forKey: .liveGoneAt)
     }
 }

@@ -291,6 +291,14 @@ struct SidebarListDropDelegate: DropDelegate {
             }
         }
 
+        // A live folder fills itself: nothing goes into it from outside, and its tabs make no new folders.
+        switch target {
+        case .into(let f)? where store.item(f)?.isLiveFolder == true: target = nil
+        case .insert(let parent, _)? where store.item(parent)?.isLiveFolder == true && store.item(id)?.parentID != parent: target = nil
+        case .newFolder(let tab)? where store.item(store.item(tab)?.parentID ?? tab)?.isLiveFolder == true: target = nil
+        default: break
+        }
+
         var drop = SidebarListDrop(draggedID: id, target: target)
         guard case .insert(let parent, let index)? = target else { return drop }
         let kids = store.item(parent)?.children ?? []
@@ -365,8 +373,11 @@ struct SidebarDropPreview: ViewModifier {
                         .allowsHitTesting(false)
                 }
             }
-            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(SidebarListDropDelegate.coordinateSpace)) } action: { ui.rowFrames[id] = $0 }
             .visualEffect { content, _ in content.offset(y: nudge) }
+            // Measured outside the nudge: frames that moved with it fed back into the hit test,
+            // so a pointer near a row edge fell into the widened gap, the target jumped to the
+            // end of the list, the nudge moved away and the target came back, over and over.
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(SidebarListDropDelegate.coordinateSpace)) } action: { ui.rowFrames[id] = $0 }
     }
 
     /// This row is being dragged, itself or as one of the picked tabs.

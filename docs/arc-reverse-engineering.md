@@ -761,7 +761,7 @@ of the sidebar strip, pixel runs at x=500 px (2x), y = 160/700/1200/1700/2100.
   taking synthetic input before that test finished.
 - [?] Arc's pinned-tab context-menu titles (short Swift literals are inline in code, not in `strings`).
 - Cra (TabRow): current pinned → `minus`, "Close and Keep Pinned (⌘W)", unload + reset + select the
-  most recently active tab (`SidebarStore.mostRecentTab`); other pinned → ✕, "Archive this tab",
+  most recently active tab that is still open (closed pinned tabs are skipped, else two of them ping-pong); other pinned → ✕, "Archive this tab",
   `archiveTab`. Context menu: "Close and Keep Pinned" (only when open/loaded) and "Archive Tab". The URL
   tooltip moved from the row to the title so the buttons' tooltips show. No attention ring yet.
 - Tooltips on these buttons (ArcTooltip module, field metadata): `ArcTooltipConfiguration { content,
@@ -1506,9 +1506,63 @@ strings "Opens the tab switcher, where you can cycle through recent tabs like Co
 - [U] Arc's hover fill could not be recorded (live pointer runs were cut short while Victor was at the Mac); the pressed
   value is used for hover too, and the light-theme fill (black 5%) is a guess. Arc's drag image follows the pointer
   freely (system drag session); Cra keeps the dragged icon on the dock's row.
-- Cra: `SpaceDock` uses 34×32 contiguous cells with one `DragGesture` per cell: fill on hover and press, release inside
-  the cell switches space, a horizontal drag reorders (neighbours slide a cell aside, the icon settles, then
-  `moveSpace`). `CraWindow.holdsPress` turns movable-by-background off for any press inside the strip until mouse-up,
-  because the hover flag (`hoverDraggable`) missed a pointer that left the strip mid-drag and jumped back in. Verified
-  on a renamed test bundle: presses, shaky clicks and drags in the strip never move the window; a drag on empty
-  sidebar background still does.
+- Cra: `SpaceDock` draws 34×32 contiguous cells in SwiftUI; an AppKit view over the strip (`SpaceDockMouse`) takes
+  the mouse like Arc's item view: `mouseDownCanMoveWindow` false (a press there never moves the window), hover from
+  its own tracking area, click on mouse-up inside the pressed cell, horizontal drag reorders (neighbours slide a cell
+  aside, the icon settles, then `moveSpace`), right-click menu via `menu(for:)`. 0.1.13 used a SwiftUI
+  `DragGesture(minimumDistance: 0)` per cell plus a `CraWindow` press guard instead; that dropped every other click
+  (the window got the press, the gesture never began), so spaces needed a double click. Verified on a renamed test
+  bundle with real HID clicks: five clicks in a row each switch, a shaky click switches, a release off the cell
+  doesn't, a reorder is saved, the window never moves from the strip, and a drag on empty sidebar background does.
+
+## Library (Arc 1.170, 27 Oct 2026, AX tree + window captures + 60 fps app-only recording + Swift metadata)
+
+GitHub issue #3: Cra's Library was a separate window, so a click elsewhere sent it behind the browser, and the
+Library button's hover list (downloads) and its click (the archive) showed different things.
+
+- [O static] Arc's Library is window state, not a window: `Browser/Windows/Store/WindowState+Library.swift`, pages in
+  `HomeButton/Pages/{Archive,Downloads,Media,…}`, a `HomeButton.HomeViewController` with `PageSidebarItem`s. The Library
+  button is `SidebarHomeButton` (AX description "Home"). `LibraryOpenSource` = keyboardShortcut / iconTap / swipe,
+  `LibraryCloseSource` = keyboardShortcut / escape / iconTap / swipe: nothing closes it on a click elsewhere.
+  Window menu: View Library, View Downloads ("Opens the Downloads section of your Library."), View Easels & Notes,
+  View Media, View Boosts.
+- [O AX + capture, 1728×1084 window, 347 pt sidebar] the Library replaces the whole sidebar and widens it to 417 pt:
+  a 113 pt page rail and the page's list. Rail buttons (AXButton, description = page name) 97×80 at x 8, 100 pt
+  apart (Media 280, Downloads 380, … Archived Tabs 780 in screen y; window top 33), the group centred vertically.
+  Glyph 18 pt tall from 22 pt into the button, label 12 pt semibold (white 60 %, ~82 % when chosen). The chosen page
+  gets a white ~7 % fill (33,33,49 over 18,18,36) and its glyph filled in the space's accent (38,47,245 in Victor's
+  JYSK theme). The rail carries a faint white wash rising toward its right edge and a 1 pt hairline (33,31,47) at
+  x 112; the list sits on the plain sidebar colour.
+- [O] list column: search field 36 pt tall from x 120 to 332, 10 pt below the window top ("Search Archive…",
+  "Search Downloads…"), Filter button 73×36 at x 336; day headers ("Today", 13 pt semibold, x 124); rows 56 pt apart:
+  24 pt icon tile at x 130, title at x 164 in 14 pt, URL under it in 12 pt. Empty Downloads page: a download glyph,
+  "Nothing here yet!", "Come back after you've found some cool stuff to save."
+- [O] bottom: a back arrow (32×32 at x 8, 8 pt above the bottom) leaves the Library; a gift button at x 73.
+- [O] reopening shows the page last used (left on Archived Tabs, reopened on Archived Tabs).
+- [O 60 fps] opening: the Library is in place within 2–3 frames, sliding in from a little to the left. Closing: it
+  slides left and fades while the tab list fades back in, ~6 frames, the card edge easing from 417 to 347.
+- [U] Whether the list column keeps a fixed 304 pt or follows the sidebar width (both give 417 pt at 347); Cra adds
+  70 pt to the user's width. The open animation's exact curve.
+- Cra: `LibraryView` in the sidebar (Downloads and Archived Tabs; Cra has no Media, Easels, Spaces or Boosts pages),
+  `SidebarUIState.libraryPage` per window, `MainWindowController.showLibrary/closeLibrary`. The Library button and
+  ⇧⌘L toggle it on the last page, ⇧⌘J opens Downloads, "View Archive" opens Archived Tabs, Esc and the back arrow
+  leave. Opening it from a hidden sidebar shows the sidebar until it closes.
+
+## A tab open in two windows (Arc 1.170, 27 Oct 2026, Swift metadata)
+
+GitHub issue #4: opening in window B a tab that window A shows left A with no tab selected.
+
+- [O static] Arc moves the page ("reparenting", `SharedWindowFeature/WindowData+ContentReparenting.swift`,
+  `reparentWindowContent(for:from:to:trigger:)`, `ReparentingTrigger` = targeted / untargeted,
+  `ReparentingMode` = shallow / deep, feature flags `global-window-content-reparenting-enabled` and
+  `reparented-window-content-placeholders-enabled`). The window that lost the page keeps a placeholder:
+  `ContentPlaceholderClient` (registerPlaceholder, placeholderSnapshots; `Placeholder` has data and sidebarItemID),
+  `ContentSnapshotClient`, `BlurredItemContent` (item, image, colorScheme), `BlurredSnapshotView`, a
+  "BlurredBackground" colour asset.
+- [U] not observed live (two Arc windows need keyboard focus): the blur radius, whether text sits on the
+  placeholder, and exactly when the untargeted reparent fires.
+- Cra: both windows keep the tab selected (SidebarStore no longer clears the other window's selection). The window
+  in use holds the page; another window that has the tab open shows a blurred copy of its last snapshot
+  (`PaneCardView.elsewhereSnapshot`, the tab switcher's thumbnail) and takes the page back when it becomes key or
+  main. Windows restored at launch leave the page to the window in use, else the first one. Verified on a renamed
+  test bundle with two windows on the same tab: page and blur swap each time the other window becomes main.

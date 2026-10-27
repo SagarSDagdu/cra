@@ -8,17 +8,15 @@ struct SpaceDock: View {
     @Environment(SidebarUIState.self) private var ui
     @Environment(\.sidebarActions) private var actions
     @State private var reorder: SpaceReorder?
-    @GestureState private var pressing: UUID?
+    @State private var hovered: UUID?
 
     /// Arc 1.170 (SidebarDock, an NSCollectionView): 34×32 pt cells side by side with no
     /// gap, so a press anywhere between two icons still lands on a space.
     static let cell = CGSize(width: 34, height: 32)
-    /// Marks the strip as draggable content so a press there never moves the window.
-    private static let stripID = UUID()
 
     var body: some View {
         HStack(spacing: 0) {
-            LibraryButton(palette: palette) { actions.showArchive() }
+            LibraryButton(palette: palette) { actions.toggleLibrary() }
             Spacer(minLength: 0)
             // An incognito window has one space of its own: nothing to switch to or add.
             if !store.window(ui.windowID).isIncognito {
@@ -27,20 +25,19 @@ struct SpaceDock: View {
                     ForEach(Array(spaces.enumerated()), id: \.element.id) { index, space in
                         SpaceDockButton(space: space, palette: palette,
                                         selected: space.id == store.focusedSpaceID(window: ui.windowID),
+                                        hovered: hovered == space.id && reorder == nil,
                                         pressed: reorder?.id == space.id)
                             .offset(x: offset(of: space.id, at: index))
                             .zIndex(reorder?.id == space.id ? 1 : 0)
-                            .gesture(press(space, at: index, count: spaces.count))
                     }
                 }
-                .coordinateSpace(name: Self.stripID)
-                .background(SpaceDockStripAnchor(ui: ui).allowsHitTesting(false))
-                .onHover { ui.hoverDraggable(Self.stripID, $0) }
-                // A cancelled gesture never reaches onEnded; don't leave a cell pressed.
-                .onChange(of: pressing) { _, now in
-                    guard now == nil else { return }
-                    DispatchQueue.main.async { if reorder?.settling == false { reorder = nil } }
-                }
+                .overlay(SpaceDockMouse(
+                    cellWidth: Self.cell.width, count: spaces.count,
+                    hover: { i in hovered = i.map { spaces[$0].id } },
+                    press: { i in reorder = SpaceReorder(id: spaces[i].id, from: i, to: i) },
+                    drag: { drag(by: $0, count: spaces.count) },
+                    release: { inside in release(inside: inside, spaces: spaces) },
+                    menu: { menu(for: spaces[$0]) }))
                 Spacer(minLength: 0)
                 SidebarIconButton(symbol: "plus", palette: palette, help: "New Space") { actions.editSpace(nil) }
             }
@@ -58,47 +55,59 @@ struct SpaceDock: View {
         return 0
     }
 
-    /// Arc's dock item handles mouseDown/mouseUp itself: the cell fills on press, a release
-    /// switches space, and dragging reorders. A release inside the pressed cell that didn't
-    /// move the space still switches, so a shaky click never ends up as a window drag or a no-op.
-    private func press(_ space: Space, at index: Int, count: Int) -> some Gesture {
-        let cell = CGRect(x: CGFloat(index) * Self.cell.width, y: 0, width: Self.cell.width, height: Self.cell.height)
-        return DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.stripID))
-            .updating($pressing) { _, state, _ in state = space.id }
-            .onChanged { g in
-                var r = reorder ?? SpaceReorder(id: space.id, from: index, to: index)
-                guard r.id == space.id else { return }
-                if !r.moved && abs(g.translation.width) < 3 && abs(g.translation.height) < 3 {
-                    reorder = r
-                    return
-                }
-                r.moved = true
-                let w = Self.cell.width
-                r.dx = min(max(g.translation.width, -CGFloat(index) * w), CGFloat(count - 1 - index) * w)
-                let to = min(max(index + Int((r.dx / w).rounded()), 0), count - 1)
-                if to != r.to {
-                    reorder?.dx = r.dx
-                    withAnimation(.easeOut(duration: 0.2)) { r.to = to; reorder = r }
-                } else {
-                    reorder = r
-                }
+    private func drag(by t: CGSize, count: Int) {
+        guard var r = reorder, !r.settling else { return }
+        if !r.moved && abs(t.width) < 3 && abs(t.height) < 3 { return }
+        r.moved = true
+        let w = Self.cell.width
+        r.dx = min(max(t.width, -CGFloat(r.from) * w), CGFloat(count - 1 - r.from) * w)
+        let to = min(max(r.from + Int((r.dx / w).rounded()), 0), count - 1)
+        if to != r.to {
+            reorder?.dx = r.dx
+            withAnimation(.easeOut(duration: 0.2)) { r.to = to; reorder = r }
+        } else {
+            reorder = r
+        }
+    }
+
+    /// A release inside the pressed cell that didn't move the space switches to it, so a
+    /// shaky click still counts; a moved space slides into its cell and the order is saved.
+    private func release(inside: Bool, spaces: [Space]) {
+        guard let r = reorder, !r.settling else { return }
+        guard r.to != r.from else {
+            if inside { store.focusSpace(r.id, window: ui.windowID) }
+            withAnimation(.easeOut(duration: 0.15)) { reorder = nil }
+            return
+        }
+        reorder?.settling = true
+        // `moveSpace` indexes the full space order; land next to the space now in that cell.
+        let target = store.spaceOrder.firstIndex(of: spaces[r.to].id) ?? r.to
+        withAnimation(.easeOut(duration: 0.15)) {
+            reorder?.dx = CGFloat(r.to - r.from) * Self.cell.width
+        } completion: {
+            withTransaction(Transaction(animation: nil)) {
+                store.moveSpace(r.id, to: target)
+                reorder = nil
             }
-            .onEnded { g in
-                guard let r = reorder, r.id == space.id, r.to != r.from else {
-                    if cell.contains(g.location) { store.focusSpace(space.id, window: ui.windowID) }
-                    if reorder?.id == space.id { withAnimation(.easeOut(duration: 0.15)) { reorder = nil } }
-                    return
-                }
-                reorder?.settling = true
-                withAnimation(.easeOut(duration: 0.15)) {
-                    reorder?.dx = CGFloat(r.to - r.from) * Self.cell.width
-                } completion: {
-                    withTransaction(Transaction(animation: nil)) {
-                        store.moveSpace(r.id, to: r.to)
-                        reorder = nil
-                    }
-                }
-            }
+        }
+    }
+
+    private func menu(for space: Space) -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(BlockMenuItem(title: "Edit Space…") { actions.editSpace(space) })
+        menu.addItem(.separator())
+        menu.addItem(BlockMenuItem(title: "Move Left") {
+            if let i = store.spaceOrder.firstIndex(of: space.id) { store.moveSpace(space.id, to: max(0, i - 1)) }
+        })
+        menu.addItem(BlockMenuItem(title: "Move Right") {
+            if let i = store.spaceOrder.firstIndex(of: space.id) { store.moveSpace(space.id, to: i + 1) }
+        })
+        menu.addItem(.separator())
+        menu.addItem(BlockMenuItem(title: "Delete Space…") {
+            store.focusSpace(space.id, window: ui.windowID)
+            actions.performAction("deleteSpace")
+        })
+        return menu
     }
 }
 
@@ -112,15 +121,85 @@ private struct SpaceReorder {
     var settling = false
 }
 
+/// Arc's dock items take the mouse themselves (SidebarDockItemView overrides mouseDown:/mouseUp:).
+/// This AppKit view over the strip does the same, so a press there never moves the window,
+/// and every click counts (a SwiftUI drag gesture here dropped every other press).
+private struct SpaceDockMouse: NSViewRepresentable {
+    let cellWidth: CGFloat
+    let count: Int
+    let hover: (Int?) -> Void
+    let press: (Int) -> Void
+    let drag: (CGSize) -> Void
+    let release: (_ inside: Bool) -> Void
+    let menu: (Int) -> NSMenu
+
+    func makeNSView(context: Context) -> MouseView { MouseView() }
+    func updateNSView(_ view: MouseView, context: Context) { view.config = self }
+
+    final class MouseView: NSView {
+        var config: SpaceDockMouse?
+        private var pressed: (index: Int, start: NSPoint)?
+        private var hovered: Int? {
+            didSet { if hovered != oldValue { config?.hover(hovered) } }
+        }
+
+        override var isFlipped: Bool { true }
+        override var mouseDownCanMoveWindow: Bool { false }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        private func point(_ event: NSEvent) -> NSPoint { convert(event.locationInWindow, from: nil) }
+        private func cell(_ i: Int) -> NSRect {
+            NSRect(x: CGFloat(i) * (config?.cellWidth ?? 34), y: 0, width: config?.cellWidth ?? 34, height: bounds.height)
+        }
+        private func index(at p: NSPoint) -> Int? {
+            guard let config, bounds.contains(p) else { return nil }
+            let i = Int(p.x / config.cellWidth)
+            return i < config.count ? i : nil
+        }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            for t in trackingAreas { removeTrackingArea(t) }
+            addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+                                           owner: self))
+        }
+        override func mouseEntered(with event: NSEvent) { if pressed == nil { hovered = index(at: point(event)) } }
+        override func mouseMoved(with event: NSEvent) { if pressed == nil { hovered = index(at: point(event)) } }
+        override func mouseExited(with event: NSEvent) { if pressed == nil { hovered = nil } }
+
+        override func mouseDown(with event: NSEvent) {
+            let p = point(event)
+            guard let i = index(at: p) else { return }
+            pressed = (i, p)
+            config?.press(i)
+        }
+        override func mouseDragged(with event: NSEvent) {
+            guard let pressed else { return }
+            let p = point(event)
+            config?.drag(CGSize(width: p.x - pressed.start.x, height: p.y - pressed.start.y))
+        }
+        override func mouseUp(with event: NSEvent) {
+            guard let i = pressed?.index else { return }
+            pressed = nil
+            let p = point(event)
+            config?.release(cell(i).contains(p))
+            hovered = index(at: p)
+        }
+        override func menu(for event: NSEvent) -> NSMenu? {
+            index(at: point(event)).flatMap { config?.menu($0) }
+        }
+    }
+}
+
 struct SpaceDockButton: View {
     let space: Space
     let palette: SpacePalette
     let selected: Bool
+    var hovered = false
     var pressed = false
     @Environment(SidebarStore.self) private var store
     @Environment(SidebarUIState.self) private var ui
     @Environment(\.sidebarActions) private var actions
-    @State private var hover = false
     @State private var targeted = false
 
     /// Arc's hovered/pressed cell on a dark space: white at ~7.8% (39,33,51 over 21,14,34), 6 pt corners.
@@ -130,11 +209,10 @@ struct SpaceDockButton: View {
         Text(space.emoji)
             .font(.system(size: 13))
             .frame(width: SpaceDock.cell.width, height: SpaceDock.cell.height)
-            .opacity(selected || hover || pressed ? 1 : 0.45)
-            .saturation(selected || hover || pressed ? 1 : 0.2)
-            .background(RoundedRectangle(cornerRadius: 6).fill(targeted || hover || pressed ? cellFill : .clear))
+            .opacity(selected || hovered || pressed ? 1 : 0.45)
+            .saturation(selected || hovered || pressed ? 1 : 0.2)
+            .background(RoundedRectangle(cornerRadius: 6).fill(targeted || hovered || pressed ? cellFill : .clear))
             .contentShape(Rectangle())
-            .onHover { hover = $0 }
             .arcTooltip(space.title)
             // Arc exposes each cell as a button named after the space.
             .accessibilityElement()
@@ -153,14 +231,6 @@ struct SpaceDockButton: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     if targeted { store.focusSpace(space.id, window: ui.windowID) }
                 }
-            }
-            .contextMenu {
-                Button("Edit Space…") { actions.editSpace(space) }
-                Divider()
-                Button("Move Left") { if let i = store.spaceOrder.firstIndex(of: space.id) { store.moveSpace(space.id, to: max(0, i - 1)) } }
-                Button("Move Right") { if let i = store.spaceOrder.firstIndex(of: space.id) { store.moveSpace(space.id, to: i + 1) } }
-                Divider()
-                Button("Delete Space…") { store.focusSpace(space.id, window: ui.windowID); actions.performAction("deleteSpace") }
             }
     }
 }
@@ -265,17 +335,6 @@ private struct DownloadBin: View {
 private struct BinMotion {
     var y: CGFloat = 0
     var opacity: Double = 1
-}
-
-/// Hands the strip of space cells to the window, which keeps presses there from dragging it.
-private struct SpaceDockStripAnchor: NSViewRepresentable {
-    let ui: SidebarUIState
-    func makeNSView(context: Context) -> NSView {
-        let v = NSView()
-        ui.spaceDockStrip = v
-        return v
-    }
-    func updateNSView(_ nsView: NSView, context: Context) { ui.spaceDockStrip = nsView }
 }
 
 /// Hands the Library button's NSView to the window controller, which aims download

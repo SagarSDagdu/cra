@@ -63,6 +63,7 @@ struct UpdateBanner: View {
                     }
                 }
                 .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .actsOnFirstClick()
                 .onHover { hover = $0 }
                 .onTapGesture { c.action() }
                 .padding(.top, 8)

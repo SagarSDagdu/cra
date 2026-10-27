@@ -61,7 +61,6 @@ final class SidebarStore {
         activeWindowID = prefs.windows[0].id
         lastNormalWindowID = activeWindowID
         splitSharedFavorites(doc.favoritesContainerID)
-        resolveWindowConflicts(winner: activeWindowID)
     }
 
     /// Make sure every space has its containers and no item points at a
@@ -160,7 +159,6 @@ final class SidebarStore {
     }
 
     private func touch() {
-        resolveWindowConflicts(winner: activeWindowID)
         revision &+= 1
         save()
     }
@@ -247,24 +245,6 @@ final class SidebarStore {
             for c in items[id]?.children ?? [] { walk(c) }
         }
         for c in [space.favoritesContainerID, space.pinnedContainerID, space.todayContainerID] { walk(c) }
-    }
-
-    /// A page is one Chromium browser, so it is on screen in one window at a time:
-    /// when two windows would show the same tab, the winner keeps it and the other
-    /// window drops its open tab in that space (it shows the empty space instead).
-    private func resolveWindowConflicts(winner: UUID, wins: Bool = true) {
-        guard prefs.windows.count > 1 else { return }
-        let me = prefs.windows.filter { $0.id == winner }, others = prefs.windows.filter { $0.id != winner }
-        var claimed = Set<UUID>()
-        for w in wins ? me + others : others + me {
-            let sid = focusedSpaceID(window: w.id)
-            let panes = visiblePaneTabIDs(in: sid, window: w.id)
-            if claimed.isDisjoint(with: panes) {
-                claimed.formUnion(panes)
-            } else {
-                updateWindow(w.id) { $0.selectedTabPerSpace[sid] = nil }
-            }
-        }
     }
 
     // MARK: Lookup
@@ -420,7 +400,6 @@ final class SidebarStore {
             ranking.recentlySwitchedToTabs[id] = dates
             rankingFile.save(ranking)
         }
-        resolveWindowConflicts(winner: w)
         touch()
     }
 
@@ -431,7 +410,8 @@ final class SidebarStore {
             if !isPinned(id) { t.savedURL = url }
             if let key = FaviconCache.key(for: url) { t.faviconKey = key }
         }
-        if let title { t.savedTitle = title }
+        // A live folder's tab keeps the pull request's title (Arc shows that, not the page's).
+        if let title, !(t.liveItemURL.map { t.url.hasPrefix($0) } ?? false) { t.savedTitle = title }
         it.data = .tab(t)
         items[id] = it
         revision &+= 1
@@ -534,13 +514,6 @@ final class SidebarStore {
             .prefix(limit).map(\.id)
     }
 
-    /// The tab last used in a space before `id` (where Arc goes after "Close and Keep Pinned").
-    func mostRecentTab(in sid: UUID, excluding id: UUID) -> UUID? {
-        visibleTabs(in: sid)
-            .filter { $0.id != id && $0.tab?.timeLastActiveAt != nil }
-            .max { $0.tab!.timeLastActiveAt! < $1.tab!.timeLastActiveAt! }?.id
-    }
-
     // MARK: Tree moves
 
     /// Detach an item from its parent without deleting it.
@@ -574,6 +547,10 @@ final class SidebarStore {
             return
         }
         let fromParent = it.parentID
+        // A live folder fills itself: nothing is dropped into it, and it never unpacks into Today.
+        if items[newParent]?.isLiveFolder == true, fromParent != newParent { return }
+        if it.isLiveFolder, case .today? = rootContainerKind(newParent) { return }
+        if fromParent != newParent, let from = fromParent, items[from]?.isLiveFolder == true { hideLiveItem(id, in: from) }
         let oldIndex = fromParent.flatMap { items[$0]?.children.firstIndex(of: id) }
         if it.isFolder, case .today? = rootContainerKind(newParent) {
             // Unpack: move the folder's tabs instead.
@@ -589,6 +566,7 @@ final class SidebarStore {
             return
         }
         detach(id)
+        it = items[id] ?? it
         var parent = items[newParent]!
         var at = index ?? parent.children.count
         if fromParent == newParent, let old = oldIndex, old < at { at -= 1 }
@@ -937,6 +915,11 @@ final class SidebarStore {
 
     func deleteFolder(_ id: UUID) {
         guard let f = items[id], f.isFolder else { return }
+        // A live folder's tabs are the service's items, not the user's: they go with it.
+        if f.isLiveFolder {
+            for c in f.children { items[c] = nil }
+            items[id]?.children = []
+        }
         for t in tabs(under: id) { archiveTab(t.id, reason: .manual) }
         // Nested folders left behind (now empty) go too.
         for c in children(of: id) where c.isFolder { deleteFolder(c.id) }
@@ -957,14 +940,151 @@ final class SidebarStore {
         if prefs.collapsedPinnedSpaces.remove(spaceID) == nil { prefs.collapsedPinnedSpaces.insert(spaceID) }
     }
 
+    // MARK: Live folders
+
+    var liveFolders: [SidebarItem] { items.values.filter(\.isLiveFolder) }
+
+    /// The space's live folder for a source (Dia: one Pull Requests folder per space).
+    func liveFolder(_ source: LiveFolderSource, inSpace sid: UUID) -> SidebarItem? {
+        liveFolders.first { $0.liveFolder?.source == source && spaceID(ofItem: $0.id) == sid }
+    }
+
+    /// Arc's "Pull Requests" folder at the top of the space's pinned tabs, open.
+    @discardableResult
+    func createLiveFolder(_ source: LiveFolderSource, inSpace sid: UUID) -> SidebarItem? {
+        if let existing = liveFolder(source, inSpace: sid) { return existing }
+        guard let space = spaces[sid], !isIncognito(space: sid) else { return nil }
+        let folder = createFolder(named: "Pull Requests", in: space.pinnedContainerID, index: 0)
+        items[folder.id]?.liveFolder = LiveFolderData()
+        touch()
+        return items[folder.id]
+    }
+
+    func updateLiveFolder(_ id: UUID, _ change: (inout LiveFolderData) -> Void) {
+        guard var live = items[id]?.liveFolder else { return }
+        change(&live)
+        items[id]?.liveFolder = live
+        touch()
+    }
+
+    /// A refresh came back. New pull requests come in unread at their place (a Today tab already
+    /// showing one moves in instead, Dia's reparentPullRequestTabToLiveFolder), ones that left the
+    /// results stay for LiveFolderManager.retention before they go, the rest keep the pull request's
+    /// title and author. The first fill marks nothing unread.
+    func applyLiveResults(_ prs: [LivePullRequest], to folderID: UUID, ssoOrganizations: [String]) {
+        guard var folder = items[folderID], var live = folder.liveFolder else { return }
+        let hidden = Set(live.hiddenItems)
+        let hiddenRepos = Set(live.filter.hiddenRepositories.map { $0.lowercased() })
+        let wanted = prs.filter { !hidden.contains($0.url) && !hiddenRepos.contains($0.repository.lowercased()) }
+        var existing: [String: UUID] = [:]
+        for c in children(of: folderID) { if let u = c.tab?.liveItemURL { existing[u] = c.id } }
+        // Nothing in it yet from a refresh that worked: what arrives now isn't news.
+        let firstFill = live.lastFetch == nil || (live.lastError != nil && existing.isEmpty)
+        var order: [UUID] = []
+        for pr in wanted {
+            let subtitle = pr.createdByMe ? nil : pr.author
+            if let id = existing.removeValue(forKey: pr.url) ?? adoptableTab(for: pr, folderID: folderID),
+               var it = items[id], var t = it.tab {
+                if it.parentID != folderID {
+                    detach(id)
+                    it.parentID = folderID
+                    t.savedURL = pr.url
+                }
+                t.savedTitle = pr.title
+                t.liveItemURL = pr.url
+                t.liveSubtitle = subtitle
+                t.liveGoneAt = nil
+                it.data = .tab(t)
+                items[id] = it
+                order.append(id)
+            } else {
+                var tab = SidebarItem.tab(pr.url, title: pr.title, parent: folderID)
+                var t = TabData(url: pr.url, title: pr.title)
+                t.liveItemURL = pr.url
+                t.liveSubtitle = subtitle
+                tab.data = .tab(t)
+                tab.isUnread = !firstFill
+                tab.createdAt = pr.createdAt ?? Date()
+                items[tab.id] = tab
+                order.append(tab.id)
+            }
+        }
+        // Gone from the results (merged, reviewed, closed): marked now, removed once the grace is over.
+        for id in existing.values {
+            guard var it = items[id], var t = it.tab, t.liveGoneAt == nil else { continue }
+            t.liveGoneAt = Date()
+            it.data = .tab(t)
+            items[id] = it
+        }
+        folder = items[folderID] ?? folder
+        folder.children = order + folder.children.filter { !order.contains($0) && items[$0] != nil }
+        live.lastFetch = Date()
+        live.lastError = nil
+        live.ssoOrganizations = ssoOrganizations
+        folder.liveFolder = live
+        items[folderID] = folder
+        touch()
+    }
+
+    /// Live tabs whose pull request left the results longer than `age` ago go; one open in a
+    /// window stays until it isn't.
+    func expireLiveItems(olderThan age: TimeInterval) {
+        let open = Set(prefs.windows.flatMap { $0.selectedTabPerSpace.values })
+        var changed = false
+        for folder in liveFolders {
+            for c in children(of: folder.id) where !open.contains(c.id) {
+                guard let goneAt = c.tab?.liveGoneAt, Date().timeIntervalSince(goneAt) >= age else { continue }
+                detach(c.id)
+                items[c.id] = nil
+                changed = true
+            }
+        }
+        if changed { touch() }
+    }
+
+    /// A Today tab in the folder's space already on this pull request (the one you just opened).
+    private func adoptableTab(for pr: LivePullRequest, folderID: UUID) -> UUID? {
+        guard let sid = spaceID(ofItem: folderID), let space = spaces[sid] else { return nil }
+        return children(of: space.todayContainerID).first { c in
+            guard let url = c.tab?.url, let p = GitHubLiveClient.pullPath(url) else { return false }
+            return p.owner.lowercased() == pr.owner.lowercased() && p.repo.lowercased() == pr.repo.lowercased() && p.number == pr.number
+        }?.id
+    }
+
+    func applyLiveFailure(_ error: LiveFolderError, to folderID: UUID) {
+        updateLiveFolder(folderID) {
+            $0.lastFetch = Date()
+            $0.lastError = error
+        }
+    }
+
+    /// Remembers a tab leaving its live folder so the next refresh doesn't bring it back;
+    /// the tab itself becomes an ordinary one.
+    private func hideLiveItem(_ id: UUID, in folderID: UUID) {
+        guard var it = items[id], var t = it.tab, let url = t.liveItemURL, var live = items[folderID]?.liveFolder else { return }
+        if !live.hiddenItems.contains(url) { live.hiddenItems.append(url) }
+        // Arc keeps a short list; old pull requests are long closed.
+        if live.hiddenItems.count > 200 { live.hiddenItems.removeFirst(live.hiddenItems.count - 200) }
+        items[folderID]?.liveFolder = live
+        t.liveItemURL = nil
+        t.liveSubtitle = nil
+        it.data = .tab(t)
+        items[id] = it
+    }
+
     // MARK: Archive
 
     func archiveTab(_ id: UUID, reason: ArchiveReason) {
-        guard let it = items[id], it.isTab else { return }
+        guard var it = items[id], it.isTab else { return }
         let sid = spaceID(ofItem: id)
         let selectedIn = sid.map { s in prefs.windows.filter { $0.selectedTabPerSpace[s] == id }.map(\.id) } ?? []
         let pinned = isPinned(id)
         let split = splitContaining(id)
+        // Closed out of a live folder: the item stays out (Arc: hiddenItems).
+        if let p = it.parentID, items[p]?.isLiveFolder == true {
+            hideLiveItem(id, in: p)
+            it = items[id] ?? it
+        }
         detach(id)
         items[id] = nil
         // Empty panes never had a page and incognito pages leave no trace: nothing for the Library.
@@ -1151,12 +1271,12 @@ final class SidebarStore {
         touch()
     }
 
-    /// A window switching to a space whose open tab another window shows leaves it there.
+    /// Two windows can have the same tab open; its page shows in the one in use
+    /// (MainWindowController.refresh).
     func focusSpace(_ id: UUID, window: UUID? = nil) {
         let w = self.window(window).id
         guard spaces[id] != nil, id != focusedSpaceID(window: w), !self.window(w).isIncognito, !isIncognito(space: id) else { return }
         updateWindow(w) { $0.focusedSpaceID = id }
-        resolveWindowConflicts(winner: w, wins: false)
         revision &+= 1
     }
 

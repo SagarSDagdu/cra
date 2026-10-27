@@ -9,9 +9,26 @@ struct SidebarRootView: View {
     @Environment(\.sidebarActions) private var actions
 
     var body: some View {
+        let palette = store.focusedSpace(window: ui.windowID).theme.palette
+        // The Library takes over the sidebar (LibraryView: in from a little to the left,
+        // out to the left while the tab list fades back in).
+        ZStack(alignment: .topLeading) {
+            tabs
+                .opacity(ui.libraryPage == nil ? 1 : 0)
+                .allowsHitTesting(ui.libraryPage == nil)
+            if let page = ui.libraryPage {
+                LibraryView(page: page, palette: palette)
+                    .ignoresSafeArea()
+                    .transition(.asymmetric(insertion: .offset(x: -24).combined(with: .opacity),
+                                            removal: .offset(x: -LibraryMetrics.rail).combined(with: .opacity)))
+            }
+        }
+    }
+
+    private var tabs: some View {
         let space = store.focusedSpace(window: ui.windowID)
         let palette = space.theme.palette
-        VStack(spacing: 0) {
+        return VStack(spacing: 0) {
             SidebarTopBar(palette: palette)
             // Dia's paging container: every space's list sits side by side and the
             // strip follows the swipe 1:1, then a spring settles it on a page.
@@ -331,6 +348,8 @@ struct SpaceSectionView: View {
     private var listMenu: some View {
         Button("New Tab") { actions.openCommandBar(.newTab) }
         Button("New Folder") { actions.performAction("newFolder") }
+        Button("New GitHub Live Folder") { actions.performAction("newGitHubLiveFolder") }
+            .disabled(store.liveFolder(.github, inSpace: space.id) != nil)
         Divider()
         if !store.children(of: space.todayContainerID).isEmpty {
             Button("Clear Today") { store.clearToday(space.id) }
@@ -486,6 +505,8 @@ struct SpaceHeader: View {
             Divider()
             Button("Edit Space…") { actions.editSpace(space) }
             Button("New Folder") { actions.performAction("newFolder") }
+            Button("New GitHub Live Folder") { actions.performAction("newGitHubLiveFolder") }
+                .disabled(store.liveFolder(.github, inSpace: space.id) != nil)
             Divider()
             Button("Clear Today") { store.clearToday(space.id) }
             Divider()

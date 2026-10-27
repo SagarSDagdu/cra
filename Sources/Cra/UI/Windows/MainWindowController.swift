@@ -22,6 +22,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
     private var importWindow: ImportWindowController?
     private var scrollMonitor: Any?
     private var childClickMonitor: Any?
+    private var middleClickMonitor: Any?
     private enum SwipeAxis { case undecided, horizontal, vertical }
     private var swipeAxis = SwipeAxis.vertical
     private var swipeX: CGFloat = 0
@@ -105,22 +106,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         browsers.takeRuntimeFromOtherWindow = { [weak self] id in
             guard let self else { return nil }
             for other in self.app.mainWindows where other !== self {
-                if let rt = other.browsers.release(id) { return rt }
+                if let rt = other.browsers.release(id) {
+                    // The window it came from keeps the tab selected behind a blurred stand-in.
+                    DispatchQueue.main.async { [weak other] in other?.refresh() }
+                    return rt
+                }
             }
             return nil
         }
         // AppKit asks the view under a press whether it may move the window. In the
         // sidebar's list that is SwiftUI's scroll container, which always says yes,
         // so the window's own flag is what keeps a row press for the row's drag.
-        sidebarUI.onPointerOverDraggableChange = { [weak window] over in
-            guard let window, !window.holdingPress else { return }
-            window.isMovableByWindowBackground = !over
-        }
-        window.holdsPress = { [weak window, weak sidebarUI] point in
-            guard let strip = sidebarUI?.spaceDockStrip, strip.window === window else { return false }
-            return strip.bounds.contains(strip.convert(point, from: nil))
-        }
-        window.movableAfterPress = { [weak sidebarUI] in !(sidebarUI?.pointerOverDraggable ?? false) }
+        sidebarUI.onPointerOverDraggableChange = { [weak window] over in window?.isMovableByWindowBackground = !over }
         browsers.paneHost = { [weak self] id in self?.shell.card(for: id)?.webArea }
         shell.makeToolbar = { [weak self] id in
             guard let self else { return AnyView(EmptyView()) }
@@ -202,7 +199,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         }
         sidebarActions.editSpace = { [weak self] s in self?.showSpaceEditor(space: s) }
         sidebarActions.toggleSidebar = { [weak self] in self?.toggleSidebar() }
-        sidebarActions.showArchive = { [weak self] in self?.app.showArchiveWindow() }
+        sidebarActions.toggleLibrary = { [weak self] in self?.toggleLibrary() }
+        sidebarActions.showLibrary = { [weak self] page in self?.showLibrary(page) }
+        sidebarActions.closeLibrary = { [weak self] in self?.closeLibrary() }
+        sidebarActions.restoreArchived = { [weak self] id in
+            guard let self else { return }
+            _ = self.store.restoreArchived(id)
+            self.closeLibrary()
+        }
         sidebarActions.resetPinnedTab = { [weak self] id in self?.resetPinnedTab(id) }
         sidebarActions.openURL = { [weak self] url in
             guard let self else { return }
@@ -297,13 +301,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         let empty = Set(panes.filter { store.item($0)?.isEmptyTab == true })
         shell.showToolbar = store.settings.showToolbar
         shell.setPanes(panes, factors: factors, orientation: split?.split?.orientation ?? .horizontal, focused: selected, empty: empty, animated: true)
+        // A page is on screen in one window at a time. Arc keeps the tab selected in every window
+        // that has it open: the window in use holds the page, the others show a blurred snapshot
+        // until they are used again (windowDidBecomeKey takes the page back).
+        let elsewhere = Set(panes.filter(showsElsewhere))
+        let live = panes.filter { !elsewhere.contains($0) }
+        let liveFocus = selected.flatMap { elsewhere.contains($0) ? nil : $0 }
         for c in shell.paneCards {
             c.toolbarHost.rootView = shell.makeToolbar?(c.tabID == ShellView.noTabID ? nil : c.tabID) ?? AnyView(EmptyView())
+            c.showsElsewhere = elsewhere.contains(c.tabID)
+            c.elsewhereSnapshot = c.showsElsewhere ? app.runtime(for: c.tabID)?.snapshot : nil
         }
         sidebarUI.splitPaneIDs = panes.count > 1 ? panes : []
-        if panes != browsers.visibleTabIDs || selected != browsers.visibleTabID
-            || panes.contains(where: { browsers.runtime(for: $0) == nil && store.item($0)?.isEmptyTab == false }) {
-            browsers.show(panes, focused: selected, focus: !commandBar.isOpen)
+        if live != browsers.visibleTabIDs || liveFocus != browsers.visibleTabID
+            || live.contains(where: { browsers.runtime(for: $0) == nil && store.item($0)?.isEmptyTab == false }) {
+            browsers.show(live, focused: liveFocus, focus: !commandBar.isOpen)
         }
         shell.layoutContentChildren()
         syncSidebarUI()
@@ -318,8 +330,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         }
         if CGFloat(store.prefs.sidebarWidth) != lastSidebarWidth {
             lastSidebarWidth = CGFloat(store.prefs.sidebarWidth)
-            shell.sidebarWidth = lastSidebarWidth
+            shell.sidebarWidth = lastSidebarWidth + (sidebarUI.libraryPage != nil ? LibraryMetrics.extraWidth : 0)
         }
+    }
+
+    /// The browser window the user is in (AppDelegate follows the key window).
+    private var isActiveWindow: Bool { store.activeWindowID == windowID }
+
+    /// The tab's page belongs to another window that has it open: the window in use takes it,
+    /// others keep it where it is. Windows restored at launch (none has the page yet, and
+    /// `app.mainWindows` is still empty) leave it to the window in use, else the first one.
+    private func showsElsewhere(_ id: UUID) -> Bool {
+        if isActiveWindow || browsers.runtime(for: id) != nil { return false }
+        if app.mainWindows.contains(where: { $0 !== self && $0.browsers.runtime(for: id) != nil }) { return true }
+        let windows = store.prefs.windows
+        let showing = windows.filter { store.visiblePaneTabIDs(in: store.focusedSpaceID(window: $0.id), window: $0.id).contains(id) }
+        if showing.contains(where: { $0.id == store.activeWindowID }) { return true }
+        return showing.first.map { $0.id != windowID } ?? false
     }
 
     private func syncSidebarUI() {
@@ -997,8 +1024,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
             _ = store.resetPinnedTab(id)
             for w in app.mainWindows { w.browsers.unload(id) }
             if wasSelected {
-                // Arc goes back to the tab used before this one.
-                store.selectTab(store.mostRecentTab(in: focusedSpaceID, excluding: id), window: windowID)
+                // Arc goes back to the tab used before this one, if it is still open. A pinned
+                // tab that was closed (unloaded) doesn't count: two of them would otherwise hand
+                // the selection back and forth on every ⌘W, reloading each other.
+                let back = store.recentTabs(in: focusedSpaceID, limit: .max)
+                    .first { $0 != id && (!store.isPinned($0) || app.runtime(for: $0) != nil) }
+                store.selectTab(back, window: windowID)
             }
         } else {
             store.archiveTab(id, reason: .manual)
@@ -1047,8 +1078,61 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
     // MARK: Sidebar
 
     func toggleSidebar() {
+        if sidebarUI.libraryPage != nil {
+            // The Library brought the sidebar out: leaving it hides the sidebar again.
+            let showed = libraryShowedSidebar
+            closeLibrary()
+            if showed { return }
+        }
         sidebarVisible.toggle()
         if !sidebarVisible { setFloatingSidebar(false) }
+    }
+
+    // MARK: Library
+
+    /// Set when the Library brought a hidden sidebar out; leaving it hides the sidebar again.
+    private var libraryShowedSidebar = false
+
+    /// Arc's Library button and ⇧⌘L: open the Library on the page last shown, or leave it.
+    func toggleLibrary() {
+        if sidebarUI.libraryPage != nil { closeLibrary() } else { showLibrary(sidebarUI.lastLibraryPage) }
+    }
+
+    /// The Library takes over the sidebar, which widens for its page rail (LibraryView).
+    func showLibrary(_ page: LibraryPage) {
+        sidebarUI.lastLibraryPage = page
+        let opening = sidebarUI.libraryPage == nil
+        withAnimation(.easeOut(duration: 0.05)) { sidebarUI.libraryPage = page }
+        guard opening else { return }
+        sidebarUI.downloadsListOpen = false
+        commandBar.close()
+        shell.sidebarResizable = false
+        let width = CGFloat(store.prefs.sidebarWidth) + LibraryMetrics.extraWidth
+        if sidebarVisible {
+            shell.sidebarWidth = width
+            shell.animateSidebar(visible: true, floating: false, fullscreen: shell.contentFullscreen, width: width)
+        } else {
+            setFloatingSidebar(false)
+            libraryShowedSidebar = true
+            shell.sidebarWidth = width
+            sidebarVisible = true
+        }
+        window?.makeKey()
+    }
+
+    func closeLibrary() {
+        guard sidebarUI.libraryPage != nil else { return }
+        withAnimation(.easeOut(duration: 0.1)) { sidebarUI.libraryPage = nil }
+        shell.sidebarResizable = true
+        let width = CGFloat(store.prefs.sidebarWidth)
+        shell.sidebarWidth = width
+        if libraryShowedSidebar {
+            libraryShowedSidebar = false
+            sidebarVisible = false
+        } else {
+            shell.animateSidebar(visible: shell.sidebarVisible, floating: false, fullscreen: shell.contentFullscreen, width: width, duration: 0.1)
+        }
+        currentBrowser?.setFocused(true)
     }
 
     /// Arc's floating sidebar lives in its own panel above the page windows (see FloatingSidebarController).
@@ -1086,6 +1170,30 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
             target.makeKey()
             return event
         }
+        // Middle-click on a sidebar tab closes it, like Arc and Chrome (SwiftUI has no
+        // gesture for the middle button; rows report the hovered tab instead).
+        middleClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseUp) { [weak self] event in
+            guard let self, event.buttonNumber == 2, let window = self.window, let target = event.window,
+                  target === window || target.parent === window, !CraCEFRuntime.isPageWindow(target),
+                  let id = self.sidebarUI.hoveredTabID else { return event }
+            self.middleClickClose(id)
+            return nil
+        }
+    }
+
+    /// What the row's hover button does: close every picked tab when this is one of them;
+    /// the open pinned tab unloads and stays pinned, another pinned tab is archived.
+    private func middleClickClose(_ id: UUID) {
+        let group = sidebarUI.group(for: id, in: store)
+        withAnimation(.snappy(duration: 0.22, extraBounce: 0)) {
+            if group.count == 1, store.isPinned(id), selectedTabID != id {
+                store.archiveTab(id, reason: .manual)
+            } else {
+                let open = selectedTabID
+                for t in group.filter({ $0 != open }) + group.filter({ $0 == open }) { closeTab(t) }
+                sidebarUI.multiSelection.subtract(group)
+            }
+        }
     }
 
     /// Two-finger swipes over the sidebar page between spaces the way Dia does
@@ -1102,7 +1210,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
             switch event.phase {
             case .mayBegin, .began:
                 let p = self.shell.convert(event.locationInWindow, from: nil)
+                // The Library's lists don't page between spaces.
                 let overSidebar = (self.shell.sidebarVisible || self.shell.floatingSidebar) && self.shell.sidebarHost.frame.contains(p)
+                    && self.sidebarUI.libraryPage == nil
                 self.swipeAxis = overSidebar ? .undecided : .vertical
                 self.swipeX = 0
                 self.swipeY = 0
@@ -1590,7 +1700,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
-        if (notification.object as? NSWindow) === window { shell.windowActive = true }
+        guard (notification.object as? NSWindow) === window else { return }
+        shell.windowActive = true
+        reclaimPages()
+    }
+
+    func windowDidBecomeMain(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === window else { return }
+        reclaimPages()
+    }
+
+    /// Back in this window: pages that moved to another window come back (Arc's untargeted
+    /// reparenting). After AppDelegate has made this the active window.
+    private func reclaimPages() {
+        guard shell.paneCards.contains(where: \.showsElsewhere) else { return }
+        DispatchQueue.main.async { [weak self] in self?.refresh() }
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -1637,9 +1761,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         isTornDown = true
         dismissTransientUI()
         browsers.closeAll()
-        for monitor in [scrollMonitor, childClickMonitor].compactMap({ $0 }) { NSEvent.removeMonitor(monitor) }
+        for monitor in [scrollMonitor, childClickMonitor, middleClickMonitor].compactMap({ $0 }) { NSEvent.removeMonitor(monitor) }
         scrollMonitor = nil
         childClickMonitor = nil
+        middleClickMonitor = nil
         floatingSidebar?.hide(animated: false)
         floatingSidebar = nil
         for child in window?.childWindows ?? [] {
@@ -1680,25 +1805,7 @@ final class CraWindow: NSWindow {
     /// here: a double-click runs the title bar action, anything else drags the window.
     private static let titleStripHeight = CraMetrics.contentInset + 4
 
-    /// Presses that belong to sidebar controls and must never drag the window (the space
-    /// dock). The sidebar's hover flag alone misses a pointer that left a control mid-drag
-    /// and jumped back in, so these are checked where the press lands.
-    var holdsPress: (NSPoint) -> Bool = { _ in false }
-    /// Movable-by-background once a held press ends.
-    var movableAfterPress: () -> Bool = { true }
-    private(set) var holdingPress = false
-
     override func sendEvent(_ event: NSEvent) {
-        if event.type == .leftMouseDown, holdsPress(event.locationInWindow) {
-            holdingPress = true
-            isMovableByWindowBackground = false
-        }
-        defer {
-            if event.type == .leftMouseUp, holdingPress {
-                holdingPress = false
-                isMovableByWindowBackground = movableAfterPress()
-            }
-        }
         if event.type == .leftMouseDown, !styleMask.contains(.fullScreen),
            let content = contentView, event.locationInWindow.y >= content.bounds.height - Self.titleStripHeight,
            isTitleStrip(content.hitTest(content.convert(event.locationInWindow, from: nil))) {

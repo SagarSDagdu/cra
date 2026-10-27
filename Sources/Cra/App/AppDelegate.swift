@@ -18,10 +18,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var bootstrapped = false
     private var pendingURLs: [String] = []
     private var autoArchiveTimer: Timer?
+    private var tabSleepTimer: Timer?
     private var settingsWindow: NSWindow?
     private var settingsController: SettingsWindowController?
     private var isRelaunching = false
-    private var archiveWindow: NSWindow?
     private lazy var extensionsMenu = ExtensionsMenu(app: self)
     /// Arc's Little Arc windows: small, sidebar-less, disposable (see LittleWindowController).
     private(set) var littleWindows: [LittleWindowController] = []
@@ -67,6 +67,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         autoArchiveTimer = Timer.scheduledTimer(withTimeInterval: 1800, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.store.runAutoArchive() }
         }
+        tabSleepTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.sleepIdleTabs() }
+        }
+        LiveFolderManager.shared.start(store: store)
         // A restart into an update while the user was away leaves the front app alone.
         if !SoftwareUpdater.shared.launchedByAutoUpdate { NSApp.activate(ignoringOtherApps: true) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.installURLEventHandler() }
@@ -151,6 +155,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             CraCEFRuntime.loadBlockedDomains(fromFile: path, completion: nil)
         }
         observeContentBlocking()
+        observeHttpsOnly()
+    }
+
+    private func sleepIdleTabs() {
+        guard store.settings.tabSleepEnabled else { return }
+        for w in mainWindows { w.browsers.sleepIdleTabs(hiddenLongerThan: store.settings.tabSleep.seconds) }
+    }
+
+    /// Settings > Privacy > "Always use secure connections", live like content blocking.
+    private func observeHttpsOnly() {
+        let enabled = withObservationTracking {
+            store.settings.httpsOnly
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.observeHttpsOnly() }
+        }
+        CraCEFRuntime.setHttpsOnlyModeEnabled(enabled)
     }
 
     private func observeContentBlocking() {
@@ -505,7 +525,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case "dismiss":
             main.dismissTransientUI()
             settingsWindow?.close()
-            archiveWindow?.close()
         default:
             break
         }
@@ -627,6 +646,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case "newFolder":
             let f = store.createFolder(named: "New Folder", in: store.focusedSpace.pinnedContainerID, index: 0)
             main.sidebarUI.renamingID = f.id
+        case "newGitHubLiveFolder":
+            guard !main.isIncognito else { break }
+            let sid = store.focusedSpace.id
+            let isNew = store.liveFolder(.github, inSpace: sid) == nil
+            guard let f = store.createLiveFolder(.github, inSpace: sid) else { break }
+            store.setExpanded(f.id, true)
+            if isNew { LiveFolderManager.shared.refresh(f.id) }
         case "newSpace": main.showSpaceEditor(space: nil)
         case "editSpace": if !main.isIncognito { main.showSpaceEditor(space: store.focusedSpace) }
         case "deleteSpace": if !main.isIncognito { confirmDeleteSpace(store.focusedSpace) }
@@ -664,9 +690,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             // Toggle, like Chrome: ⌥⌘I closes the dock when it is already open.
             if let b = main.currentBrowser { b.hasDevTools ? b.closeDevTools() : b.showDevTools() }
         case "inspectElement": main.currentBrowser?.showDevTools()
-        case "viewArchive", "openLibrary": showArchiveWindow()
-        case "viewDownloads":
-            NSWorkspace.shared.open(FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0])
+        // Arc's Library is a mode of the window's sidebar; ⇧⌘J opens it on Downloads.
+        case "openLibrary": main.toggleLibrary()
+        case "viewArchive": main.showLibrary(.archive)
+        case "viewDownloads": main.showLibrary(.downloads)
         case "goBack": main.currentBrowser?.goBack()
         case "goForward": main.currentBrowser?.goForward()
         case "pinTab": if let c = current { store.togglePinned(c) }
@@ -746,23 +773,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             settingsWindow = c.window
         }
         settingsWindow?.makeKeyAndOrderFront(nil)
-    }
-
-    func showArchiveWindow() {
-        if archiveWindow == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 560), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-            w.title = "Library"
-            w.contentView = NSHostingView(rootView: ArchiveView(onRestore: { [weak self] id in
-                self?.useNormalWindow()
-                self?.store.restoreArchived(id)
-                self?.archiveWindow?.close()
-                self?.main.showWindow(nil)
-            }).environment(store).environment(favicons))
-            w.isReleasedWhenClosed = false
-            w.center()
-            archiveWindow = w
-        }
-        archiveWindow?.makeKeyAndOrderFront(nil)
     }
 
     // MARK: Menus (Arc's layout)

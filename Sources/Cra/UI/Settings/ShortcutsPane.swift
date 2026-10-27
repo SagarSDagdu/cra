@@ -251,6 +251,7 @@ enum ShortcutDescriptions {
         "reopenClosedTab": "Bring back the tab you closed last.",
         "editURL": "Open the command bar to search or enter a URL.",
         "newFolder": "Create a folder in the sidebar.",
+        "newGitHubLiveFolder": "Add a folder that fills itself with your open pull requests and review requests.",
         "newSpace": "Create a new space.",
         "closeWindow": "Close the current window.",
         "closeTab": "Close the current tab.",

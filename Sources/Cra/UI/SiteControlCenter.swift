@@ -341,7 +341,7 @@ private struct SiteControlCenterMoreButton: View {
     }
 }
 
-private final class BlockMenuItem: NSMenuItem {
+final class BlockMenuItem: NSMenuItem {
     private let block: () -> Void
     init(title: String, action: @escaping () -> Void) {
         block = action

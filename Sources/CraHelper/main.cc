@@ -1,10 +1,17 @@
 // Entry point for every Chromium subprocess (renderer, GPU, utility, plugin,
-// alerts). Loads the framework from the enclosing Cra.app bundle and hands
-// control to CEF.
+// alerts). Enters the macOS sandbox, then loads the framework from the
+// enclosing Cra.app bundle and hands control to CEF.
 #include "include/cef_app.h"
+#include "include/cef_sandbox_mac.h"
 #include "include/wrapper/cef_library_loader.h"
 
 int main(int argc, char* argv[]) {
+  // The seatbelt profile has to be in place before the framework loads.
+  // libcef_sandbox.dylib ships inside the framework (Libraries/).
+  CefScopedSandboxContext sandbox_context;
+  if (!sandbox_context.Initialize(argc, argv)) {
+    return 1;
+  }
   CefScopedLibraryLoader library_loader;
   if (!library_loader.LoadInHelper()) {
     return 1;
