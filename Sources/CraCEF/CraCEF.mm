@@ -38,10 +38,18 @@
 // MARK: - Globals
 
 static CefScopedLibraryLoader* g_libraryLoader = nullptr;
+static CefRefPtr<CefRequestContext> g_incognitoContext;
+/// Arc's Profiles: one request context per profile folder (spaces that share a profile share it).
+static std::map<std::string, CefRefPtr<CefRequestContext>> g_profileContexts;
+/// Profiles that finished loading, and browsers waiting for theirs: a Chrome-style
+/// browser view can't be made in a profile still loading from disk (CEF returns null).
+static NSMutableSet<NSString*>* g_readyProfiles = nil;
+static NSMutableDictionary<NSString*, NSMutableArray<CraBrowser*>*>* g_waitingForProfile = nil;
 static std::atomic<bool> g_contextInitialized{false};
 static std::atomic<int> g_liveBrowsers{0};
 static bool g_quitting = false;
 static bool g_useChromeStyle = false;
+static bool g_useMockKeychain = false;
 static BOOL g_chromeHosting = NO;
 static NSMutableArray<CraBrowser*>* g_pendingCreation = nil;
 static void (^g_relaunchHandler)(NSArray<NSString*>*) = nil;
@@ -99,6 +107,7 @@ static CraClient* AsCraClient(CefClient* c) {
 @property (nonatomic) BOOL closedByPage;
 @property (nonatomic) BOOL isInPictureInPicture;
 @property (nonatomic) BOOL isPictureInPicturePlaying;
+@property (nonatomic) BOOL isCapturingMedia;
 - (void)requestPictureInPictureInFrame:(CefRefPtr<CefFrame>)frame automatic:(BOOL)automatic x:(int)x y:(int)y;
 - (void)adoptBrowser:(CefRefPtr<CefBrowser>)browser;
 - (void)devToolsBrowserCreated:(CefRefPtr<CefBrowser>)browser;
@@ -107,9 +116,12 @@ static CraClient* AsCraClient(CefClient* c) {
 - (CefRefPtr<CefBrowser>)cefBrowser;
 - (CefRefPtr<CefClient>)cefClient;
 - (void)createNow;
+- (CefRefPtr<CefRequestContext>)requestContext;
 - (void)hostWindowCreated:(NSWindow*)window;
 - (void)hostPopupBrowserView:(CefRefPtr<CefBrowserView>)view;
 @property (nonatomic, strong, nullable) NSWindow* hostWindow;
+/// The page's background as last reported by kBackgroundProbe (ARGB, white until then).
+@property (nonatomic) cef_color_t pageBackgroundColor;
 @end
 
 // MARK: - CEF app
@@ -265,6 +277,88 @@ static NSString* ManagedAuthServerAllowlist() {
     return nil;
 }
 
+/// Before any page loads: with mDNS off, the default policy would hand pages
+/// the real local IP. Pages get the public address STUN reports and nothing else.
+static void ApplyWebRTCPolicy(CefRefPtr<CefRequestContext> context) {
+    CefRefPtr<CefValue> policy = CefValue::Create();
+    policy->SetString("default_public_interface_only");
+    CefString error;
+    if (!context->SetPreference("webrtc.ip_handling_policy", policy, error)) {
+        NSLog(@"CraCEF: webrtc.ip_handling_policy: %s", error.ToString().c_str());
+    }
+}
+
+/// Cra shows downloads itself, the way Arc does (ADK hands Arc the download and Arc's own UI
+/// shows it; Chrome's toolbar UI never appears). Chrome's download bubble ("Recent download
+/// history") still pops up when a download finishes: with no toolbar to anchor to it is an
+/// invisible window over the page that swallows the next click. This is Chrome's "Show
+/// downloads when they're done" setting.
+static void HideDownloadBubble(CefRefPtr<CefRequestContext> context) {
+    CefRefPtr<CefValue> off = CefValue::Create();
+    off->SetBool(false);
+    CefString error;
+    if (!context->SetPreference("download_bubble.partial_view_enabled", off, error)) {
+        NSLog(@"CraCEF: download_bubble.partial_view_enabled: %s", error.ToString().c_str());
+    }
+}
+
+static void ApplyProfilePreferences(CefRefPtr<CefRequestContext> context) {
+    ApplyWebRTCPolicy(context);
+    HideDownloadBubble(context);
+}
+
+/// Profiles other than the global Default one get the same preferences once they load,
+/// then create the browsers that waited for them.
+class ProfileContextHandler : public CefRequestContextHandler {
+public:
+    explicit ProfileContextHandler(NSString* path = nil) : path_([path copy]) {}
+    void OnRequestContextInitialized(CefRefPtr<CefRequestContext> context) override {
+        ApplyProfilePreferences(context);
+        if (!path_) return;
+        if (!g_readyProfiles) g_readyProfiles = [NSMutableSet set];
+        [g_readyProfiles addObject:path_];
+        NSArray<CraBrowser*>* waiting = [g_waitingForProfile[path_] copy];
+        [g_waitingForProfile removeObjectForKey:path_];
+        for (CraBrowser* b in waiting) [b createNow];
+    }
+private:
+    NSString* path_;
+    IMPLEMENT_REFCOUNTING(ProfileContextHandler);
+};
+
+/// Incognito windows share one off-the-record profile (an empty cache path keeps
+/// cookies, storage and cache in memory) until the last of them closes.
+static CefRefPtr<CefRequestContext> IncognitoContext() {
+    if (!g_incognitoContext) g_incognitoContext = CefRequestContext::CreateContext(CefRequestContextSettings(), new ProfileContextHandler());
+    return g_incognitoContext;
+}
+
+/// A space's own profile: cookies, logins, storage and cache in a folder next to
+/// Default (it must sit under root_cache_path). nil is the global Default profile.
+static CefRefPtr<CefRequestContext> ProfileContext(NSString* path) {
+    if (!path.length) return nullptr;
+    std::string key = path.UTF8String;
+    auto it = g_profileContexts.find(key);
+    if (it != g_profileContexts.end()) return it->second;
+    CefRequestContextSettings settings;
+    CefString(&settings.cache_path) = CefStringFromNS(path);
+    settings.persist_session_cookies = true;
+    CefRefPtr<CefRequestContext> context = CefRequestContext::CreateContext(settings, new ProfileContextHandler(path));
+    g_profileContexts[key] = context;
+    return context;
+}
+
+/// Loads the profile if needed. NO means `browser` waits and is created once it has loaded.
+static BOOL ProfileReady(NSString* path, CraBrowser* browser) {
+    if (!path.length) return YES;
+    ProfileContext(path);
+    if ([g_readyProfiles containsObject:path]) return YES;
+    if (!g_waitingForProfile) g_waitingForProfile = [NSMutableDictionary dictionary];
+    if (!g_waitingForProfile[path]) g_waitingForProfile[path] = [NSMutableArray array];
+    if (![g_waitingForProfile[path] containsObject:browser]) [g_waitingForProfile[path] addObject:browser];
+    return NO;
+}
+
 class CraApp : public CefApp, public CefBrowserProcessHandler {
 public:
     CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
@@ -277,10 +371,11 @@ public:
     void OnBeforeCommandLineProcessing(const CefString& process_type,
                                        CefRefPtr<CefCommandLine> command_line) override {
         if (!process_type.empty()) return;
-        // Avoid the "wants to use your confidential information stored in
-        // Chromium Safe Storage" keychain prompt. Cookies are still encrypted,
-        // just with a key that is not in the user's keychain.
-        command_line->AppendSwitch("use-mock-keychain");
+        // Cookies and passwords are encrypted with the secret in the "Cra Safe Storage"
+        // Keychain item (SafeStorage.swift). Only unsigned dev builds on a profile that
+        // never used it keep the mock keychain, whose secret is a public constant: the
+        // Keychain would ask for the login password after every rebuild.
+        if (g_useMockKeychain) command_line->AppendSwitch("use-mock-keychain");
         // Chrome-style windows are ours; Chrome must not restore or reopen them.
         command_line->AppendSwitch("no-startup-window");
         command_line->AppendSwitch("disable-session-crashed-bubble");
@@ -353,14 +448,7 @@ public:
 
     void OnContextInitialized() override {
         CEF_REQUIRE_UI_THREAD();
-        // Before any page loads: with mDNS off, the default policy would hand pages
-        // the real local IP. Pages get the public address STUN reports and nothing else.
-        CefRefPtr<CefValue> policy = CefValue::Create();
-        policy->SetString("default_public_interface_only");
-        CefString error;
-        if (!CefRequestContext::GetGlobalContext()->SetPreference("webrtc.ip_handling_policy", policy, error)) {
-            NSLog(@"CraCEF: webrtc.ip_handling_policy: %s", error.ToString().c_str());
-        }
+        ApplyProfilePreferences(CefRequestContext::GetGlobalContext());
         g_contextInitialized = true;
         NSArray<CraBrowser*>* pending = [g_pendingCreation copy];
         [g_pendingCreation removeAllObjects];
@@ -729,6 +817,14 @@ public:
         [o.delegate browser:o didChangeLoading:isLoading canGoBack:canGoBack canGoForward:canGoForward];
     }
 
+    void OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, TransitionType transition_type) override {
+        // The last page's colour must not show under the next one while it loads.
+        CraBrowser* o = owner_;
+        if (!o || !frame->IsMain()) return;
+        o.pageBackgroundColor = CefColorSetARGB(255, 255, 255, 255);
+        if (CefRefPtr<CefBrowserView> view = CefBrowserView::GetForBrowser(browser)) view->SetBackgroundColor(o.pageBackgroundColor);
+    }
+
     void OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int httpStatusCode) override {
         // Every frame reports Picture in Picture changes (the events don't bubble, hence capture).
         frame->ExecuteJavaScript(
@@ -788,6 +884,12 @@ public:
         if (m.compare(0, bgPrefix.size(), bgPrefix) == 0) {
             CraBrowser* o = owner_;
             NSString* hex = HexFromCSSColor(m.substr(bgPrefix.size()));
+            if (o && hex.length) {
+                // Under the page (CraChromeViewDelegate::OnThemeChanged).
+                o.pageBackgroundColor = 0xFF000000 | (cef_color_t)strtoul(hex.UTF8String + 1, nullptr, 16);
+                if (CefRefPtr<CefBrowserView> view = CefBrowserView::GetForBrowser(browser))
+                    view->SetBackgroundColor(o.pageBackgroundColor);
+            }
             if (o && hex.length && [o.delegate respondsToSelector:@selector(browser:didReportBackgroundColor:)])
                 [o.delegate browser:o didReportBackgroundColor:hex];
             return true;
@@ -842,6 +944,17 @@ public:
         if (!o) return;
         o.currentTitle = NSStringFromCef(title);
         [o.delegate browser:o didChangeTitle:o.currentTitle];
+    }
+
+    // Arc's recording indicator ("This tab is using your camera or microphone").
+    void OnMediaAccessChange(CefRefPtr<CefBrowser> browser, bool has_video_access, bool has_audio_access) override {
+        CraBrowser* o = owner_;
+        if (!o) return;
+        BOOL capturing = has_video_access || has_audio_access;
+        if (capturing == o.isCapturingMedia) return;
+        o.isCapturingMedia = capturing;
+        if ([o.delegate respondsToSelector:@selector(browser:didChangeMediaCapture:)])
+            [o.delegate browser:o didChangeMediaCapture:capturing];
     }
 
     void OnFaviconURLChange(CefRefPtr<CefBrowser> browser, const std::vector<CefString>& icon_urls) override {
@@ -1119,6 +1232,14 @@ public:
         return devtools_ || getenv("CRA_NO_CHROME_TOOLBAR") ? CEF_CTT_NONE : CEF_CTT_NORMAL;
     }
     cef_runtime_style_t GetBrowserRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
+    // CEF hides Chrome's web contents background, which makes the first page of each renderer
+    // transparent (chromiumembedded/cef#3891): a page with no background of its own showed this
+    // view's dark-mode fill (#1F1F1F) until a reload gave it a renderer CEF paints white. The
+    // view takes the page's own colour instead; CEF resets it on every theme change.
+    void OnThemeChanged(CefRefPtr<CefView> view) override {
+        CraBrowser* o = owner_;
+        if (!devtools_) view->SetBackgroundColor(o ? o.pageBackgroundColor : CefColorSetARGB(255, 255, 255, 255));
+    }
     CefRefPtr<CefBrowserViewDelegate> GetDelegateForPopupBrowserView(CefRefPtr<CefBrowserView> browser_view,
                                                                      const CefBrowserSettings& settings,
                                                                      CefRefPtr<CefClient> client, bool is_devtools) override {
@@ -1204,9 +1325,21 @@ class CraDevToolsObserver : public CefDevToolsMessageObserver {
 }
 
 - (instancetype)initWithFrame:(NSRect)frame url:(NSString*)url delegate:(id<CraBrowserDelegate>)delegate {
+    return [self initWithFrame:frame url:url delegate:delegate incognito:NO];
+}
+
+- (instancetype)initWithFrame:(NSRect)frame url:(NSString*)url delegate:(id<CraBrowserDelegate>)delegate incognito:(BOOL)incognito {
+    return [self initWithFrame:frame url:url delegate:delegate incognito:incognito profilePath:nil];
+}
+
+- (instancetype)initWithFrame:(NSRect)frame url:(NSString*)url delegate:(id<CraBrowserDelegate>)delegate
+                    incognito:(BOOL)incognito profilePath:(NSString*)profilePath {
     self = [super init];
     if (!self) return nil;
     _delegate = delegate;
+    _isIncognito = incognito;
+    _profilePath = incognito ? nil : [profilePath copy];
+    _pageBackgroundColor = CefColorSetARGB(255, 255, 255, 255);
     _currentURL = url ?: @"";
     _currentTitle = @"";
     _pendingURL = url;
@@ -1230,10 +1363,12 @@ class CraDevToolsObserver : public CefDevToolsMessageObserver {
 
 - (void)createNow {
     if (_isClosed || _browser) return;
+    if (!_isIncognito && !ProfileReady(_profilePath, self)) return;
     if (g_chromeHosting) {
         CefBrowserSettings settings;
         CefRefPtr<CefBrowserView> view = CefBrowserView::CreateBrowserView(
-            _client, CefStringFromNS(_pendingURL ?: @"about:blank"), settings, nullptr, nullptr, new CraChromeViewDelegate(self));
+            _client, CefStringFromNS(_pendingURL ?: @"about:blank"), settings, nullptr,
+            [self requestContext], new CraChromeViewDelegate(self));
         CefWindow::CreateTopLevelWindow(new CraChromeWindowDelegate(self, view));
         return;
     }
@@ -1244,7 +1379,11 @@ class CraDevToolsObserver : public CefDevToolsMessageObserver {
     if (g_useChromeStyle) windowInfo.runtime_style = CEF_RUNTIME_STYLE_CHROME;
     CefBrowserSettings settings;
     CefBrowserHost::CreateBrowser(windowInfo, _client, CefStringFromNS(_pendingURL ?: @"about:blank"), settings,
-                                  nullptr, nullptr);
+                                  nullptr, [self requestContext]);
+}
+
+- (CefRefPtr<CefRequestContext>)requestContext {
+    return _isIncognito ? IncognitoContext() : ProfileContext(_profilePath);
 }
 
 - (CefRefPtr<CefBrowser>)cefBrowser { return _browser; }
@@ -1292,6 +1431,7 @@ class CraDevToolsObserver : public CefDevToolsMessageObserver {
 - (void)reload { if (_browser) _browser->Reload(); }
 - (void)reloadIgnoringCache { if (_browser) _browser->ReloadIgnoreCache(); }
 - (void)stopLoading { if (_browser) _browser->StopLoad(); }
+- (void)exitFullscreen { if (_browser) _browser->GetHost()->ExitFullscreen(true); }
 
 - (void)setFocused:(BOOL)focused {
     if (_browser) _browser->GetHost()->SetFocus(focused);
@@ -1567,10 +1707,10 @@ private:
 // Chrome window (title bar, location bar) the moment the first browser is
 // created. Cra restores its own tabs, so the saved session is dropped and the
 // profile marked clean before Chromium reads it.
-static void MarkProfileExitedCleanly(NSString* cachePath) {
-    NSString* sessions = [cachePath stringByAppendingPathComponent:@"Default/Sessions"];
+static void MarkProfileExitedCleanly(NSString* profileDir) {
+    NSString* sessions = [profileDir stringByAppendingPathComponent:@"Sessions"];
     [[NSFileManager defaultManager] removeItemAtPath:sessions error:nil];
-    NSString* prefs = [cachePath stringByAppendingPathComponent:@"Default/Preferences"];
+    NSString* prefs = [profileDir stringByAppendingPathComponent:@"Preferences"];
     NSData* data = [NSData dataWithContentsOfFile:prefs];
     if (!data) return;
     NSError* error = nil;
@@ -1629,9 +1769,11 @@ static void MarkProfileExitedCleanly(NSString* cachePath) {
 + (BOOL)initializeWithCachePath:(NSString*)cachePath
                userAgentProduct:(NSString*)product
                         logPath:(NSString*)logPath
-                 useChromeStyle:(BOOL)useChromeStyle {
+                 useChromeStyle:(BOOL)useChromeStyle
+                useMockKeychain:(BOOL)useMockKeychain {
     if (g_libraryLoader) return YES;
     g_useChromeStyle = useChromeStyle;
+    g_useMockKeychain = useMockKeychain;
     g_libraryLoader = new CefScopedLibraryLoader();
     if (!g_libraryLoader->LoadInMain()) {
         NSLog(@"CraCEF: failed to load Chromium Embedded Framework");
@@ -1651,7 +1793,12 @@ static void MarkProfileExitedCleanly(NSString* cachePath) {
     settings.log_severity = LOGSEVERITY_WARNING;
     settings.background_color = CefColorSetARGB(255, 255, 255, 255);
 
-    MarkProfileExitedCleanly(cachePath);
+    // Default plus the spaces' own profiles ("Profile <id>").
+    for (NSString* name in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:cachePath error:nil]) {
+        if ([name isEqualToString:@"Default"] || [name hasPrefix:@"Profile "]) {
+            MarkProfileExitedCleanly([cachePath stringByAppendingPathComponent:name]);
+        }
+    }
     CefRefPtr<CraApp> app(new CraApp());
     if (!CefInitialize(mainArgs, settings, app.get(), nullptr)) {
         int code = CefGetExitCode();
@@ -1673,7 +1820,12 @@ static void MarkProfileExitedCleanly(NSString* cachePath) {
 
 + (void)runMessageLoop { CefRunMessageLoop(); }
 + (void)quitMessageLoop { CraQuitMessageLoop(); }
-+ (void)shutdown { CefShutdown(); }
++ (void)shutdown {
+    g_incognitoContext = nullptr;
+    g_profileContexts.clear();
+    g_waitingForProfile = nil;
+    CefShutdown();
+}
 
 + (void)closeAllBrowsersAndQuit {
     g_quitting = true;
@@ -1687,6 +1839,7 @@ static void MarkProfileExitedCleanly(NSString* cachePath) {
 }
 
 + (NSInteger)liveBrowserCount { return g_liveBrowsers; }
++ (void)endIncognitoSession { g_incognitoContext = nullptr; }
 + (NSString*)chromiumVersion {
     return [NSString stringWithFormat:@"%d.%d.%d.%d", CHROME_VERSION_MAJOR, CHROME_VERSION_MINOR,
             CHROME_VERSION_BUILD, CHROME_VERSION_PATCH];

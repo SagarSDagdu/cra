@@ -8,13 +8,24 @@ MainActor.assumeIsolated {
     let delegate = AppDelegate()
     app.delegate = delegate
 
+    // The newest copy of Cra runs: an older install opens a newer one, and an older
+    // Cra holding the profile quits rather than receiving this launch (NewestCopy).
+    NewestCopy.openNewerInstalledCopy()
+    NewestCopy.replaceOlderRunningCopy()
+
     // Passwords and cookies staged by the import go into the profile while no
     // Chromium has it open: before initializing, and only when no other Cra runs.
+    // The run loop has not started, so the list can still hold a Cra that just quit.
     let me = ProcessInfo.processInfo.processIdentifier
-    if !NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "").contains(where: { $0.processIdentifier != me }) {
+    let profileIsFree = !NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "").contains(where: { $0.processIdentifier != me && kill($0.processIdentifier, 0) == 0 })
+    // Cookies and passwords move from the mock keychain to Cra's Keychain item first,
+    // staged imports included, so everything below writes with the key Chromium reads.
+    SafeStorage.prepare(profileIsFree: profileIsFree)
+    if profileIsFree {
         let profile = AppPaths.chromiumCache.appendingPathComponent("Default", isDirectory: true)
         if CredentialImport.hasPending { CredentialImport.applyPending(profileDir: profile) }
         CredentialImport.repairImportedCookies(profileDir: profile)
+        ProfileCleanup.run()
     }
 
     NativeMessagingHosts.link(into: AppPaths.chromiumCache)
@@ -23,7 +34,8 @@ MainActor.assumeIsolated {
     let started = CraCEFRuntime.initialize(withCachePath: AppPaths.chromiumCache.path,
                                            userAgentProduct: "",
                                            logPath: AppPaths.log.path,
-                                           useChromeStyle: useChromeStyle)
+                                           useChromeStyle: useChromeStyle,
+                                           useMockKeychain: !SafeStorage.usesKeychain)
     if !started && CraCEFRuntime.anotherInstanceWasNotified() {
         // The running Cra got our command line; just activate it.
         NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "dk.kildahl.cra")

@@ -59,7 +59,7 @@ struct UpdateBanner: View {
                             .onHover { hoverClose = $0 }
                             .onTapGesture { SoftwareUpdater.shared.dismissBanner() }
                             .padding(6)
-                            .help("Dismiss")
+                            .arcTooltip("Dismiss")
                     }
                 }
                 .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))

@@ -1,5 +1,25 @@
 import Foundation
 
+/// Folders of deleted profiles, removed before Chromium starts (it keeps a loaded
+/// profile's files open for the rest of the session).
+enum ProfileCleanup {
+    private static var file: JSONStore<[String]> { JSONStore("deleted-profiles.json") }
+
+    static func schedule(_ directoryName: String) {
+        file.saveNow(Array(Set(file.load(or: { [] }) + [directoryName])))
+    }
+
+    /// Call before Chromium initializes.
+    static func run() {
+        let names = file.load(or: { [] })
+        guard !names.isEmpty else { return }
+        for name in names where name.hasPrefix("Profile ") {
+            try? FileManager.default.removeItem(at: AppPaths.chromiumCache.appendingPathComponent(name, isDirectory: true))
+        }
+        file.saveNow([])
+    }
+}
+
 enum AppPaths {
     static let supportDir: URL = {
         // CRA_DATA_DIR runs a second, independent Cra (testing next to the installed one).

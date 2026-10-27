@@ -64,7 +64,7 @@ struct FavoriteCell: View {
     @State private var hover = false
     @State private var targeted = false
 
-    private var selected: Bool { store.selectedTabID(in: space.id) == item.id }
+    private var selected: Bool { store.selectedTabID(in: space.id, window: ui.windowID) == item.id }
     private var tileColor: String? { item.tab?.tileColor }
     private var tileIsDark: Bool { tileColor.flatMap(HexColor.luminance).map { $0 < 0.5 } ?? palette.isDark }
 
@@ -100,8 +100,8 @@ struct FavoriteCell: View {
         .frame(height: 47)
         .contentShape(RoundedRectangle(cornerRadius: 13))
         .onHover { hover = $0; ui.hoverDraggable(item.id, $0) }
-        .onTapGesture { ui.keyboardFocusID = nil; store.selectTab(item.id) }
-        .help(item.displayTitle)
+        .onTapGesture { ui.keyboardFocusID = nil; store.selectTab(item.id, window: ui.windowID) }
+        .arcTooltip(item.displayTitle, followsCursor: true)
         .draggable(SidebarDragItem.begin(item.id, session))
         .dropDestination(for: SidebarDragItem.self) { items, location in
             guard let d = items.first, d.id != item.id,

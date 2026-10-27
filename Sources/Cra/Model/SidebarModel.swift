@@ -232,6 +232,9 @@ struct SpaceTheme: Codable, Equatable {
         SpaceTheme(colors: ["#F4F1EA", "#E6DCC8"], intensity: 0.6, noise: 0.15, appearance: "light"),  // Parchment
     ]
 
+    /// Incognito windows: near-black with a cool violet cast, so they never pass for a space.
+    static let incognito = SpaceTheme(colors: ["#141318", "#2B2638"], intensity: 0.9, noise: 0.14, appearance: "dark")
+
     var isDark: Bool {
         if appearance == "dark" { return true }
         if appearance == "light" { return false }
@@ -262,6 +265,18 @@ struct Space: Identifiable, Codable, Equatable {
     var pinnedContainerID: UUID
     var todayContainerID: UUID
     var createdAt: Date
+    /// The profile its pages load in (Arc: SpaceModel.profile); nil is the Default profile.
+    var profileID: UUID?
+}
+
+/// Arc's Profiles: logins, cookies, site storage and Chromium's own data kept apart
+/// from the Default profile. Any number of spaces can use one.
+struct BrowserProfile: Identifiable, Codable, Equatable {
+    var id: UUID
+    var name: String
+
+    /// Chromium's folder for it, next to Default under AppPaths.chromiumCache.
+    var directoryName: String { "Profile \(id.uuidString)" }
 }
 
 struct SidebarDocument: Codable {
@@ -272,6 +287,8 @@ struct SidebarDocument: Codable {
     /// split it up between the spaces; new files leave it out.
     var favoritesContainerID: UUID?
     var items: [SidebarItem]
+    /// Profiles besides Default (missing in files from before profiles).
+    var profiles: [BrowserProfile]?
 
     static func fresh() -> SidebarDocument {
         let spaceID = UUID()
@@ -400,14 +417,31 @@ struct AppSettings: Codable, Equatable {
     }
 }
 
+/// One browser window. Each window shows its own space and remembers its own
+/// open tab per space; spaces and tabs themselves are shared (Arc).
+struct WindowSession: Codable, Equatable, Identifiable {
+    var id = UUID()
+    var focusedSpaceID: UUID?
+    var selectedTabPerSpace: [UUID: UUID] = [:]
+    var frame: String?
+    var sidebarVisible = true
+    /// Incognito windows show a space of their own, never saved (SidebarStore.addIncognitoWindow).
+    var isIncognito = false
+}
+
 struct WindowPrefs: Codable, Equatable {
     var sidebarWidth: Double = 328
-    var sidebarVisible: Bool = true
-    var focusedSpaceID: UUID?
     var expandedFolders: Set<UUID> = []
     var collapsedPinnedSpaces: Set<UUID> = []
-    var selectedTabPerSpace: [UUID: UUID] = [:]
-    var windowFrame: String?
+    /// Open browser windows, restored at launch. Never empty.
+    var windows: [WindowSession] = [WindowSession()]
+
+    /// What is written to windows.json: incognito windows are never restored.
+    var withoutIncognito: WindowPrefs {
+        var p = self
+        p.windows.removeAll { $0.isIncognito }
+        return p
+    }
     /// Last Little Window size (Arc: LittleBrowserWindow_size).
     var littleWindowSize: String?
 }
@@ -465,16 +499,35 @@ extension AppSettings {
 }
 
 extension WindowPrefs {
+    /// Single-window builds kept the window's state at the top level.
+    private enum LegacyKeys: String, CodingKey { case sidebarVisible, focusedSpaceID, selectedTabPerSpace, windowFrame }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         sidebarWidth = try c.decodeIfPresent(Double.self, forKey: .sidebarWidth) ?? 328
-        sidebarVisible = try c.decodeIfPresent(Bool.self, forKey: .sidebarVisible) ?? true
-        focusedSpaceID = try c.decodeIfPresent(UUID.self, forKey: .focusedSpaceID)
         expandedFolders = try c.decodeIfPresent(Set<UUID>.self, forKey: .expandedFolders) ?? []
         collapsedPinnedSpaces = try c.decodeIfPresent(Set<UUID>.self, forKey: .collapsedPinnedSpaces) ?? []
-        selectedTabPerSpace = try c.decodeIfPresent([UUID: UUID].self, forKey: .selectedTabPerSpace) ?? [:]
-        windowFrame = try c.decodeIfPresent(String.self, forKey: .windowFrame)
+        if let saved = try? c.decodeIfPresent([WindowSession].self, forKey: .windows), !saved.isEmpty {
+            windows = saved
+        } else {
+            let legacy = try decoder.container(keyedBy: LegacyKeys.self)
+            windows = [WindowSession(focusedSpaceID: try legacy.decodeIfPresent(UUID.self, forKey: .focusedSpaceID),
+                                     selectedTabPerSpace: try legacy.decodeIfPresent([UUID: UUID].self, forKey: .selectedTabPerSpace) ?? [:],
+                                     frame: try legacy.decodeIfPresent(String.self, forKey: .windowFrame),
+                                     sidebarVisible: try legacy.decodeIfPresent(Bool.self, forKey: .sidebarVisible) ?? true)]
+        }
         littleWindowSize = try c.decodeIfPresent(String.self, forKey: .littleWindowSize)
+    }
+}
+
+extension WindowSession {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        focusedSpaceID = try c.decodeIfPresent(UUID.self, forKey: .focusedSpaceID)
+        selectedTabPerSpace = try c.decodeIfPresent([UUID: UUID].self, forKey: .selectedTabPerSpace) ?? [:]
+        frame = try c.decodeIfPresent(String.self, forKey: .frame)
+        sidebarVisible = try c.decodeIfPresent(Bool.self, forKey: .sidebarVisible) ?? true
     }
 }
 
@@ -490,6 +543,7 @@ extension Space {
         pinnedContainerID = try c.decode(UUID.self, forKey: .pinnedContainerID)
         todayContainerID = try c.decode(UUID.self, forKey: .todayContainerID)
         createdAt = try c.decode(Date.self, forKey: .createdAt)
+        profileID = try c.decodeIfPresent(UUID.self, forKey: .profileID)
     }
 }
 

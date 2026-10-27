@@ -57,6 +57,12 @@ testing without touching the keyboard):
     open "cra://open?url=https://example.com&background=1"
     open "cra://dismiss"                    # close sheets, command bar, find bar
 
+Links from other apps and browsers only reach `commandbar`, `dismiss` and `open` with an
+http(s) URL; pages inside Cra reach none of them. The rest (`action`, `navigate`, `key`,
+`import`, `debug`) run scripts and DevTools Protocol commands, so they need either
+`defaults write dk.kildahl.cra scriptingURLs -bool YES` or a test instance's
+`CRA_COMMAND_FILE`.
+
 ## Little Windows (Arc's Little Arc)
 
 Links from other apps open in a Little Window: a small, sidebar-less window with one

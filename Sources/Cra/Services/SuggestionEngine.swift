@@ -71,9 +71,12 @@ final class SuggestionEngine {
         var items: [Suggestion] = []
         let typed = typedRow(query: query)
         items.append(contentsOf: tabSuggestions(q, excluding: currentTabID))
-        items.append(contentsOf: archiveSuggestions(q))
-        items.append(contentsOf: historySuggestions(q, openURLs: Set(store.allTabs().compactMap { $0.tab?.url })))
-        items.append(contentsOf: topDomainSuggestions(q))
+        // Incognito: the window's own tabs, search and commands; nothing from the normal profile.
+        if !incognito {
+            items.append(contentsOf: archiveSuggestions(q))
+            items.append(contentsOf: historySuggestions(q, openURLs: Set(store.profileTabs(window: nil).compactMap { $0.tab?.url })))
+            items.append(contentsOf: topDomainSuggestions(q))
+        }
         items.append(contentsOf: commandSuggestions(q, currentTabID: currentTabID))
 
         // Learned: the user picked this URL for this query before.
@@ -133,9 +136,12 @@ final class SuggestionEngine {
 
     // MARK: Sources
 
+    /// The command bar is open in an incognito window (it acts on the window in use).
+    private var incognito: Bool { store.window().isIncognito }
+
     private func tabSuggestions(_ q: String, excluding current: UUID?) -> [Suggestion] {
         var out: [Suggestion] = []
-        for tab in store.allTabs() where tab.id != current {
+        for tab in store.profileTabs(window: nil) where tab.id != current {
             guard let t = tab.tab else { continue }
             var score = textScore(q, title: tab.displayTitle, url: t.url)
             if let custom = tab.title?.lowercased(), custom.hasPrefix(q) { score += 40 }
@@ -213,7 +219,7 @@ final class SuggestionEngine {
             out.append(Suggestion(id: "cmd:\(a.id)", kind: .command(a.id), title: a.name, subtitle: "Command",
                                   url: nil, faviconKey: nil, symbol: "command", trailing: a.primary?.display, score: s))
         }
-        for space in store.orderedSpaces {
+        for space in incognito ? [] : store.orderedSpaces {
             let s = nameScore("Switch to \(space.title)", triggers: [space.title.lowercased()])
             if s > 0 && space.id != store.focusedSpaceID {
                 out.append(Suggestion(id: "space:\(space.id)", kind: .switchSpace(space.id), title: "Switch to \(space.title)",
@@ -241,7 +247,7 @@ final class SuggestionEngine {
     }
 
     private func recentSuggestions(excluding current: UUID?) -> [Suggestion] {
-        let tabs = store.allTabs().filter { $0.id != current }
+        let tabs = store.profileTabs(window: nil).filter { $0.id != current }
             .sorted { ($0.tab?.timeLastActiveAt ?? .distantPast) > ($1.tab?.timeLastActiveAt ?? .distantPast) }
             .prefix(7)
         var out: [Suggestion] = tabs.map { tab in
@@ -250,7 +256,7 @@ final class SuggestionEngine {
                               subtitle: [sid.flatMap { store.space($0)?.title } ?? "", Self.humanURL(tab.tab?.url ?? "")].filter { !$0.isEmpty }.joined(separator: " · "),
                               url: tab.tab?.url, faviconKey: tab.tab?.faviconKey, symbol: nil, trailing: "Switch to Tab", score: 0, spaceID: sid)
         }
-        for entry in store.archive.prefix(2) {
+        for entry in store.archive.prefix(incognito ? 0 : 2) {
             guard let t = entry.item.tab else { continue }
             out.append(Suggestion(id: "arch:\(entry.id)", kind: .archived(entry.id), title: entry.item.displayTitle,
                                   subtitle: "Archived \(Self.relative(entry.archivedAt))", url: t.url, faviconKey: t.faviconKey,

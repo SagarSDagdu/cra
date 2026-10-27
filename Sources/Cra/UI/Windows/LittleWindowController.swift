@@ -107,6 +107,8 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
     let actions = LittleWindowActions()
     let commandBar: CommandBarController
     private(set) var browser: CraBrowser?
+    /// The page (a video) is in element fullscreen.
+    private var pageFullscreen = false
     private let shell: LittleShellView
     private var favicon: NSImage?
     private var promoted = false
@@ -126,7 +128,8 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
     /// CEF hands it (see `CraBrowserDelegate.browser:popupHostForURL:`).
     init(app: AppDelegate, url: String?) {
         self.app = app
-        state = LittleWindowState(targetSpaceID: app.store.focusedSpaceID)
+        // Little Windows are normal browsing: they target the last normal window's space.
+        state = LittleWindowState(targetSpaceID: app.store.focusedSpaceID(window: app.store.lastNormalWindowID))
         commandBar = CommandBarController(engine: app.engine, store: app.store)
         let size = app.store.prefs.littleWindowSize.map { NSSizeFromString($0) }
             .flatMap { $0 == LittleMetrics.legacyDefaultSize ? nil : $0 }
@@ -201,6 +204,7 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
         w.hasShadow = false
         w.isOpaque = false
         w.backgroundColor = .clear
+        ChromiumChildFullscreen.attach(w)
         if let cv = w.contentView {
             cv.isHidden = false   // a background tab's page (MainWindowController hides it)
             cv.wantsLayer = true
@@ -283,6 +287,8 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
         tooltipTimer?.invalidate(); hideTooltip()
         closePopup()
         let prefill = hasPage ? currentURL : nil
+        // Suggestions come from the normal profile even when an incognito window was in front.
+        app.useNormalWindow()
         commandBar.highlight = store.focusedSpace.theme.palette.commandHighlight
         commandBar.focusedSpaceID = store.focusedSpaceID
         commandBar.open(mode: hasPage ? .editURL : .newTab, prefill: prefill)
@@ -347,9 +353,11 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
         switch s.kind {
         case .switchToTab(let id):
             store.recordQuerySelection(query: query, url: s.url ?? "")
+            app.useNormalWindow()
             store.selectTab(id)
             app.main.showWindow(nil)
         case .archived(let id):
+            app.useNormalWindow()
             store.restoreArchived(id)
             app.main.showWindow(nil)
         case .navigate:
@@ -467,7 +475,9 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
         guard let b = browser, hasPage else { return }
         closePopup()
         commandBar.close()
-        let sid = (spaceID ?? state.targetSpaceID).flatMap { store.space($0) != nil ? $0 : nil } ?? store.focusedSpaceID
+        app.useNormalWindow()
+        let sid = (spaceID ?? state.targetSpaceID).flatMap { store.space($0) != nil && !store.isIncognito(space: $0) ? $0 : nil }
+            ?? store.focusedSpaceID
         let tab = store.createTab(url: b.currentURL, title: b.currentTitle, in: sid, select: true)
         if let favicon, let key = FaviconCache.key(for: b.currentURL) { app.favicons.store(favicon, forKey: key) }
         promoted = true
@@ -509,7 +519,7 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
         case "promoteLittleWindow": promote(to: nil)
         // No find bar or capture in little windows; keep them off the main window.
         case "find", "findNext", "findPrevious", "capturePage", "toggleSidebar", "pinTab", "favoriteTab", "renameTab",
-             "duplicateTab", "resetTab", "muteTab", "clearToday", "nextTab", "previousTab", "recentTab":
+             "duplicateTab", "resetTab", "muteTab", "clearToday", "nextTab", "previousTab", "recentTab", "recentTabBackward":
             break
         default: return false
         }
@@ -547,6 +557,13 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
     func windowWillClose(_ notification: Notification) {
         guard (notification.object as? NSWindow) === window else { return }
         if browser == nil { app.removeLittleWindow(self) }
+    }
+
+    /// Left with the green button or ⌃⌘F while a video was fullscreen: the page leaves too.
+    func windowDidExitFullScreen(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === window, pageFullscreen else { return }
+        pageFullscreen = false
+        browser?.exitFullscreen()
     }
 
     func windowDidResize(_ notification: Notification) {
@@ -635,18 +652,20 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
     func browser(_ browser: CraBrowser, devToolsDocked docked: Bool) {}
     func browser(_ browser: CraBrowser, didChangeFullscreen fullscreen: Bool) {
         guard let window else { return }
+        pageFullscreen = fullscreen
         if fullscreen != window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil) }
     }
 
     /// Links that want a new tab open another little window (Arc does the same).
     func browser(_ browser: CraBrowser, requestsNewTabWithURL url: String, inBackground background: Bool) {
-        if url.hasPrefix("cra://") { if let u = URL(string: url) { app.handleInternalURL(u) }; return }
+        // cra:// is Cra's scripting scheme; a page must not drive it.
+        if url.lowercased().hasPrefix("cra:") { return }
         app.openLittleWindow(url: url, activate: !background)
         if background { window?.makeKeyAndOrderFront(nil) }
     }
 
     func browser(_ browser: CraBrowser, popupHostForURL url: String, inBackground background: Bool) -> CraBrowser? {
-        if url.hasPrefix("cra://") { if let u = URL(string: url) { app.handleInternalURL(u) }; return nil }
+        if url.lowercased().hasPrefix("cra:") { return nil }
         let w = app.makeLittleWindow(url: nil)
         w.state.url = url
         w.show()

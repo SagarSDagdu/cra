@@ -79,6 +79,8 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 /// Find in page progress: `count` matches, `activeMatch` is the highlighted one
 /// (1-based). Either is -1 while Chromium has no new value for it.
 - (void)browser:(CraBrowser *)browser didFindMatches:(NSInteger)count activeMatch:(NSInteger)activeMatch;
+/// The page started or stopped using the camera or microphone.
+- (void)browser:(CraBrowser *)browser didChangeMediaCapture:(BOOL)capturing;
 @end
 
 @interface CraBrowser : NSObject
@@ -102,10 +104,19 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 @property (nonatomic, readonly) BOOL hasDevTools;
 /// Anything you want to hang on the browser (Swift stores the tab id).
 @property (nonatomic, strong, nullable) id userInfo;
+/// Runs in the shared off-the-record profile (+[CraCEFRuntime endIncognitoSession]).
+@property (nonatomic, readonly) BOOL isIncognito;
+/// The profile folder this page's cookies, logins and storage live in (a space's own
+/// profile, under the cache root), or nil for the Default profile.
+@property (nonatomic, readonly, copy, nullable) NSString *profilePath;
 
 /// Pass a URL to create a browser now. Pass nil to create a popup host that
 /// adopts the next popup CEF gives it (see -browser:popupHostForURL:...).
 - (instancetype)initWithFrame:(NSRect)frame url:(nullable NSString *)url delegate:(nullable id<CraBrowserDelegate>)delegate;
+- (instancetype)initWithFrame:(NSRect)frame url:(nullable NSString *)url delegate:(nullable id<CraBrowserDelegate>)delegate
+                    incognito:(BOOL)incognito;
+- (instancetype)initWithFrame:(NSRect)frame url:(nullable NSString *)url delegate:(nullable id<CraBrowserDelegate>)delegate
+                    incognito:(BOOL)incognito profilePath:(nullable NSString *)profilePath;
 
 - (void)loadURL:(NSString *)url;
 - (void)goBack;
@@ -113,6 +124,8 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 - (void)reload;
 - (void)reloadIgnoringCache;
 - (void)stopLoading;
+/// Leaves element fullscreen (a video), as Esc does.
+- (void)exitFullscreen;
 - (void)setFocused:(BOOL)focused;
 - (void)showDevToolsInspectingPoint:(NSPoint)point;
 - (void)showDevTools;
@@ -132,6 +145,8 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 @property (nonatomic, readonly) BOOL isInPictureInPicture;
 /// YES while that video is playing.
 @property (nonatomic, readonly) BOOL isPictureInPicturePlaying;
+/// The page is using the camera or microphone (Chromium's media access state).
+@property (nonatomic, readonly) BOOL isCapturingMedia;
 /// Play/pause the video in the Picture in Picture window.
 - (void)togglePictureInPicturePlayback;
 /// Seek the video in the Picture in Picture window by `seconds` (negative = back).
@@ -179,7 +194,8 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 + (BOOL)initializeWithCachePath:(NSString *)cachePath
                  userAgentProduct:(NSString *)product
                           logPath:(NSString *)logPath
-                   useChromeStyle:(BOOL)useChromeStyle;
+                   useChromeStyle:(BOOL)useChromeStyle
+                  useMockKeychain:(BOOL)useMockKeychain;
 /// Runs the Chromium-integrated AppKit run loop. Returns after -quitMessageLoop.
 + (void)runMessageLoop;
 + (void)quitMessageLoop;
@@ -187,6 +203,9 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 /// Closes every browser, then quits the message loop once they are gone.
 + (void)closeAllBrowsersAndQuit;
 + (NSInteger)liveBrowserCount;
+/// The last incognito window closed: the next incognito page starts a fresh
+/// off-the-record profile (no cookies or storage carried over).
++ (void)endIncognitoSession;
 /// YES when initialize failed because another Cra is running and was told
 /// about this launch (exit quietly).
 + (BOOL)anotherInstanceWasNotified;

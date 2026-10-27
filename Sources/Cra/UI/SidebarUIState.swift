@@ -7,12 +7,16 @@ import UniformTypeIdentifiers
 @MainActor
 @Observable
 final class SidebarUIState {
+    /// The browser window this sidebar belongs to (its space and open tab, see WindowSession).
+    @ObservationIgnored var windowID = UUID()
     var renamingID: UUID?
     var draggingID: UUID?
     var hoveredTabID: UUID?
     /// Loading progress per tab (0...1), fed by the browser manager.
     var progress: [UUID: Double] = [:]
     var loadedTabIDs: Set<UUID> = []
+    /// Tabs using the camera or microphone (Arc's recording indicator).
+    var capturingTabIDs: Set<UUID> = []
     var canGoBack = false
     var canGoForward = false
     var isLoading = false
@@ -21,6 +25,17 @@ final class SidebarUIState {
     var appActive = true
     /// Page theme colour of the visible tab ("#RRGGBB" or "").
     var pageThemeColor = ""
+    /// The latest download, drawn over the Library button the way Arc does (its
+    /// DownloadToLibrary "bin": the file's thumbnail that the download glyph flies into).
+    var recentDownload: RecentDownload?
+    /// The Library button's view, where download flights land.
+    @ObservationIgnored weak var libraryAnchor: NSView?
+    /// Arc's downloads list over the bottom of the sidebar, open while the Library
+    /// button (or the list) is hovered.
+    var downloadsListOpen = false
+    @ObservationIgnored var libraryHovered = false
+    @ObservationIgnored var downloadsListHovered = false
+    @ObservationIgnored var downloadsListWork: DispatchWorkItem?
     /// Tab chosen from the keyboard; Arc draws its yellow/black dashed ring
     /// around it until the mouse picks another tab.
     var keyboardFocusID: UUID?
@@ -83,9 +98,10 @@ final class SidebarUIState {
     /// ⌘-click toggles a tab, ⇧-click adds the run of rows from the anchor.
     /// The open tab counts as picked when a selection starts (Finder-style).
     func pick(_ id: UUID, range: Bool, in store: SidebarStore) {
-        let order = store.listedTabIDs(in: store.focusedSpaceID)
-        if multiSelection.isEmpty, let open = store.selectedTabID, order.contains(open) { multiSelection = [open] }
-        if range, let a = order.firstIndex(of: selectionAnchor ?? store.selectedTabID ?? id), let b = order.firstIndex(of: id) {
+        let order = store.listedTabIDs(in: store.focusedSpaceID(window: windowID))
+        let open = store.selectedTabID(window: windowID)
+        if multiSelection.isEmpty, let open, order.contains(open) { multiSelection = [open] }
+        if range, let a = order.firstIndex(of: selectionAnchor ?? open ?? id), let b = order.firstIndex(of: id) {
             multiSelection.formUnion(order[min(a, b)...max(a, b)])
         } else {
             if multiSelection.contains(id) { multiSelection.remove(id) } else { multiSelection.insert(id) }
@@ -97,7 +113,7 @@ final class SidebarUIState {
     /// order, when the row is one of several picks; otherwise just the row.
     func group(for id: UUID, in store: SidebarStore) -> [UUID] {
         guard multiSelection.count > 1, multiSelection.contains(id) else { return [id] }
-        return store.listedTabIDs(in: store.focusedSpaceID).filter { multiSelection.contains($0) }
+        return store.listedTabIDs(in: store.focusedSpaceID(window: windowID)).filter { multiSelection.contains($0) }
     }
 
     func clearPicks(anchor: UUID? = nil) {
@@ -110,6 +126,13 @@ struct ToolbarStatus: Equatable, Identifiable {
     let id = UUID()
     let symbol: String
     let text: String
+}
+
+struct RecentDownload: Equatable {
+    let id: UInt32
+    var path: String
+    /// The file type's icon until the download finishes, then its Quick Look thumbnail.
+    var image: NSImage
 }
 
 struct TabNavState: Equatable {

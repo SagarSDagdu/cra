@@ -1,10 +1,18 @@
 import SwiftUI
 
-/// Create or edit a space: name, emoji, colors, intensity, grain, appearance
-/// (Arc: SpaceCreation + SpaceStyleEditor + SpaceIconPicker).
+/// The profile picked for a space: Default (nil), an existing one, or a new one to make.
+enum SpaceProfileChoice: Hashable {
+    case existing(UUID?)
+    case new
+}
+
+/// Create or edit a space: name, emoji, colors, intensity, grain, appearance, profile
+/// (Arc: SpaceCreation + SpaceStyleEditor + SpaceIconPicker + "Edit Space profile").
 struct SpaceEditorView: View {
     let existing: Space?
-    let onSave: (String, String, SpaceTheme) -> Void
+    let profiles: [BrowserProfile]
+    /// Title, emoji, theme, profile; a new profile comes with its name.
+    let onSave: (String, String, SpaceTheme, SpaceProfileChoice, String) -> Void
     let onCancel: () -> Void
 
     @State private var title: String
@@ -12,12 +20,17 @@ struct SpaceEditorView: View {
     @State private var theme: SpaceTheme
     @State private var color1: Color
     @State private var color2: Color
+    @State private var profile: SpaceProfileChoice
+    @State private var newProfileName = ""
 
     private static let emojis = ["🌱", "💼", "🏠", "🎨", "🧪", "📚", "🎮", "🎵", "🛒", "✈️", "💡", "🔥", "🌊", "🍕", "🐦", "🧑‍💻",
                                  "📈", "🧠", "❤️", "⭐️", "🌙", "☕️", "🏃", "📷", "🎬", "🧩", "🪴", "🏔️", "🛠️", "💰", "📝", "🎯"]
 
-    init(existing: Space?, onSave: @escaping (String, String, SpaceTheme) -> Void, onCancel: @escaping () -> Void) {
+    init(existing: Space?, profiles: [BrowserProfile], onSave: @escaping (String, String, SpaceTheme, SpaceProfileChoice, String) -> Void,
+         onCancel: @escaping () -> Void) {
         self.existing = existing
+        self.profiles = profiles
+        _profile = State(initialValue: .existing(existing?.profileID))
         self.onSave = onSave
         self.onCancel = onCancel
         let t = existing?.theme ?? SpaceTheme.presets[Int.random(in: 0..<5)]
@@ -90,20 +103,56 @@ struct SpaceEditorView: View {
                 }
                 .pickerStyle(.segmented)
             }
+            Divider()
+            profileSection
             HStack {
                 Button("Cancel") { onCancel() }.keyboardShortcut(.cancelAction)
                 Spacer()
                 Button(existing == nil ? "Create Space" : "Save") {
-                    onSave(title.isEmpty ? "Space" : title, emoji.isEmpty ? "🌱" : emoji, theme)
+                    onSave(title.isEmpty ? "Space" : title, emoji.isEmpty ? "🌱" : emoji, theme, profile, trimmedProfileName)
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty && existing == nil)
+                .disabled((title.trimmingCharacters(in: .whitespaces).isEmpty && existing == nil) || (profile == .new && trimmedProfileName.isEmpty))
             }
         }
         .padding(20)
         .frame(width: 520)
         .onChange(of: color1) { _, c in theme.colors = [c.hexString, color2.hexString] }
         .onChange(of: color2) { _, c in theme.colors = [color1.hexString, c.hexString] }
+    }
+
+    private var trimmedProfileName: String { newProfileName.trimmingCharacters(in: .whitespaces) }
+
+    /// Arc's copy: "Profiles make your Spaces truly separate…" and, when an existing space
+    /// changes profile, "Each Profile has different browser data…".
+    private var profileSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Picker("Profile", selection: $profile) {
+                    Text("Default").tag(SpaceProfileChoice.existing(nil))
+                    ForEach(profiles) { p in Text(p.name).tag(SpaceProfileChoice.existing(p.id)) }
+                    Divider()
+                    Text("New Profile…").tag(SpaceProfileChoice.new)
+                }
+                .frame(width: 260)
+                if profile == .new {
+                    TextField("Profile name", text: $newProfileName).textFieldStyle(.roundedBorder)
+                }
+            }
+            Text(profileNote).font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var profileNote: String {
+        if let existing, profile != .existing(existing.profileID) {
+            return "Each Profile has different browser data, so you might get logged out of some websites or need to re-install extensions. Open tabs in this space reload."
+        }
+        if profile == .new {
+            return "This Space will start fresh in your brand new Profile, signed out of every website."
+        }
+        return "Profiles make your Spaces truly separate with their own logins, cookies and site data. Spaces with the same Profile share them."
     }
 }
 

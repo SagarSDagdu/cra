@@ -15,6 +15,9 @@ final class TabRuntime {
     /// auto Picture in Picture); coming back brings the video home.
     var autoPictureInPicture = false
     var pendingAutoPictureInPicture = false
+    /// The tab switcher's thumbnail, taken while the page was last on screen.
+    var snapshot: NSImage?
+    var snapshotWork: DispatchWorkItem?
     /// Chrome-style hosting: the page's own window (nil until created, or for Alloy).
     var hostWindow: NSWindow? { browser.hostWindow }
     init(tabID: UUID, browser: CraBrowser) {
@@ -41,7 +44,6 @@ protocol BrowserManagerDelegate: AnyObject {
     func browserManagerHandleKey(_ event: NSEvent) -> Bool
     func browserManagerHandleUnhandledKey(_ event: NSEvent) -> Bool
     func browserManagerFocusedBrowser(_ tabID: UUID)
-    func browserManagerOpenInternalURL(_ url: String)
     /// The page closed itself (window.close()).
     func browserManagerPageClosedTab(_ tabID: UUID)
 }
@@ -60,6 +62,10 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
     private(set) var visibleTabIDs: [UUID] = []
     /// Split view: the view a tab's Alloy-hosted Chromium view should live in.
     var paneHost: ((UUID) -> NSView?)?
+    /// The browser window this manager shows pages in (tabs it opens are selected there).
+    var windowID: UUID?
+    /// A tab's live page held by another window's manager, handed over (see `release`).
+    var takeRuntimeFromOtherWindow: ((UUID) -> TabRuntime?)?
     private var byBrowser: [ObjectIdentifier: UUID] = [:]
 
     init(store: SidebarStore, favicons: FaviconCache, container: NSView) {
@@ -76,7 +82,15 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
         if let r = runtimes[tabID] { return r }
         // An empty split pane has no page yet (Arc shows the tinted card and the command bar).
         guard let item = store.item(tabID), let tab = item.tab, !item.isEmptyTab else { return nil }
-        let browser = CraBrowser(frame: container.bounds, url: tab.url, delegate: self)
+        // The page moves between windows with its history and state, never loads twice.
+        if let rt = takeRuntimeFromOtherWindow?(tabID) {
+            rt.browser.delegate = self
+            add(rt)
+            if inRightProfile(rt) { return rt }
+            release(tabID)?.browser.close()
+        }
+        let browser = CraBrowser(frame: container.bounds, url: tab.url, delegate: self, incognito: store.isIncognito(item: tabID),
+                                 profilePath: store.profilePath(item: tabID))
         return register(browser: browser, tabID: tabID)
     }
 
@@ -94,7 +108,8 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
 
     /// Popup host: a browser shell CEF will fill with window.open content.
     func makePopupHost(for tabID: UUID) -> CraBrowser {
-        let browser = CraBrowser(frame: container.bounds, url: nil, delegate: self)
+        let browser = CraBrowser(frame: container.bounds, url: nil, delegate: self, incognito: store.isIncognito(item: tabID),
+                                 profilePath: store.profilePath(item: tabID))
         register(browser: browser, tabID: tabID)
         return browser
     }
@@ -102,18 +117,42 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
     @discardableResult
     private func register(browser: CraBrowser, tabID: UUID) -> TabRuntime {
         browser.userInfo = tabID.uuidString
-        let v = browser.containerView
+        let rt = TabRuntime(tabID: tabID, browser: browser)
+        if let t = store.item(tabID)?.tab, t.muted { browser.setAudioMuted(true) }
+        add(rt)
+        return rt
+    }
+
+    private func add(_ rt: TabRuntime) {
+        let v = rt.browser.containerView
         v.frame = container.bounds
         v.autoresizingMask = [.width, .height]
         v.isHidden = true
         container.addSubview(v)
-        let rt = TabRuntime(tabID: tabID, browser: browser)
-        runtimes[tabID] = rt
-        byBrowser[ObjectIdentifier(browser)] = tabID
-        if let t = store.item(tabID)?.tab, t.muted { browser.setAudioMuted(true) }
+        runtimes[rt.tabID] = rt
+        byBrowser[ObjectIdentifier(rt.browser)] = rt.tabID
         // CEF creates the page window inside CraBrowser's init, before the tab is known here,
         // so didCreateHostWindow could not place it: a background tab's window stayed shown.
-        if browser.hostWindow != nil { delegate?.browserManagerPageWindowsChanged(focus: false) }
+        if rt.browser.hostWindow != nil { delegate?.browserManagerPageWindowsChanged(focus: false) }
+    }
+
+    /// Gives up a tab's live page so another window can show it. Its DevTools close:
+    /// their window belongs to this one.
+    func release(_ tabID: UUID) -> TabRuntime? {
+        guard let rt = runtimes.removeValue(forKey: tabID) else { return nil }
+        byBrowser[ObjectIdentifier(rt.browser)] = nil
+        if rt.browser.hasDevTools { rt.browser.closeDevTools() }
+        devToolsViews[tabID] = nil
+        devToolsPlaceholders[tabID] = nil
+        devToolsDockedState[tabID] = nil
+        if visibleTabID == tabID { visibleTabID = nil }
+        visibleTabIDs.removeAll { $0 == tabID }
+        if let host = rt.hostWindow {
+            host.parent?.removeChildWindow(host)
+            host.orderOut(nil)
+        }
+        rt.browser.containerView.removeFromSuperview()
+        delegate?.browserManagerDevToolsChanged()
         return rt
     }
 
@@ -152,8 +191,49 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
         visibleTabIDs = shown
         visibleTabID = focused.flatMap { newSet.contains($0) ? $0 : nil } ?? shown.first
         if focus, let f = visibleTabID, let rt = runtimes[f] { rt.browser.setFocused(true) }
+        for id in shown where !wasVisible.contains(id) { scheduleSnapshot(id) }
         syncDevToolsVisibility()
         delegate?.browserManagerPageWindowsChanged(focus: focus)
+    }
+
+    // MARK: Tab switcher thumbnails
+
+    /// Chromium renders nothing for a hidden page, so thumbnails are taken while a tab is
+    /// on screen: a moment after it appears or finishes loading, and when the switcher opens.
+    private func scheduleSnapshot(_ id: UUID, after delay: TimeInterval = 1) {
+        guard let rt = runtimes[id] else { return }
+        rt.snapshotWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.captureSnapshot(id) }
+        rt.snapshotWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// The visible viewport, cropped to the switcher's thumbnail shape from the top.
+    func captureSnapshot(_ id: UUID, completion: (() -> Void)? = nil) {
+        guard let rt = runtimes[id], visibleTabIDs.contains(id) else { completion?(); return }
+        let b = rt.browser
+        b.sendDevToolsMethod("Page.getLayoutMetrics", params: "{}") { result, _ in
+            guard let result, let m = try? JSONSerialization.jsonObject(with: Data(result.utf8)) as? [String: Any],
+                  let vp = m["cssVisualViewport"] as? [String: Any],
+                  let x = vp["pageX"] as? Double, let y = vp["pageY"] as? Double,
+                  let w = vp["clientWidth"] as? Double, let h = vp["clientHeight"] as? Double, w > 0, h > 0 else {
+                DispatchQueue.main.async { completion?() }
+                return
+            }
+            let thumb = TabSwitcherMetrics.thumbnail
+            let aspect = Double(thumb.width / thumb.height)
+            let cw = min(w, h * aspect), ch = cw / aspect
+            let scale = min(1, Double(thumb.width) * 2 / cw)
+            let params = #"{"format":"jpeg","quality":80,"clip":{"x":\#(x + (w - cw) / 2),"y":\#(y),"width":\#(cw),"height":\#(ch),"scale":\#(scale)}}"#
+            b.sendDevToolsMethod("Page.captureScreenshot", params: params) { [weak self] shot, _ in
+                let image = shot.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+                    .flatMap { $0["data"] as? String }.flatMap { Data(base64Encoded: $0) }.flatMap(NSImage.init(data:))
+                DispatchQueue.main.async {
+                    if let image { self?.runtimes[id]?.snapshot = image }
+                    completion?()
+                }
+            }
+        }
     }
 
     func browser(_ browser: CraBrowser, didCreateHostWindow window: NSWindow) {
@@ -168,9 +248,18 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
         rt.browser.close()
     }
 
-    /// Drop runtimes whose tabs no longer exist (archived, deleted).
+    /// Drop runtimes whose tabs no longer exist (archived, deleted). A page can't change
+    /// its Chromium profile: one whose tab moved to a space with another profile, or whose
+    /// space switched profiles, closes and loads its URL again there when shown.
     func pruneMissingTabs() {
         for id in runtimes.keys where store.item(id)?.isTab != true { unload(id) }
+        for (id, rt) in runtimes where store.item(id)?.isTab == true && !inRightProfile(rt) {
+            release(id)?.browser.close()
+        }
+    }
+
+    private func inRightProfile(_ rt: TabRuntime) -> Bool {
+        rt.browser.isIncognito || rt.browser.profilePath == store.profilePath(item: rt.tabID)
     }
 
     func closeAll() { for id in Array(runtimes.keys) { unload(id) } }
@@ -202,7 +291,7 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
     /// Picture in Picture's "back to tab": select the tab, bring its window up
     /// and put the video back in the page (also when the tab was already selected).
     private func bringToFront(_ tabID: UUID) {
-        store.selectTab(tabID)
+        store.selectTab(tabID, window: windowID)
         container.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         runtimes[tabID]?.browser.exitPictureInPicture()
@@ -250,6 +339,11 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
         delegate?.browserManagerDidUpdate(id)
     }
 
+    func browser(_ browser: CraBrowser, didChangeMediaCapture capturing: Bool) {
+        guard let id = tabID(of: browser) else { return }
+        delegate?.browserManagerDidUpdate(id)
+    }
+
     func browser(_ browser: CraBrowser, didChangeURL url: String) {
         guard let id = tabID(of: browser) else { return }
         // Our own error page is a data: URL; keep the real address in the model.
@@ -261,6 +355,7 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
     func browser(_ browser: CraBrowser, didChangeLoading loading: Bool, canGoBack: Bool, canGoForward: Bool) {
         guard let id = tabID(of: browser) else { return }
         if !loading { runtimes[id]?.progress = 0 }
+        if !loading { scheduleSnapshot(id) }
         delegate?.browserManagerDidUpdate(id)
     }
 
@@ -271,7 +366,7 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
     }
 
     func browser(_ browser: CraBrowser, didFinishLoadingURL url: String, title: String, statusCode: Int) {
-        guard let id = tabID(of: browser) else { return }
+        guard let id = tabID(of: browser), !browser.isIncognito else { return }
         store.recordVisit(url: url, title: title.isEmpty ? (store.item(id)?.tab?.savedTitle ?? "") : title)
     }
 
@@ -279,7 +374,7 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
         guard let id = tabID(of: browser), let tab = store.item(id)?.tab else { return }
         let key = FaviconCache.key(for: tab.url) ?? tab.faviconKey
         guard let key else { return }
-        favicons.store(image, forKey: key)
+        favicons.store(image, forKey: key, persist: !browser.isIncognito)
         if tab.faviconKey != key { store.updateTab(id, url: tab.url) }
     }
 
@@ -310,7 +405,8 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
     }
 
     func browser(_ browser: CraBrowser, requestsNewTabWithURL url: String, inBackground background: Bool) {
-        if url.hasPrefix("cra://") { delegate?.browserManagerOpenInternalURL(url); return }
+        // cra:// is Cra's scripting scheme (DevTools Protocol, key presses); a page must not drive it.
+        if url.lowercased().hasPrefix("cra:") { return }
         let sourceSpace = tabID(of: browser).flatMap { store.spaceID(ofItem: $0) }
         let parentIndex = tabID(of: browser).flatMap { id -> Int? in
             guard let it = store.item(id), let p = it.parentID, store.rootContainer(of: id) != nil,
@@ -320,7 +416,7 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
         // Links from a today tab open right below it (Arc); otherwise at the top.
         let tab = store.createTab(url: url, in: sourceSpace, select: !background,
                                   parent: parentIndex != nil ? store.item(tabID(of: browser)!)?.parentID : nil,
-                                  index: parentIndex)
+                                  index: parentIndex, window: windowID)
         if background {
             store.markUnread(tab.id, true)
             ensureRuntime(for: tab.id)  // load it so the title and favicon fill in
@@ -328,9 +424,9 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
     }
 
     func browser(_ browser: CraBrowser, popupHostForURL url: String, inBackground background: Bool) -> CraBrowser? {
-        if url.hasPrefix("cra://") { delegate?.browserManagerOpenInternalURL(url); return nil }
+        if url.lowercased().hasPrefix("cra:") { return nil }
         let sourceSpace = tabID(of: browser).flatMap { store.spaceID(ofItem: $0) }
-        let tab = store.createTab(url: url, in: sourceSpace, select: !background)
+        let tab = store.createTab(url: url, in: sourceSpace, select: !background, window: windowID)
         if background { store.markUnread(tab.id, true) }
         let host = makePopupHost(for: tab.id)
         if !background { show(tab.id, focus: true) }

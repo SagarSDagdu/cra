@@ -385,10 +385,12 @@ final class ExtensionPageWindow: NSWindow, NSWindowDelegate, @preconcurrency Cra
     func browser(_ browser: CraBrowser, didReportThemeColor hex: String) {}
     func browser(_ browser: CraBrowser, didChangeFullscreen fullscreen: Bool) {}
     func browser(_ browser: CraBrowser, requestsNewTabWithURL url: String, inBackground background: Bool) {
+        app.useNormalWindow()
         app.store.createTab(url: url, select: !background)
     }
     /// Links the popup opens (Chrome opens them as tabs): a Cra tab.
     func browser(_ browser: CraBrowser, popupHostForURL url: String, inBackground background: Bool) -> CraBrowser? {
+        app.useNormalWindow()
         app.store.createTab(url: url, select: !background)
         app.main.showWindow(nil)
         return nil

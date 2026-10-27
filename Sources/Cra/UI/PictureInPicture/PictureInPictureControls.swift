@@ -9,7 +9,7 @@ import AppKit
 /// through to the overlay, which drags and resizes the window.
 @MainActor
 final class PictureInPictureControlsView: NSView {
-    var isPlaying = false { didSet { playButton.symbol = isPlaying ? "pause.fill" : "play.fill"; playButton.toolTip = isPlaying ? "Pause" : "Play" } }
+    var isPlaying = false { didSet { playButton.symbol = isPlaying ? "pause.fill" : "play.fill"; playButton.tip = isPlaying ? "Pause" : "Play" } }
 
     private let scrim = CAGradientLayer()
     private let closeButton = PictureInPictureButton(symbol: "xmark", pointSize: 12, diameter: 26, tip: "Close")
@@ -125,20 +125,24 @@ final class PictureInPictureButton: NSView {
     private var isPressed = false { didSet { updateBackground() } }
     private let pointSize: CGFloat
     private let image = NSImageView()
+    private var tipAnchor: ArcTooltipAnchorView?
+    /// Arc-style hover tip (ArcTooltip), not AppKit's yellow one.
+    var tip: String { didSet { tipAnchor?.text = tip; setAccessibilityLabel(tip) } }
 
     init(symbol: String, pointSize: CGFloat, diameter: CGFloat, tip: String) {
         self.symbol = symbol
         self.pointSize = pointSize
+        self.tip = tip
         super.init(frame: NSRect(x: 0, y: 0, width: diameter, height: diameter))
         wantsLayer = true
         layer?.cornerRadius = diameter / 2
-        toolTip = tip
         image.image = Self.image(symbol, pointSize)
         image.contentTintColor = .white
         image.imageScaling = .scaleNone
         image.frame = bounds
         image.autoresizingMask = [.width, .height]
         addSubview(image)
+        tipAnchor = ArcTooltipAnchorView.attach(to: self, help: tip)
         setAccessibilityRole(.button)
         setAccessibilityLabel(tip)
         updateBackground()

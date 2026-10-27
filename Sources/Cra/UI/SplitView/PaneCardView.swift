@@ -15,6 +15,10 @@ final class PaneCardView: NSView {
     /// The card behind the toolbar, in the toolbar's colour. A card with a page paints nothing else:
     /// under the page window's anti-aliased corners any fill of the card's shape shows as a light rim.
     private let toolbarBackground = NSView()
+    /// The page's stand-in fill under the page window, inset from the card's rounded edges: the
+    /// page window's corners are anti-aliased, so a fill reaching the card's edge showed through
+    /// them as a light rim in every rounded corner.
+    private let pageBackground = NSView()
     var showToolbar = true { didSet { needsLayout = true } }
     var toolbarHeight: CGFloat = CraMetrics.toolbarHeight { didSet { needsLayout = true } }
     var cornerRadius: CGFloat = CraMetrics.contentCornerRadius { didSet { layer?.cornerRadius = cornerRadius; needsLayout = true } }
@@ -43,11 +47,13 @@ final class PaneCardView: NSView {
         layer?.masksToBounds = true
         toolbarHost.sizingOptions = []
         webArea.wantsLayer = true
-        webArea.layer?.cornerCurve = .continuous
         webArea.autoresizesSubviews = false
+        pageBackground.wantsLayer = true
+        pageBackground.layer?.cornerCurve = .continuous
         toolbarBackground.wantsLayer = true
         hairline.wantsLayer = true
         hairline.isHidden = true
+        addSubview(pageBackground)
         addSubview(webArea)
         addSubview(toolbarBackground)
         addSubview(hairline)
@@ -64,7 +70,7 @@ final class PaneCardView: NSView {
         let bar = toolbarColor.map { NSColor(Color(hex: $0)) } ?? .white
         toolbarBackground.layer?.backgroundColor = (hasPage && !transparent ? bar : NSColor.clear).cgColor
         let page = pageColor.map { NSColor(Color(hex: $0)) } ?? .white
-        webArea.layer?.backgroundColor = (hasPage && !transparent ? page : NSColor.clear).cgColor
+        pageBackground.layer?.backgroundColor = (hasPage && !transparent ? page : NSColor.clear).cgColor
         hairline.isHidden = hasPage || transparent || !showToolbar
         hairline.layer?.backgroundColor = NSColor(white: isDark ? 1 : 0, alpha: 0.08).cgColor
     }
@@ -79,11 +85,18 @@ final class PaneCardView: NSView {
         hairline.frame = NSRect(x: 0, y: b.height - th - 1, width: b.width, height: 1)
         hairline.isHidden = hasPage || transparent || th == 0
         webArea.frame = NSRect(x: 0, y: 0, width: b.width, height: max(0, b.height - th))
-        // The page window rounds the card's corners itself; its stand-in fill rounds a little
-        // more so it stays inside the page's edge instead of fringing it.
-        webArea.layer?.cornerRadius = cornerRadius > 0 ? cornerRadius + 3 : 0
-        webArea.layer?.maskedCorners = th == 0 ? [.layerMinXMinYCorner, .layerMaxXMinYCorner, .layerMinXMaxYCorner, .layerMaxXMaxYCorner]
-                                               : [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        // The page window rounds the card's corners itself. Its stand-in fill keeps 1 pt clear of
+        // every rounded edge: the same radius on the inset rect stays at least 1 pt inside the
+        // page's curve, so the page's edge pixels only ever blend with the gradient behind the card.
+        let rounded = cornerRadius > 0
+        let inset: CGFloat = rounded ? 1 : 0
+        var fill = webArea.frame.insetBy(dx: inset, dy: 0)
+        fill.origin.y += inset
+        fill.size.height = max(0, fill.height - (th == 0 ? 2 * inset : inset))
+        pageBackground.frame = fill
+        pageBackground.layer?.cornerRadius = rounded ? cornerRadius : 0
+        pageBackground.layer?.maskedCorners = th == 0 ? [.layerMinXMinYCorner, .layerMaxXMinYCorner, .layerMinXMaxYCorner, .layerMaxXMaxYCorner]
+                                                      : [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         let wb = frozenWebBounds ?? webArea.bounds
         for sub in webArea.subviews where sub.frame != wb { sub.frame = wb }
     }

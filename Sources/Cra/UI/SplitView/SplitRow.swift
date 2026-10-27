@@ -14,7 +14,7 @@ struct SplitRow: View {
     @State private var hover = false
 
     private var children: [SidebarItem] { store.children(of: item.id).filter { $0.isTab } }
-    private var selected: Bool { store.selectedTabID.map { id in children.contains { $0.id == id } } ?? false }
+    private var selected: Bool { store.selectedTabID(window: ui.windowID).map { id in children.contains { $0.id == id } } ?? false }
 
     enum Metrics {
         static let separatorInset: CGFloat = 9
@@ -26,7 +26,7 @@ struct SplitRow: View {
                 if i > 0 {
                     Rectangle().fill(palette.separator).frame(width: 1).padding(.vertical, Metrics.separatorInset)
                 }
-                SplitChildCell(item: child, palette: palette, groupHovered: hover, groupSelected: selected, focused: store.selectedTabID == child.id)
+                SplitChildCell(item: child, palette: palette, groupHovered: hover, groupSelected: selected, focused: store.selectedTabID(window: ui.windowID) == child.id)
             }
         }
         .padding(.leading, CGFloat(depth) * CraMetrics.indent)
@@ -76,7 +76,7 @@ struct SplitChildCell: View {
                 .truncationMode(.tail)
             Spacer(minLength: 2)
             if hover {
-                SidebarIconButton(symbol: "xmark", palette: palette, help: "Close pane", size: 20, iconSize: 11) {
+                SidebarIconButton(symbol: "xmark", palette: palette, help: "Close pane", optionHelp: "Separate from Split View", size: 20, iconSize: 11) {
                     // Option-click un-splits instead of closing (Arc flag option-click-split-tab-close-button-to-unsplit).
                     if NSEvent.modifierFlags.contains(.option) { store.separateFromSplit(item.id) } else { actions.closeTab(item.id) }
                 }
@@ -88,7 +88,7 @@ struct SplitChildCell: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         .onHover { hover = $0; ui.hoverDraggable(item.id, $0) }
-        .onTapGesture { store.selectTab(item.id) }
+        .onTapGesture { store.selectTab(item.id, window: ui.windowID) }
         .draggable(SidebarDragItem.begin(item.id, session)) {
             HStack(spacing: 8) {
                 FaviconView(key: item.tab?.iconKey, palette: palette)
@@ -106,6 +106,6 @@ struct SplitChildCell: View {
             Divider()
             Button("Close") { actions.closeTab(item.id) }
         }
-        .help(item.tab?.url ?? "")
+        .arcTooltip(item.displayTitle, followsCursor: true)
     }
 }

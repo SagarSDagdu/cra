@@ -95,25 +95,27 @@ enum ChromiumCrypto {
         return key
     }
 
-    /// Cra runs Chromium with --use-mock-keychain, whose Keychain secret is fixed.
-    static let craKey = key(fromSecret: "mock_password")
-
     private static let iv = [UInt8](repeating: 0x20, count: kCCBlockSizeAES128)
 
+    /// nil for a wrong key too: CommonCrypto strips PKCS#7 padding without checking it,
+    /// so the padding is checked here (a wrong key passes about once in 256).
     static func decrypt(_ blob: Data, key: Data) -> Data? {
-        guard blob.count > 3, blob.prefix(3) == Data("v10".utf8) else { return nil }
-        return crypt(CCOperation(kCCDecrypt), Data(blob.dropFirst(3)), key: key)
+        guard blob.count > 3, blob.prefix(3) == Data("v10".utf8), (blob.count - 3) % kCCBlockSizeAES128 == 0,
+              let padded = crypt(CCOperation(kCCDecrypt), Data(blob.dropFirst(3)), key: key, options: 0),
+              let n = padded.last.map(Int.init), (1...kCCBlockSizeAES128).contains(n), padded.count >= n,
+              padded.suffix(n).allSatisfy({ Int($0) == n }) else { return nil }
+        return Data(padded.dropLast(n))
     }
 
-    static func encrypt(_ plain: Data, key: Data = craKey) -> Data {
-        Data("v10".utf8) + (crypt(CCOperation(kCCEncrypt), plain, key: key) ?? Data())
+    static func encrypt(_ plain: Data, key: Data) -> Data {
+        Data("v10".utf8) + (crypt(CCOperation(kCCEncrypt), plain, key: key, options: CCOptions(kCCOptionPKCS7Padding)) ?? Data())
     }
 
-    private static func crypt(_ op: CCOperation, _ input: Data, key: Data) -> Data? {
+    private static func crypt(_ op: CCOperation, _ input: Data, key: Data, options: CCOptions) -> Data? {
         var out = Data(count: input.count + kCCBlockSizeAES128)
         var moved = 0
         let status = out.withUnsafeMutableBytes { o in input.withUnsafeBytes { i in key.withUnsafeBytes { k in
-            CCCrypt(op, CCAlgorithm(kCCAlgorithmAES), CCOptions(kCCOptionPKCS7Padding), k.baseAddress, key.count, iv,
+            CCCrypt(op, CCAlgorithm(kCCAlgorithmAES), options, k.baseAddress, key.count, iv,
                     i.baseAddress, input.count, o.baseAddress, o.count, &moved)
         } } }
         return status == kCCSuccess ? out.prefix(moved) : nil
@@ -224,8 +226,8 @@ enum SQLite {
 // MARK: - Staging and applying
 
 enum CredentialImport {
-    /// Staged rows, already encrypted for Cra's profile, so the file is no
-    /// easier to read than the databases it feeds.
+    /// Staged rows, already encrypted for Cra's profile (SafeStorage.key), so the
+    /// file is no easier to read than the databases it feeds.
     private struct Pending: Codable {
         struct Cookie: Codable { var c: ImportedCookie; var encrypted: Data }
         struct Login: Codable { var l: ImportedLogin; var encrypted: Data }
@@ -240,17 +242,22 @@ enum CredentialImport {
     @discardableResult
     static func stage(_ creds: ImportedCredentials) -> Bool {
         guard !creds.isEmpty else { return true }
+        guard let key = SafeStorage.key else { return false }
         var pending = (try? Data(contentsOf: pendingFile)).flatMap { try? JSONDecoder().decode(Pending.self, from: $0) } ?? Pending()
         for var c in creds.cookies {
-            let encrypted = ChromiumCrypto.encrypt(Data(c.value.utf8))
+            let encrypted = ChromiumCrypto.encrypt(Data(c.value.utf8), key: key)
             c.value = ""
             pending.cookies.append(.init(c: c, encrypted: encrypted))
         }
         for var l in creds.logins {
-            let encrypted = ChromiumCrypto.encrypt(Data(l.password.utf8))
+            let encrypted = ChromiumCrypto.encrypt(Data(l.password.utf8), key: key)
             l.password = ""
             pending.logins.append(.init(l: l, encrypted: encrypted))
         }
+        return write(pending)
+    }
+
+    private static func write(_ pending: Pending) -> Bool {
         guard let data = try? JSONEncoder().encode(pending) else { return false }
         do {
             try data.write(to: pendingFile, options: [.atomic, .completeFileProtection])
@@ -261,12 +268,31 @@ enum CredentialImport {
         }
     }
 
+    /// Rows staged before the profile moved to the Keychain secret (SafeStorage). Rows
+    /// that don't decrypt with `old` (already moved by a run that failed later) stay.
+    static func reencryptPending(from old: Data, to new: Data) -> Bool {
+        guard let data = try? Data(contentsOf: pendingFile) else { return true }
+        guard var pending = try? JSONDecoder().decode(Pending.self, from: data) else { return false }
+        for i in pending.cookies.indices {
+            if let plain = ChromiumCrypto.decrypt(pending.cookies[i].encrypted, key: old) {
+                pending.cookies[i].encrypted = ChromiumCrypto.encrypt(plain, key: new)
+            }
+        }
+        for i in pending.logins.indices {
+            if let plain = ChromiumCrypto.decrypt(pending.logins[i].encrypted, key: old) {
+                pending.logins[i].encrypted = ChromiumCrypto.encrypt(plain, key: new)
+            }
+        }
+        return write(pending)
+    }
+
     /// Called from main.swift before Chromium starts. Leaves the file in place
     /// when the profile's databases are missing (no first run yet) or busy.
     static func applyPending(profileDir: URL) {
         guard let data = try? Data(contentsOf: pendingFile),
-              let pending = try? JSONDecoder().decode(Pending.self, from: data) else { return }
-        let cookiesOK = pending.cookies.isEmpty || insertCookies(pending.cookies, into: profileDir.appendingPathComponent("Cookies"))
+              let pending = try? JSONDecoder().decode(Pending.self, from: data),
+              let key = SafeStorage.key else { return }
+        let cookiesOK = pending.cookies.isEmpty || insertCookies(pending.cookies, into: profileDir.appendingPathComponent("Cookies"), key: key)
         let loginsOK = pending.logins.isEmpty || insertLogins(pending.logins, into: profileDir.appendingPathComponent("Login Data"))
         if cookiesOK && loginsOK {
             try? FileManager.default.removeItem(at: pendingFile)
@@ -309,7 +335,7 @@ enum CredentialImport {
         return false
     }
 
-    private static func insertCookies(_ cookies: [Pending.Cookie], into url: URL) -> Bool {
+    private static func insertCookies(_ cookies: [Pending.Cookie], into url: URL, key: Data) -> Bool {
         guard let db = open(url) else { return false }
         defer { sqlite3_close(db) }
         let version = Int(SQLite.rows(db, "SELECT value FROM meta WHERE key = 'version'").first?["value"] as? String ?? "") ?? 0
@@ -317,8 +343,8 @@ enum CredentialImport {
             for p in cookies {
                 let c = p.c
                 var encrypted = p.encrypted
-                if version >= 24, let plain = ChromiumCrypto.decrypt(encrypted, key: ChromiumCrypto.craKey) {
-                    encrypted = ChromiumCrypto.encrypt(ChromiumCrypto.hostDigest(c.host) + plain)
+                if version >= 24, let plain = ChromiumCrypto.decrypt(encrypted, key: key) {
+                    encrypted = ChromiumCrypto.encrypt(ChromiumCrypto.hostDigest(c.host) + plain, key: key)
                 }
                 let ok = insert(db, table: "cookies", values: [
                     "creation_utc": c.created, "host_key": c.host, "top_frame_site_key": "", "name": c.name, "value": "",

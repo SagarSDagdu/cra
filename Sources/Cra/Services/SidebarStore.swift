@@ -11,14 +11,26 @@ final class SidebarStore {
 
     private(set) var spaces: [UUID: Space] = [:]
     private(set) var spaceOrder: [UUID] = []
+    /// Profiles besides Default, in the order they were made.
+    private(set) var profiles: [BrowserProfile] = []
     private(set) var items: [UUID: SidebarItem] = [:]
     private(set) var archive: [ArchivedItem] = []
-    var prefs = WindowPrefs() { didSet { prefsStore.save(prefs) } }
+    var prefs = WindowPrefs() { didSet { prefsStore.save(prefs.withoutIncognito) } }
     var settings = AppSettings() { didSet { settingsStore.save(settings) } }
     private(set) var history: [String: HistoryEntry] = [:]
     private(set) var ranking = RankingData()
     /// Bumped on every structural change; cheap way for AppKit code to observe.
     private(set) var revision = 0
+    /// The browser window that menu commands, new tabs and the command bar act on:
+    /// the one the user is in (AppDelegate follows the key window).
+    @ObservationIgnored var activeWindowID = UUID() {
+        didSet { if !window(activeWindowID).isIncognito { lastNormalWindowID = activeWindowID } }
+    }
+    /// The normal window in use last: where links from other apps and the Library go
+    /// while an incognito window is in front.
+    @ObservationIgnored private(set) var lastNormalWindowID = UUID()
+    /// Spaces of incognito windows. Not in `spaceOrder`, never saved.
+    private(set) var incognitoSpaceIDs: Set<UUID> = []
 
     // MARK: Persistence
 
@@ -32,6 +44,7 @@ final class SidebarStore {
     init() {
         let doc = sidebarFile.load(or: SidebarDocument.fresh)
         for s in doc.spaces { spaces[s.id] = s }
+        profiles = doc.profiles ?? []
         spaceOrder = doc.spaceOrder.filter { spaces[$0] != nil }
         for s in doc.spaces where !spaceOrder.contains(s.id) { spaceOrder.append(s.id) }
         for it in doc.items { items[it.id] = it }
@@ -41,10 +54,14 @@ final class SidebarStore {
         for h in historyFile.load(or: { [] }) { history[h.url] = h }
         ranking = rankingFile.load(or: { RankingData() })
         repair()
-        if prefs.focusedSpaceID == nil || spaces[prefs.focusedSpaceID!] == nil {
-            prefs.focusedSpaceID = spaceOrder.first
+        if prefs.windows.isEmpty { prefs.windows = [WindowSession()] }
+        for i in prefs.windows.indices where prefs.windows[i].focusedSpaceID.flatMap({ spaces[$0] }) == nil {
+            prefs.windows[i].focusedSpaceID = spaceOrder.first
         }
+        activeWindowID = prefs.windows[0].id
+        lastNormalWindowID = activeWindowID
         splitSharedFavorites(doc.favoritesContainerID)
+        resolveWindowConflicts(winner: activeWindowID)
     }
 
     /// Make sure every space has its containers and no item points at a
@@ -63,8 +80,9 @@ final class SidebarStore {
                 let c = SidebarItem.container(.today(spaceID: id), id: space.todayContainerID)
                 items[c.id] = c
             }
+            // A profile that is gone: the space falls back to Default (Arc does the same).
+            if let p = space.profileID, !profiles.contains(where: { $0.id == p }) { space.profileID = nil }
             spaces[id] = space
-            _ = space
         }
         if spaces.isEmpty {
             let doc = SidebarDocument.fresh()
@@ -106,7 +124,9 @@ final class SidebarStore {
                 }
             }
             // A favorite open in this space stays open: it is now this space's copy.
-            if let sel = prefs.selectedTabPerSpace[sid], let copy = copies[sel] { prefs.selectedTabPerSpace[sid] = copy }
+            for i in prefs.windows.indices {
+                if let sel = prefs.windows[i].selectedTabPerSpace[sid], let copy = copies[sel] { prefs.windows[i].selectedTabPerSpace[sid] = copy }
+            }
             for (old, new) in copies where prefs.expandedFolders.contains(old) { prefs.expandedFolders.insert(new) }
         }
         items[sharedID] = nil
@@ -126,33 +146,136 @@ final class SidebarStore {
     }
 
     func save() {
-        let doc = SidebarDocument(version: 1, spaceOrder: spaceOrder, spaces: spaceOrder.compactMap { spaces[$0] },
-                                  items: Array(items.values))
-        sidebarFile.save(doc)
+        sidebarFile.save(document)
         archiveFile.save(archive)
     }
 
     func saveAll() {
-        let doc = SidebarDocument(version: 1, spaceOrder: spaceOrder, spaces: spaceOrder.compactMap { spaces[$0] },
-                                  items: Array(items.values))
-        sidebarFile.saveNow(doc)
+        sidebarFile.saveNow(document)
         archiveFile.saveNow(archive)
-        prefsStore.saveNow(prefs)
+        prefsStore.saveNow(prefs.withoutIncognito)
         settingsStore.saveNow(settings)
         historyFile.saveNow(Array(history.values))
         rankingFile.saveNow(ranking)
     }
 
     private func touch() {
+        resolveWindowConflicts(winner: activeWindowID)
         revision &+= 1
         save()
+    }
+
+    // MARK: Windows
+
+    private func windowIndex(_ id: UUID?) -> Int {
+        prefs.windows.firstIndex { $0.id == (id ?? activeWindowID) } ?? prefs.windows.firstIndex { $0.id == activeWindowID } ?? 0
+    }
+
+    /// A window's state; an unknown id (a window that is gone) reads as the active window.
+    func window(_ id: UUID? = nil) -> WindowSession { prefs.windows[windowIndex(id)] }
+
+    /// No-op for a window that is gone.
+    func updateWindow(_ id: UUID?, _ change: (inout WindowSession) -> Void) {
+        guard let i = prefs.windows.firstIndex(where: { $0.id == (id ?? activeWindowID) }) else { return }
+        var w = prefs.windows[i]
+        change(&w)
+        if w != prefs.windows[i] { prefs.windows[i] = w }
+    }
+
+    /// A new window on `spaceID` with nothing open yet.
+    func addWindow(spaceID: UUID, frame: String?) -> WindowSession {
+        let w = WindowSession(focusedSpaceID: spaceID, frame: frame)
+        prefs.windows.append(w)
+        return w
+    }
+
+    /// The last window is never removed: closing it only hides it. An incognito
+    /// window's tabs go with it (not to the Library).
+    func removeWindow(_ id: UUID) {
+        guard prefs.windows.count > 1, let gone = prefs.windows.first(where: { $0.id == id }) else { return }
+        prefs.windows.removeAll { $0.id == id }
+        if activeWindowID == id { activeWindowID = prefs.windows.first { !$0.isIncognito }?.id ?? prefs.windows[0].id }
+        if gone.isIncognito, let sid = gone.focusedSpaceID, let space = spaces[sid] {
+            var ids = Set<UUID>()
+            collectSubtree(of: space, into: &ids)
+            for i in ids { items[i] = nil }
+            spaces[sid] = nil
+            incognitoSpaceIDs.remove(sid)
+            revision &+= 1
+        }
+    }
+
+    /// Arc's New Incognito Window: a window with a space of its own whose tabs load
+    /// in an off-the-record profile and are never written anywhere.
+    func addIncognitoWindow(frame: String?) -> WindowSession {
+        let id = UUID()
+        let favorites = SidebarItem.container(.favorites(spaceID: id))
+        let pinned = SidebarItem.container(.pinned(spaceID: id))
+        let today = SidebarItem.container(.today(spaceID: id))
+        for c in [favorites, pinned, today] { items[c.id] = c }
+        spaces[id] = Space(id: id, title: "Incognito", emoji: "🕶️", theme: .incognito, favoritesContainerID: favorites.id,
+                           pinnedContainerID: pinned.id, todayContainerID: today.id, createdAt: Date())
+        incognitoSpaceIDs.insert(id)
+        let w = WindowSession(focusedSpaceID: id, frame: frame, isIncognito: true)
+        prefs.windows.append(w)
+        return w
+    }
+
+    func isIncognito(space id: UUID?) -> Bool { id.map(incognitoSpaceIDs.contains) ?? false }
+    func isIncognito(item id: UUID) -> Bool { isIncognito(space: spaceID(ofItem: id)) }
+
+    /// The spaces a window pages between: an incognito window has only its own.
+    func pagedSpaces(window id: UUID?) -> [Space] {
+        let w = window(id)
+        if w.isIncognito, let s = w.focusedSpaceID.flatMap({ spaces[$0] }) { return [s] }
+        return orderedSpaces
+    }
+
+    /// The tabs a window may show and the command bar may offer there: its own
+    /// incognito tabs, or every normal tab.
+    func profileTabs(window id: UUID?) -> [SidebarItem] {
+        let sid = focusedSpaceID(window: id)
+        if isIncognito(space: sid), let s = spaces[sid] {
+            return tabs(under: s.favoritesContainerID) + tabs(under: s.pinnedContainerID) + tabs(under: s.todayContainerID)
+        }
+        return allTabs().filter { !isIncognito(item: $0.id) }
+    }
+
+    private func collectSubtree(of space: Space, into ids: inout Set<UUID>) {
+        func walk(_ id: UUID) {
+            ids.insert(id)
+            for c in items[id]?.children ?? [] { walk(c) }
+        }
+        for c in [space.favoritesContainerID, space.pinnedContainerID, space.todayContainerID] { walk(c) }
+    }
+
+    /// A page is one Chromium browser, so it is on screen in one window at a time:
+    /// when two windows would show the same tab, the winner keeps it and the other
+    /// window drops its open tab in that space (it shows the empty space instead).
+    private func resolveWindowConflicts(winner: UUID, wins: Bool = true) {
+        guard prefs.windows.count > 1 else { return }
+        let me = prefs.windows.filter { $0.id == winner }, others = prefs.windows.filter { $0.id != winner }
+        var claimed = Set<UUID>()
+        for w in wins ? me + others : others + me {
+            let sid = focusedSpaceID(window: w.id)
+            let panes = visiblePaneTabIDs(in: sid, window: w.id)
+            if claimed.isDisjoint(with: panes) {
+                claimed.formUnion(panes)
+            } else {
+                updateWindow(w.id) { $0.selectedTabPerSpace[sid] = nil }
+            }
+        }
     }
 
     // MARK: Lookup
 
     var orderedSpaces: [Space] { spaceOrder.compactMap { spaces[$0] } }
-    var focusedSpaceID: UUID { prefs.focusedSpaceID ?? spaceOrder.first! }
-    var focusedSpace: Space { spaces[focusedSpaceID] ?? orderedSpaces.first! }
+    func focusedSpaceID(window id: UUID?) -> UUID {
+        window(id).focusedSpaceID.flatMap { spaces[$0] != nil ? $0 : nil } ?? spaceOrder.first!
+    }
+    func focusedSpace(window id: UUID?) -> Space { spaces[focusedSpaceID(window: id)] ?? orderedSpaces.first! }
+    var focusedSpaceID: UUID { focusedSpaceID(window: nil) }
+    var focusedSpace: Space { focusedSpace(window: nil) }
 
     func item(_ id: UUID) -> SidebarItem? { items[id] }
     func space(_ id: UUID) -> Space? { spaces[id] }
@@ -192,9 +315,9 @@ final class SidebarStore {
 
     /// The top-level pinned rows a space's list draws. Collapsed, only the
     /// pinned item holding the open tab stays.
-    func listedPinnedItems(in space: Space) -> [SidebarItem] {
+    func listedPinnedItems(in space: Space, window: UUID? = nil) -> [SidebarItem] {
         guard isPinnedCollapsed(space.id) else { return children(of: space.pinnedContainerID) }
-        let selected = selectedTabID(in: space.id).flatMap { splitContaining($0) ?? item($0) }
+        let selected = selectedTabID(in: space.id, window: window).flatMap { splitContaining($0) ?? item($0) }
         return selected.flatMap { rootContainer(of: $0.id) == .pinned(spaceID: space.id) ? [$0] : nil } ?? []
     }
 
@@ -232,42 +355,53 @@ final class SidebarStore {
         return false
     }
 
-    func selectedTabID(in spaceID: UUID) -> UUID? {
-        guard let id = prefs.selectedTabPerSpace[spaceID], items[id]?.isTab == true else { return nil }
+    func selectedTabID(in spaceID: UUID, window: UUID? = nil) -> UUID? {
+        guard let id = self.window(window).selectedTabPerSpace[spaceID], items[id]?.isTab == true else { return nil }
         return id
     }
-    var selectedTabID: UUID? { selectedTabID(in: focusedSpaceID) }
-    var selectedTab: SidebarItem? { selectedTabID.flatMap { items[$0] } }
+    func selectedTabID(window: UUID?) -> UUID? { selectedTabID(in: focusedSpaceID(window: window), window: window) }
+    func selectedTab(window: UUID?) -> SidebarItem? { selectedTabID(window: window).flatMap { items[$0] } }
+    var selectedTabID: UUID? { selectedTabID(window: nil) }
+    var selectedTab: SidebarItem? { selectedTab(window: nil) }
 
     // MARK: Tabs
 
     @discardableResult
     func createTab(url: String, title: String = "", in spaceID: UUID? = nil, pinned: Bool = false,
-                   select: Bool = true, parent: UUID? = nil, index: Int? = nil) -> SidebarItem {
-        let sid = spaceID ?? focusedSpaceID
-        let space = spaces[sid] ?? focusedSpace
+                   select: Bool = true, parent: UUID? = nil, index: Int? = nil, window: UUID? = nil) -> SidebarItem {
+        let sid = spaceID ?? focusedSpaceID(window: window)
+        let space = spaces[sid] ?? focusedSpace(window: window)
         let parentID = parent ?? (pinned ? space.pinnedContainerID : space.todayContainerID)
         var tab = SidebarItem.tab(url, title: title, parent: parentID)
-        tab.data = .tab({ var t = TabData(url: url, title: title); t.activeTabBeforeCreationID = selectedTabID(in: sid); return t }())
+        tab.data = .tab({ var t = TabData(url: url, title: title); t.activeTabBeforeCreationID = selectedTabID(in: sid, window: window); return t }())
         tab.isUnread = !select
         items[tab.id] = tab
         var p = items[parentID]!
         let at = index ?? (settings.newTabsAtTop && !pinned ? 0 : p.children.count)
         p.children.insert(tab.id, at: min(max(0, at), p.children.count))
         items[parentID] = p
-        if select { selectTab(tab.id) } else { touch() }
+        if select { selectTab(tab.id, window: window) } else { touch() }
         return tab
     }
 
-    func selectTab(_ id: UUID?) {
+    func selectTab(_ id: UUID?, window: UUID? = nil) {
+        var w = self.window(window).id
+        // A normal tab picked while an incognito window is in front (a link from another
+        // app, the Library) opens in the last normal window.
+        if window == nil, let id, self.window(w).isIncognito, !isIncognito(item: id) { w = lastNormalWindowID }
+        let focused = focusedSpaceID(window: w)
         guard let id, let it = items[id], it.isTab else {
-            prefs.selectedTabPerSpace[focusedSpaceID] = nil
+            updateWindow(w) { $0.selectedTabPerSpace[focused] = nil }
             touch()
             return
         }
-        let sid = spaceID(ofItem: id) ?? focusedSpaceID
-        if sid != focusedSpaceID { prefs.focusedSpaceID = sid }
-        prefs.selectedTabPerSpace[sid] = id
+        let sid = spaceID(ofItem: id) ?? focused
+        // Incognito pages stay in their own window; normal tabs never open in one.
+        guard self.window(w).isIncognito ? sid == focused : !isIncognito(space: sid) else { return }
+        updateWindow(w) {
+            $0.focusedSpaceID = sid
+            $0.selectedTabPerSpace[sid] = id
+        }
         var updated = it
         updated.isUnread = false
         if var t = updated.tab { t.timeLastActiveAt = Date(); updated.data = .tab(t) }
@@ -279,11 +413,14 @@ final class SidebarStore {
             split.data = .split(s)
             items[p] = split
         }
-        var dates = ranking.recentlySwitchedToTabs[id] ?? []
-        dates.append(Date())
-        if dates.count > 10 { dates.removeFirst(dates.count - 10) }
-        ranking.recentlySwitchedToTabs[id] = dates
-        rankingFile.save(ranking)
+        if !isIncognito(space: sid) {
+            var dates = ranking.recentlySwitchedToTabs[id] ?? []
+            dates.append(Date())
+            if dates.count > 10 { dates.removeFirst(dates.count - 10) }
+            ranking.recentlySwitchedToTabs[id] = dates
+            rankingFile.save(ranking)
+        }
+        resolveWindowConflicts(winner: w)
         touch()
     }
 
@@ -299,7 +436,7 @@ final class SidebarStore {
         items[id] = it
         revision &+= 1
         sidebarFile.save(SidebarDocument(version: 1, spaceOrder: spaceOrder, spaces: orderedSpaces,
-                                         items: Array(items.values)), delay: 2)
+                                         items: Array(items.values), profiles: profiles), delay: 2)
     }
 
     func markUnread(_ id: UUID, _ unread: Bool = true) {
@@ -379,16 +516,29 @@ final class SidebarStore {
 
     func touchAfterImport() { touch() }
 
+    /// What goes to disk: everything but incognito windows' spaces and tabs.
     var document: SidebarDocument {
-        SidebarDocument(version: 1, spaceOrder: spaceOrder, spaces: orderedSpaces, items: Array(items.values))
+        var hidden = Set<UUID>()
+        for sid in incognitoSpaceIDs { if let s = spaces[sid] { collectSubtree(of: s, into: &hidden) } }
+        return SidebarDocument(version: 1, spaceOrder: spaceOrder, spaces: orderedSpaces,
+                               items: hidden.isEmpty ? Array(items.values) : items.values.filter { !hidden.contains($0.id) },
+                               profiles: profiles)
     }
 
-    /// Most recently used tab other than the current one (⌃Tab).
-    func mostRecentOtherTab() -> UUID? {
-        let current = selectedTabID
-        return ranking.recentlySwitchedToTabs
-            .filter { $0.key != current && items[$0.key]?.isTab == true }
-            .max { ($0.value.last ?? .distantPast) < ($1.value.last ?? .distantPast) }?.key
+    /// The tab switcher's list (⌃Tab): a space's most recently used tabs, newest first
+    /// (Arc shows five, the current tab first).
+    func recentTabs(in sid: UUID, limit: Int) -> [UUID] {
+        visibleTabs(in: sid)
+            .filter { $0.tab?.timeLastActiveAt != nil }
+            .sorted { $0.tab!.timeLastActiveAt! > $1.tab!.timeLastActiveAt! }
+            .prefix(limit).map(\.id)
+    }
+
+    /// The tab last used in a space before `id` (where Arc goes after "Close and Keep Pinned").
+    func mostRecentTab(in sid: UUID, excluding id: UUID) -> UUID? {
+        visibleTabs(in: sid)
+            .filter { $0.id != id && $0.tab?.timeLastActiveAt != nil }
+            .max { $0.tab!.timeLastActiveAt! < $1.tab!.timeLastActiveAt! }?.id
     }
 
     // MARK: Tree moves
@@ -416,6 +566,8 @@ final class SidebarStore {
     /// today list unpacks it.
     func moveItem(_ id: UUID, to newParent: UUID, index: Int?) {
         guard var it = items[id], items[newParent] != nil, id != newParent, !isDescendant(newParent, of: id) else { return }
+        // A page can't change profile: nothing moves into or out of an incognito window.
+        guard isIncognito(item: id) == isIncognito(item: newParent) else { return }
         // Only tabs live inside a split; dropping onto a split adds a pane.
         if items[newParent]?.isSplit == true {
             if it.isTab { addToSplit(newParent, tabID: id, at: index) }
@@ -486,8 +638,8 @@ final class SidebarStore {
     }
 
     /// Panes shown in a space right now (the selected tab's split).
-    func visiblePaneTabIDs(in spaceID: UUID) -> [UUID] {
-        guard let sel = selectedTabID(in: spaceID) else { return [] }
+    func visiblePaneTabIDs(in spaceID: UUID, window: UUID? = nil) -> [UUID] {
+        guard let sel = selectedTabID(in: spaceID, window: window) else { return [] }
         return paneTabIDs(for: sel)
     }
 
@@ -665,8 +817,12 @@ final class SidebarStore {
             items[gp] = grand
         }
         items[splitID] = nil
-        if let sid, let sel = prefs.selectedTabPerSpace[sid], items[sel] == nil {
-            prefs.selectedTabPerSpace[sid] = split.children.first
+        if let sid {
+            for w in prefs.windows {
+                if let sel = w.selectedTabPerSpace[sid], items[sel] == nil {
+                    updateWindow(w.id) { $0.selectedTabPerSpace[sid] = split.children.first }
+                }
+            }
         }
     }
 
@@ -806,23 +962,20 @@ final class SidebarStore {
     func archiveTab(_ id: UUID, reason: ArchiveReason) {
         guard let it = items[id], it.isTab else { return }
         let sid = spaceID(ofItem: id)
-        let wasSelected = sid.flatMap { selectedTabID(in: $0) } == id
+        let selectedIn = sid.map { s in prefs.windows.filter { $0.selectedTabPerSpace[s] == id }.map(\.id) } ?? []
         let pinned = isPinned(id)
         let split = splitContaining(id)
         detach(id)
         items[id] = nil
-        // Empty panes never had a page; nothing to keep in the Library.
-        if !it.isEmptyTab {
+        // Empty panes never had a page and incognito pages leave no trace: nothing for the Library.
+        if !it.isEmptyTab, !isIncognito(space: sid) {
             archive.insert(ArchivedItem(archivedAt: Date(), reason: reason, sourceSpaceID: sid, wasPinned: pinned, item: it), at: 0)
             if archive.count > 2000 { archive.removeLast(archive.count - 2000) }
         }
-        if wasSelected, let sid {
+        if !selectedIn.isEmpty, let sid {
             // Closing a pane keeps the split on screen: focus a neighbour pane.
-            if let split, let remaining = items[split.id]?.children.first(where: { items[$0]?.isTab == true }) {
-                prefs.selectedTabPerSpace[sid] = remaining
-            } else {
-                prefs.selectedTabPerSpace[sid] = nextSelection(after: it, in: sid)
-            }
+            let next = split.flatMap { s in items[s.id]?.children.first { items[$0]?.isTab == true } } ?? nextSelection(after: it, in: sid)
+            for w in selectedIn { updateWindow(w) { $0.selectedTabPerSpace[sid] = next } }
         }
         if let split { collapseSplitIfNeeded(split.id) }
         touch()
@@ -893,8 +1046,8 @@ final class SidebarStore {
         guard settings.autoArchiveEnabled else { return }
         let cutoff = Date().addingTimeInterval(-settings.autoArchive.seconds)
         for space in orderedSpaces {
-            let selected = selectedTabID(in: space.id)
-            for t in tabs(under: space.todayContainerID) where t.id != selected {
+            let selected = Set(prefs.windows.compactMap { $0.selectedTabPerSpace[space.id] })
+            for t in tabs(under: space.todayContainerID) where !selected.contains(t.id) {
                 let last = t.tab?.timeLastActiveAt ?? t.createdAt
                 if last < cutoff { archiveTab(t.id, reason: .auto) }
             }
@@ -917,7 +1070,7 @@ final class SidebarStore {
                           pinnedContainerID: pinned.id, todayContainerID: today.id, createdAt: Date())
         spaces[id] = space
         spaceOrder.append(id)
-        if focus { prefs.focusedSpaceID = id }
+        if focus, !window().isIncognito { updateWindow(nil) { $0.focusedSpaceID = id } }
         touch()
         return space
     }
@@ -929,7 +1082,7 @@ final class SidebarStore {
     }
 
     func deleteSpace(_ id: UUID) {
-        guard spaces.count > 1, let space = spaces[id] else { return }
+        guard spaceOrder.count > 1, spaceOrder.contains(id), let space = spaces[id] else { return }
         for t in tabs(under: space.favoritesContainerID) + tabs(under: space.pinnedContainerID) + tabs(under: space.todayContainerID) {
             archiveTab(t.id, reason: .spaceDeleted)
         }
@@ -939,8 +1092,55 @@ final class SidebarStore {
         items[space.todayContainerID] = nil
         spaces[id] = nil
         spaceOrder.removeAll { $0 == id }
-        prefs.selectedTabPerSpace[id] = nil
-        if prefs.focusedSpaceID == id { prefs.focusedSpaceID = spaceOrder.first }
+        var windows = prefs.windows
+        for i in windows.indices {
+            windows[i].selectedTabPerSpace[id] = nil
+            if windows[i].focusedSpaceID == id { windows[i].focusedSpaceID = spaceOrder.first }
+        }
+        prefs.windows = windows
+        touch()
+    }
+
+    // MARK: Profiles
+
+    func profile(_ id: UUID?) -> BrowserProfile? { id.flatMap { p in profiles.first { $0.id == p } } }
+    func spaces(usingProfile id: UUID?) -> [Space] { orderedSpaces.filter { $0.profileID == id } }
+
+    /// The Chromium folder a tab's pages load in: its space's profile, or nil for the
+    /// Default profile (and for incognito, which has its own off-the-record one).
+    func profilePath(item id: UUID) -> String? {
+        guard let sid = spaceID(ofItem: id), !isIncognito(space: sid), let p = profile(spaces[sid]?.profileID) else { return nil }
+        return AppPaths.chromiumCache.appendingPathComponent(p.directoryName, isDirectory: true).path
+    }
+
+    @discardableResult
+    func createProfile(name: String) -> BrowserProfile {
+        let p = BrowserProfile(id: UUID(), name: name)
+        profiles.append(p)
+        touch()
+        return p
+    }
+
+    func renameProfile(_ id: UUID, to name: String) {
+        guard let i = profiles.firstIndex(where: { $0.id == id }), !name.isEmpty else { return }
+        profiles[i].name = name
+        touch()
+    }
+
+    /// Pages already open in the space load again in the new profile (BrowserManager).
+    func setProfile(_ profileID: UUID?, forSpace id: UUID) {
+        guard var s = spaces[id], s.profileID != profileID, profileID == nil || profile(profileID) != nil else { return }
+        s.profileID = profileID
+        spaces[id] = s
+        touch()
+    }
+
+    /// Arc: only profiles no space uses can be deleted. Chromium may still hold the
+    /// folder open, so it goes at the next launch (ProfileCleanup).
+    func deleteProfile(_ id: UUID) {
+        guard let p = profile(id), spaces.values.allSatisfy({ $0.profileID != id }) else { return }
+        profiles.removeAll { $0.id == id }
+        ProfileCleanup.schedule(p.directoryName)
         touch()
     }
 
@@ -951,16 +1151,19 @@ final class SidebarStore {
         touch()
     }
 
-    func focusSpace(_ id: UUID) {
-        guard spaces[id] != nil, id != focusedSpaceID else { return }
-        prefs.focusedSpaceID = id
+    /// A window switching to a space whose open tab another window shows leaves it there.
+    func focusSpace(_ id: UUID, window: UUID? = nil) {
+        let w = self.window(window).id
+        guard spaces[id] != nil, id != focusedSpaceID(window: w), !self.window(w).isIncognito, !isIncognito(space: id) else { return }
+        updateWindow(w) { $0.focusedSpaceID = id }
+        resolveWindowConflicts(winner: w, wins: false)
         revision &+= 1
     }
 
-    func focusSpace(offset: Int) {
-        guard let idx = spaceOrder.firstIndex(of: focusedSpaceID), spaceOrder.count > 1 else { return }
+    func focusSpace(offset: Int, window: UUID? = nil) {
+        guard let idx = spaceOrder.firstIndex(of: focusedSpaceID(window: window)), spaceOrder.count > 1 else { return }
         let n = spaceOrder.count
-        focusSpace(spaceOrder[((idx + offset) % n + n) % n])
+        focusSpace(spaceOrder[((idx + offset) % n + n) % n], window: window)
     }
 
     // MARK: History and ranking signals
@@ -981,7 +1184,7 @@ final class SidebarStore {
 
     func recordQuerySelection(query: String, url: String) {
         let q = query.lowercased().trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { return }
+        guard !q.isEmpty, !window().isIncognito else { return }
         ranking.queriesToSelected[q] = url
         if ranking.queriesToSelected.count > 500 {
             if let k = ranking.queriesToSelected.keys.first { ranking.queriesToSelected[k] = nil }

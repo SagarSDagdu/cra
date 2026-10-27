@@ -9,7 +9,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     let favicons = FaviconCache()
     lazy var engine = SuggestionEngine(store: store, bindings: bindings)
 
-    private(set) var main: MainWindowController!
+    /// Browser windows, one per WindowSession. Closing the last one only hides it.
+    private(set) var mainWindows: [MainWindowController] = []
+    /// The browser window in use: the key one, or the one last key.
+    var main: MainWindowController! {
+        mainWindows.first { $0.windowID == store.activeWindowID } ?? mainWindows.first
+    }
     private var bootstrapped = false
     private var pendingURLs: [String] = []
     private var autoArchiveTimer: Timer?
@@ -24,8 +29,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Shortcuts the app takes before the web page sees them (Chrome calls
     /// these reserved). Everything else goes to the page first.
     static let reservedActions: Set<String> = Set([
-        "newTab", "newWindow", "closeTab", "closeWindow", "reopenClosedTab", "editURL", "toggleSidebar", "toggleToolbar",
-        "nextTab", "previousTab", "recentTab", "nextSpace", "previousSpace", "devTools", "jsConsole", "inspectElement",
+        "newTab", "newWindow", "newIncognitoWindow", "closeTab", "closeWindow", "reopenClosedTab", "editURL", "toggleSidebar", "toggleToolbar",
+        "nextTab", "previousTab", "recentTab", "recentTabBackward", "nextSpace", "previousSpace", "devTools", "jsConsole", "inspectElement",
         "viewArchive", "openLibrary", "settings", "clearToday", "newLittleWindow", "promoteLittleWindow",
         "addSplitView", "closeSplitPane",
     ] + (1...9).flatMap { ["item\($0)", "space\($0)"] })
@@ -46,10 +51,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         NotificationCenter.default.addObserver(forName: .craKeyBindingsChanged, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.buildMenus() }
         }
-        main = MainWindowController(app: self)
+        mainWindows = store.prefs.windows.map { MainWindowController(app: self, session: $0) }
+        followKeyWindow()
         // First launch: the default browser step and the import are the onboarding and
         // the browser window appears once they are done (Dia does the same).
-        if needsOnboarding { main.showImport(firstRun: true) } else { main.showWindow(nil) }
+        if needsOnboarding {
+            main.showImport(firstRun: true)
+        } else {
+            // The window in use last comes up in front.
+            for w in mainWindows.reversed() { w.showWindow(nil) }
+        }
         installKeyFallbackMonitor()
         installCommandFileWatcher()
         store.runAutoArchive()
@@ -77,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     NSLog("Cra: dropped start-up page from an extension: %@", url)
                     return
                 }
+                self.useNormalWindow()
                 self.store.createTab(url: url, select: true)
                 self.main.showWindow(nil)
             }
@@ -195,7 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// window_dialog_sheet_visible, active tabs). Little Windows go to the Library on quit,
     /// so an open one waits too.
     func autoUpdateBlocker() -> String? {
-        if main.overlay.toasts.contains(where: { $0.state == CraDownloadState.inProgress.rawValue }) { return "a download is in progress" }
+        if mainWindows.contains(where: { $0.overlay.toasts.contains { $0.state == CraDownloadState.inProgress.rawValue } }) { return "a download is in progress" }
         if NSApp.modalWindow != nil || NSApp.windows.contains(where: { $0.isVisible && $0.attachedSheet != nil }) { return "a dialog is open" }
         if !littleWindows.isEmpty { return "a Little Window is open" }
         if PictureInPictureChrome.shared.isPlaying { return "Picture in Picture is playing" }
@@ -213,10 +225,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     func openExternalURL(_ url: String) {
-        if let u = URL(string: url), u.scheme == "cra" {
-            handleInternalURL(u)
+        if let u = URL(string: url), u.scheme?.lowercased() == "cra" {
+            if Self.isUserFacing(u) || UserDefaults.standard.bool(forKey: "scriptingURLs") {
+                handleInternalURL(u)
+            } else {
+                NSLog("Cra: ignored %@ from another app (defaults write dk.kildahl.cra scriptingURLs -bool YES allows it)", url)
+            }
             return
         }
+        // Links from other apps never land in an incognito window (Chrome does the same).
+        useNormalWindow()
         // Arc's Air Traffic Control: the first matching route, else the default
         // ("Links from other apps open in Little Arc").
         switch store.settings.destination(forExternalURL: url) {
@@ -230,6 +248,95 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         main.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: Browser windows
+
+    /// Menu commands and new tabs follow the browser window the user is in. Its key
+    /// window is often a child (a page, the command bar, the find bar).
+    private func followKeyWindow() {
+        // Synchronous: a shortcut right after a click must already go to the new window.
+        // Main covers windows raised while Cra is in the background (Mission Control, the Window menu).
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didBecomeMainNotification] {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let self, var w = note.object as? NSWindow else { return }
+                    while let parent = w.parent { w = parent }
+                    if let c = self.mainWindows.first(where: { $0.window === w }) { self.store.activeWindowID = c.windowID }
+                }
+            }
+        }
+    }
+
+    /// The window links from other apps, the Library and Little Windows go to: the
+    /// normal window in use last, never an incognito one.
+    @discardableResult
+    func useNormalWindow() -> MainWindowController {
+        if main.isIncognito, let normal = mainWindows.first(where: { $0.windowID == store.lastNormalWindowID })
+            ?? mainWindows.first(where: { !$0.isIncognito }) {
+            store.activeWindowID = normal.windowID
+        }
+        return main
+    }
+
+    /// Arc's New Window (⌘N): another window on the space in use, cascaded from the
+    /// current one, with the command bar up. With every window closed it brings the
+    /// hidden one back instead. New Incognito Window (⇧⌘N) always opens a new one.
+    func openNewWindow(incognito: Bool = false) {
+        if !incognito, let hidden = mainWindows.first(where: { !$0.isIncognito }),
+           !mainWindows.contains(where: { $0.window?.isVisible == true || $0.window?.isMiniaturized == true }) {
+            hidden.showWindow(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        var frame: String?
+        if let current = main?.window, current.isVisible, !current.styleMask.contains(.fullScreen) {
+            var f = current.frame.offsetBy(dx: 22, dy: -22)
+            if let screen = (current.screen ?? NSScreen.main)?.visibleFrame, !screen.contains(f) {
+                f.origin = NSPoint(x: screen.minX + 22, y: screen.maxY - f.height - 22)
+            }
+            frame = NSStringFromRect(f)
+        }
+        let session = incognito ? store.addIncognitoWindow(frame: frame)
+            : store.addWindow(spaceID: store.focusedSpaceID(window: store.lastNormalWindowID), frame: frame)
+        let c = MainWindowController(app: self, session: session)
+        mainWindows.append(c)
+        store.activeWindowID = c.windowID
+        c.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        c.openCommandBar(.newTab)
+    }
+
+    /// Closing one of several windows ends it; the last normal one stays around hidden,
+    /// so a Dock click brings the browser back as it was. Incognito windows always end,
+    /// and with the last of them the off-the-record profile goes too.
+    func mainWindowWillClose(_ c: MainWindowController) {
+        guard !isRelaunching, c.isIncognito || mainWindows.contains(where: { $0 !== c && !$0.isIncognito }) else { return }
+        mainWindows.removeAll { $0 === c }
+        c.tearDown()
+        store.removeWindow(c.windowID)
+        if c.isIncognito, !mainWindows.contains(where: \.isIncognito) { CraCEFRuntime.endIncognitoSession() }
+        // AppKit makes the next window key on its own; until then actions go to the frontmost.
+        if let front = NSApp.orderedWindows.compactMap({ w in mainWindows.first { $0.window === w } }).first {
+            store.activeWindowID = front.windowID
+        }
+    }
+
+    /// A tab's live page, whichever window holds it.
+    func runtime(for tabID: UUID) -> TabRuntime? {
+        for w in mainWindows { if let rt = w.browsers.runtime(for: tabID) { return rt } }
+        return nil
+    }
+
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let menu = NSMenu()
+        for (title, id) in [("New Window", "newWindow"), ("New Incognito Window", "newIncognitoWindow")] {
+            let item = NSMenuItem(title: title, action: #selector(menuAction(_:)), keyEquivalent: "")
+            item.representedObject = id
+            item.target = self
+            menu.addItem(item)
+        }
+        return menu
     }
 
     // MARK: Little Windows
@@ -268,6 +375,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         for w in littleWindows { w.closeWindow() }
     }
 
+    /// cra:// URLs any app may send: they do what the user could do from the Dock.
+    /// The rest (action, navigate, key, import, debug, open with a file: or javascript:
+    /// URL) run scripts, DevTools Protocol and key presses, so a link in a mail or another
+    /// browser must not reach them. CRA_COMMAND_FILE and the scriptingURLs default do.
+    static func isUserFacing(_ u: URL) -> Bool {
+        switch u.host {
+        case "commandbar", "dismiss":
+            return true
+        case "open":
+            let target = URLComponents(url: u, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "url" }?.value
+            let scheme = target.flatMap { URL(string: $0)?.scheme?.lowercased() }
+            return scheme == "http" || scheme == "https"
+        default:
+            return false
+        }
+    }
+
     /// cra://commandbar?query=…&mode=edit, cra://action/<id>, cra://open?url=…,
     /// cra://dismiss.
     /// Arc marks a tab chosen from the keyboard with its yellow/black focus ring.
@@ -294,6 +418,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if let url = q("url"), q("little") == "1" {
                 openLittleWindow(url: url)
             } else if let url = q("url") {
+                useNormalWindow()
                 let tab = store.createTab(url: url, select: q("background") != "1")
                 if q("background") == "1" { store.markUnread(tab.id, true); main.browsers.ensureRuntime(for: tab.id) }
             }
@@ -395,7 +520,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.representedObject as? String {
-        case "toggleSidebar": item.title = store.prefs.sidebarVisible ? "Hide Sidebar" : "Show Sidebar"
+        case "toggleSidebar": item.title = main.sidebarVisible ? "Hide Sidebar" : "Show Sidebar"
         case "toggleToolbar": item.title = store.settings.showToolbar ? "Hide Toolbar" : "Show Toolbar"
         case "toggleDeveloperMode":
             let on = store.selectedTab?.tab.map { store.settings.isDeveloperMode(url: $0.url) } ?? false
@@ -410,6 +535,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case "closeSplitPane", "separateFromSplit", "flipSplitOrientation":
             return store.selectedTabID.flatMap { store.splitContaining($0) } != nil
         case "addSplitView": return store.selectedTabID != nil
+        case "editSpace", "deleteSpace", "nextSpace", "previousSpace": return !main.isIncognito
         case "closeLittleWindows": return !littleWindows.isEmpty
         default: break
         }
@@ -494,19 +620,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case "newLittleWindow": openLittleWindow(url: "")
         case "closeLittleWindows": closeLittleWindows()
         case "promoteLittleWindow": break  // only meaningful while a little window is key
-        case "newTab", "newWindow": main.openCommandBar(.newTab)
+        case "newTab": main.openCommandBar(.newTab)
+        case "newWindow": openNewWindow()
+        case "newIncognitoWindow": openNewWindow(incognito: true)
         case "editURL": main.openCommandBar(.editURL)
         case "newFolder":
             let f = store.createFolder(named: "New Folder", in: store.focusedSpace.pinnedContainerID, index: 0)
             main.sidebarUI.renamingID = f.id
         case "newSpace": main.showSpaceEditor(space: nil)
-        case "editSpace": main.showSpaceEditor(space: store.focusedSpace)
-        case "deleteSpace": confirmDeleteSpace(store.focusedSpace)
+        case "editSpace": if !main.isIncognito { main.showSpaceEditor(space: store.focusedSpace) }
+        case "deleteSpace": if !main.isIncognito { confirmDeleteSpace(store.focusedSpace) }
         case "closeTab":
             // Arc: "Close current tab or window".
             if current != nil { main.closeCurrentTab() } else { main.window?.performClose(nil) }
         case "closeWindow": main.window?.performClose(nil)
-        case "reopenClosedTab": store.reopenLastArchived()
+        case "reopenClosedTab": if !main.isIncognito { store.reopenLastArchived() }  // incognito tabs leave nothing to restore
         case "copyURL":
             if let url = current.flatMap({ store.item($0)?.tab?.url }) {
                 copy(url)
@@ -550,13 +678,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case "muteTab":
             if let c = current, let t = store.item(c)?.tab {
                 store.setMuted(c, !t.muted)
-                main.browsers.runtime(for: c)?.browser.setAudioMuted(!t.muted)
+                runtime(for: c)?.browser.setAudioMuted(!t.muted)
             }
         case "clearToday": store.clearToday()
         case "pictureInPicture": main.currentBrowser?.requestPictureInPicture(automatic: false)
         case "nextTab": main.cycleTab(1); markKeyboardFocus()
         case "previousTab": main.cycleTab(-1); markKeyboardFocus()
-        case "recentTab": if let id = store.mostRecentOtherTab() { store.selectTab(id); markKeyboardFocus() }
+        case "recentTab": main.cycleRecentTabs(1, event: NSApp.currentEvent)
+        case "recentTabBackward": main.cycleRecentTabs(-1, event: NSApp.currentEvent)
         case "nextSpace": store.focusSpace(offset: 1)
         case "previousSpace": store.focusSpace(offset: -1)
         case "addSplitView": main.addSplitPane()
@@ -605,7 +734,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if settingsController == nil {
             let actions = SettingsActions(
                 importData: { [weak self] in self?.main.showImport() },
-                openURL: { [weak self] url in guard let self else { return }; _ = self.store.createTab(url: url, select: true); self.settingsWindow?.close() })
+                openURL: { [weak self] url in
+                    guard let self else { return }
+                    self.useNormalWindow()
+                    _ = self.store.createTab(url: url, select: true)
+                    self.settingsWindow?.close()
+                    self.main.showWindow(nil)
+                })
             let c = SettingsWindowController(store: store, bindings: bindings, actions: actions)
             settingsController = c
             settingsWindow = c.window
@@ -618,6 +753,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 560), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
             w.title = "Library"
             w.contentView = NSHostingView(rootView: ArchiveView(onRestore: { [weak self] id in
+                self?.useNormalWindow()
                 self?.store.restoreArchived(id)
                 self?.archiveWindow?.close()
                 self?.main.showWindow(nil)
@@ -673,7 +809,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         menubar.addItem(submenu: appMenu, title: "Cra")
 
         let file = NSMenu(title: "File")
-        for id in ["newTab", "newWindow", "newLittleWindow", "reopenClosedTab", "editURL", "newFolder", "newSpace"] { file.addItem(item(id)) }
+        for id in ["newTab", "newWindow", "newIncognitoWindow", "newLittleWindow", "reopenClosedTab", "editURL", "newFolder", "newSpace"] { file.addItem(item(id)) }
         file.addItem(.separator())
         file.addItem(item("closeWindow")); file.addItem(item("closeTab"))
         file.addItem(.separator())

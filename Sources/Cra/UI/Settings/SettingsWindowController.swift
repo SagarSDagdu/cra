@@ -8,10 +8,10 @@ struct SettingsActions {
 }
 
 /// The panes in Dia's Settings sidebar (Dia 1.54.2: Account, Tabs, Privacy, Profiles, Skills,
-/// Apps, Shortcuts, Advanced). Cra has no account, profiles or AI skills/apps; General
+/// Apps, Shortcuts, Advanced). Cra has no account or AI skills/apps; General
 /// (system integration) and Extensions take rows instead.
 enum SettingsPane: String, CaseIterable, Identifiable {
-    case general, tabs, privacy, extensions, shortcuts, advanced
+    case general, tabs, privacy, profiles, extensions, shortcuts, advanced
     var id: String { rawValue }
 
     var title: String {
@@ -19,6 +19,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .general: return "General"
         case .tabs: return "Tabs"
         case .privacy: return "Privacy"
+        case .profiles: return "Profiles"
         case .extensions: return "Extensions"
         case .shortcuts: return "Shortcuts"
         case .advanced: return "Advanced"
@@ -31,6 +32,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .general: return "gearshape"
         case .tabs: return "square.on.square"
         case .privacy: return "hand.raised"
+        case .profiles: return "person"
         case .extensions: return "puzzlepiece.extension"
         case .shortcuts: return "keyboard"
         case .advanced: return "gearshape.2"
@@ -220,6 +222,7 @@ struct SettingsContent: View {
                 case .general: GeneralPane()
                 case .tabs: TabsPane()
                 case .privacy: PrivacyPane()
+                case .profiles: ProfilesPane()
                 case .extensions: ExtensionsPane(actions: actions)
                 case .shortcuts: ShortcutsPane()
                 case .advanced: AdvancedPane(actions: actions)

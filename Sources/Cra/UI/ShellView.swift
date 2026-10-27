@@ -562,8 +562,11 @@ final class ShellView: NSView {
         }
         statusHost.isHidden = !statusVisible
         statusHost.frame = NSRect(x: wb.minX, y: wb.minY, width: min(540, wb.width), height: 34)
-        toastHost.isHidden = toastCount == 0
-        toastHost.frame = NSRect(x: wb.maxX - 330, y: wb.minY, width: 330, height: CGFloat(toastCount) * 76 + 20)
+        if toastHost.superview === overlayParent {
+            let size = Self.toastStackSize(count: toastCount)
+            toastHost.isHidden = toastCount == 0
+            toastHost.frame = NSRect(x: wb.maxX - size.width, y: wb.minY, width: size.width, height: size.height)
+        }
         if findHost.superview === overlayParent {
             let size = CraMetrics.findBarSize, inset = CraMetrics.findBarInset
             findHost.isHidden = !findVisible
@@ -572,16 +575,25 @@ final class ShellView: NSView {
         if !animatingPanes, paneCards.allSatisfy({ $0.frozenWebBounds == nil }) { onPaneFrames?(paneWebFrames(layout)) }
     }
 
-    /// Chrome-style hosting: overlays move into a panel above the page windows, and
-    /// the find bar into its own panel (FindBarPanel), which the window controller places.
-    func moveOverlays(to view: NSView, findBar: NSPanel) {
+    /// The download toast stack, bottom trailing over the focused page.
+    static func toastStackSize(count: Int) -> NSSize {
+        NSSize(width: 330, height: CGFloat(count) * 76 + 20)
+    }
+
+    /// Chrome-style hosting: the status bubble moves into a click-through panel above the
+    /// page windows; the find bar and the toasts, which take clicks, each into their own
+    /// panel just their size, which the window controller places.
+    func moveOverlays(to view: NSView, findBar: NSPanel, toasts: NSPanel) {
         overlayParent = view
-        for h in [statusHost, toastHost] { h.removeFromSuperview(); view.addSubview(h) }
-        findHost.removeFromSuperview()
-        findHost.isHidden = false
-        findHost.autoresizingMask = [.width, .height]
-        findHost.frame = findBar.contentView!.bounds
-        findBar.contentView!.addSubview(findHost)
+        statusHost.removeFromSuperview()
+        view.addSubview(statusHost)
+        for (host, panel) in [(findHost, findBar), (toastHost, toasts)] {
+            host.removeFromSuperview()
+            host.isHidden = false
+            host.autoresizingMask = [.width, .height]
+            host.frame = panel.contentView!.bounds
+            panel.contentView!.addSubview(host)
+        }
         needsLayout = true
     }
 

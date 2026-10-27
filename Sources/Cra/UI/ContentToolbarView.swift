@@ -14,13 +14,13 @@ struct ContentToolbarView: View {
 
     private var tab: SidebarItem? {
         if let id = paneTabID { return store.item(id) }
-        return store.selectedTab
+        return store.selectedTab(window: ui.windowID)
     }
     private var onCard: Bool { tab != nil && !isEmptyPane }
     /// Arc's empty pane ("Search or Enter URL…" on the tinted card).
     private var isEmptyPane: Bool { tab?.isEmptyTab ?? false }
     private var inSplit: Bool { paneTabID != nil && ui.splitPaneIDs.count > 1 }
-    private var isFocusedPane: Bool { paneTabID == nil || store.selectedTabID == paneTabID }
+    private var isFocusedPane: Bool { paneTabID == nil || store.selectedTabID(window: ui.windowID) == paneTabID }
     private var nav: TabNavState {
         if let id = paneTabID { return ui.navState(for: id) }
         return TabNavState(canGoBack: ui.canGoBack, canGoForward: ui.canGoForward, isLoading: ui.isLoading, themeColor: ui.pageThemeColor)
@@ -97,7 +97,7 @@ struct ContentToolbarView: View {
         }
         .buttonStyle(.plain)
         .onHover { hoverURL = $0 }
-        .help(t.url)
+        .arcTooltip(t.url, followsCursor: true)
         Spacer(minLength: 8)
     }
 
@@ -196,7 +196,7 @@ struct ContentToolbarView: View {
                     }
                     .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
                     .frame(width: 26)
-                    .help("Split View Options")
+                    .arcTooltip("Split View Options")
                 }
                 ToolbarIcon(symbol: "xmark", fg: isEmptyPane ? palette.textSecondary : fgDim, help: "Close this Split Pane (⌃⇧-)", width: 30, iconSize: 14) { actions.closePane(id) }
                     .padding(.trailing, 4)
@@ -241,7 +241,7 @@ private extension ContentToolbarView {
     }
 
     var sidebarToggle: some View {
-        ToolbarIcon(symbol: "sidebar.left", fg: fgDim, help: store.prefs.sidebarVisible ? "Hide Sidebar (⌘S)" : "Show Sidebar (⌘S)",
+        ToolbarIcon(symbol: "sidebar.left", fg: fgDim, help: store.window(ui.windowID).sidebarVisible ? "Hide Sidebar (⌘S)" : "Show Sidebar (⌘S)",
                     width: 37, iconSize: 15.5) { actions.toggleSidebar() }
     }
 
@@ -270,7 +270,7 @@ struct ToolbarIcon: View {
         .buttonStyle(.plain)
         .disabled(!enabled)
         .onHover { hover = $0 }
-        .help(help)
+        .arcTooltip(help)
     }
 }
 
@@ -295,6 +295,6 @@ struct ToolbarImageButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
-        .help(help)
+        .arcTooltip(help)
     }
 }

@@ -246,6 +246,7 @@ enum ShortcutDescriptions {
     private static let table: [String: String] = [
         "newTab": "Create a new tab.",
         "newWindow": "Open a new window.",
+        "newIncognitoWindow": "Open a window that keeps no history, cookies or tabs once closed.",
         "newLittleWindow": "Open a small, disposable window for a quick look.",
         "reopenClosedTab": "Bring back the tab you closed last.",
         "editURL": "Open the command bar to search or enter a URL.",
@@ -287,7 +288,8 @@ enum ShortcutDescriptions {
         "pinTab": "Pin the tab or unpin it.",
         "nextTab": "Switch to the next tab.",
         "previousTab": "Switch to the previous tab.",
-        "recentTab": "Switch between recently used tabs.",
+        "recentTab": "Open the tab switcher and cycle through recent tabs, like ⌘Tab for apps.",
+        "recentTabBackward": "Cycle backwards through recent tabs in the tab switcher.",
         "clearToday": "Archive all of today’s tabs.",
         "favoriteTab": "Add the tab to the favorites grid.",
         "renameTab": "Give the tab a name of your own.",

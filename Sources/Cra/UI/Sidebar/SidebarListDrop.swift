@@ -224,7 +224,7 @@ struct SidebarListDropDelegate: DropDelegate {
                 if c.isFolder, store.isExpanded(c.id) { walk(store.children(of: c.id), depth + 1) }
             }
         }
-        walk(store.listedPinnedItems(in: space), 0)
+        walk(store.listedPinnedItems(in: space, window: ui.windowID), 0)
         walk(store.children(of: space.todayContainerID), 0)
         return out
     }

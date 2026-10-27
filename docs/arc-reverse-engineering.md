@@ -745,6 +745,69 @@ of the sidebar strip, pixel runs at x=500 px (2x), y = 160/700/1200/1700/2100.
   dark bars, black 5 % on light ones); on example.com Cra reads 34 with 45 at rows 82–83,
   Arc 34 with 45 at rows 84–85 (Cra's line sits inside the 32 pt strip, Arc's just under it).
 
+### Closing vs removing pinned tabs (Arc 1.170, 27 Oct 2026, field metadata + live hover recordings)
+- [O static] `SharedWindowFeature.SidebarCellCloseButtonConfiguration { action, tooltip: String }` with
+  `Action { deselect, close, unsplit }`; the tab cell state carries it as an optional, next to `canResetTab`,
+  `resetTabTitle`, `resetTabIcon`, `closeItemShortcut`, `resetItemShortcut` and
+  `shouldPerformUserAttentionAnimation`.
+- [O live] Pinned tab that is the current tab: no button until hovered, then a **minus** (—) with the
+  tooltip "Close and Keep Pinned ⌘W". Clicking it unloads the tab, keeps it pinned, selects the tab used
+  before it (a Today tab here), scrolls the sidebar to that tab and flashes a dashed yellow ring around it.
+- [O live] Any other pinned tab (here unloaded ones: Canteen plan, Dashboard): hover shows **✕** with the
+  tooltip "Archive this tab". The ✕ removes the tab from the pinned section into the archive (going by the
+  tooltip; not clicked, to keep Victor's pinned tabs).
+- [I] A pinned tab that is loaded but in the background also gets ✕ (`deselect` only makes sense for the
+  current tab; the one capture of a not-yet-current Temp Mail showed ✕). Not confirmed: Arc stopped
+  taking synthetic input before that test finished.
+- [?] Arc's pinned-tab context-menu titles (short Swift literals are inline in code, not in `strings`).
+- Cra (TabRow): current pinned → `minus`, "Close and Keep Pinned (⌘W)", unload + reset + select the
+  most recently active tab (`SidebarStore.mostRecentTab`); other pinned → ✕, "Archive this tab",
+  `archiveTab`. Context menu: "Close and Keep Pinned" (only when open/loaded) and "Archive Tab". The URL
+  tooltip moved from the row to the title so the buttons' tooltips show. No attention ring yet.
+- Tooltips on these buttons (ArcTooltip module, field metadata): `ArcTooltipConfiguration { content,
+  keyboardShortcut, preferredAnchor: .view(edge) | .cursor, presentationBehavior: .onMouseIdle(delay) |
+  .immediate, maxWidth, colorPalette }`, `TooltipController { presentationTimer, lastTooltipDismissedAtTime,
+  … }`. [O live, 1x recordings] Shown 1.60 s after the pointer's last move (two cases, 30 fps); moving
+  straight from one tip to another control swaps at once; pops in with no fade, fades out in ~2 frames.
+  Navy capsule 28 pt, no visible border, 12 pt medium text (fill 96 for "Canteen plan", 110 for
+  "Archive this tab", 198 for "Close and Keep Pinned ⌘W"), 10 pt side padding, 7 pt text→caps, caps
+  ~18 pt with a darker 2 px bottom band (~#777AD3), 3 pt apart. Button tips hang off the bottom-trailing
+  corner of a 16 pt box around the glyph (fill top-left = glyph centre + (8, 7)); row tips ("Canteen plan",
+  the title) follow the cursor at +(13, 14).
+- Cra: `ArcTooltip.swift` (`.arcTooltip(help)`, one shared non-activating child panel, `(⌘W)` suffixes
+  become caps) on SidebarIconButton, ToolbarIcon and ToolbarImageButton. Measured against Arc on the
+  same 1x screen: delay 1.63 s, widths 198/109, height within 1 px; a click dismisses and the next tip waits
+  for idle again. Toolbar/header placement uses the same rule but was not compared with Arc's toolbar. Row
+  tooltips stay native (URL); Arc shows the title in its own pill there.
+- [O static] Arc's tooltip inventory (strings whose translator comment starts "Tooltip"): sidebar "Archive
+  this tab", "Close and Keep Pinned", reset pinned tab, mute/unmute tab, camera/mic indicator ("This tab is
+  using your camera or microphone"), renameable tab subtitle "Double-click to rename", "Separate from Split
+  View", close a tab group, folder create/close ("Close This Folder")/archive, "Clear Today tabs" / "Clear
+  unselected Today tabs", "Organize Today Tabs", space header "Edit Space theme" / "Edit Space profile" /
+  space options, dock "Drag to Reorder Space", Library button, Site Control Center ("Capture a portion of
+  this page", "Capture the full page", copy URL, new Boost, share, ad-blocker states, extension add/pin/unpin),
+  PiP (back to tab, close, minimise), Little Arc copy URL/extensions. Short values (< 16 bytes) are inline in
+  code, so only their comments are listed.
+- Cra (27 Oct): every sidebar/toolbar/Site Control Center/PiP tooltip now uses `.arcTooltip`; tab rows,
+  favorites, split rows and URL fields use the cursor anchor and show the title (Arc) instead of the URL;
+  the innermost hovered control owns the tip; the Today "Clear" button got "Clear Today tabs".
+- Added after that: a muted tab's speaker is a button ("Unmute Tab"); a red dot "This tab is using your
+  camera or microphone" from CEF's OnMediaAccessChange (CraBrowser.isCapturingMedia →
+  SidebarUIState.capturingTabIDs); the split close button reads "Separate from Split View" while ⌥ is held
+  (Arc's allowedModifierKeys / option-click-to-unsplit); "Double-click to rename" as a second line of the
+  row tip, once (Arc: WindowData+RenameHints, `renameHintItemID`, `setRenameHint`, `didShowRenameHint`; Cra
+  shows it on the first row tip of a tab without a custom name, then sets `didShowRenameHint`). Long
+  titles wrap at 280 pt, up to 3 lines (Arc has `maxWidth`, value unknown). Looks of the dot, the mute glyph
+  and the two-line tip are Cra's; Arc's weren't observed. Arc shows the speaker for audible tabs too; CEF
+  has no audible callback short of an audio handler that takes over playback, so Cra shows it when muted.
+  A live Arc sweep (toolbar back/forward/reload, Site Control Center, split menu, favorites, space header,
+  folder) failed: a stuck hover-preview card blocked all of Arc's tooltips, so whether those controls show
+  a tip in Arc is still open.
+- Testing notes: in Arc, still captures taken ~1 s after a pointer move often show the previous hover
+  state; record `screencapture -V` instead. AX `AXScroll*ByPage` on Arc's list scrolled the drawing out of
+  step with the hit-testing, so later clicks landed on other rows. In Cra, `cliclick c:` is too fast for
+  the row's SwiftUI tap; `dd: w:80 du:` selects.
+
 ### Backdrop-layer blur for light vibrant themes (25 Oct 2026, final)
 
 The system materials could not reproduce Arc's intercept and slope together, so
@@ -934,11 +997,23 @@ browsers on this Mac read read-only. Dia's onboarding itself was not re-run past
   PBKDF2-SHA1(secret, "saltysalt", 1003, 16), IV = 16×0x20; the secret is the login-Keychain item
   "<Name> Safe Storage" (one OS password prompt per browser). Cookies DB version ≥ 24 prefixes the
   plaintext with SHA-256(host_key) — checked to confirm the key, and re-added for Cra's own profile.
-  Cra re-encrypts every row with its own key (Cra runs Chromium `--use-mock-keychain`, secret
-  "mock_password") and stages them to `pending-credentials.json` (0600); `main.swift` writes them into
+  Cra re-encrypts every row with its own key (the secret in Cra's "Cra Safe Storage" item,
+  `SafeStorage.swift`) and stages them to `pending-credentials.json` (0600); `main.swift` writes them into
   the profile's `Cookies` / `Login Data` before CEF starts (both are locked while Chromium runs) and
   only when no other instance is up, then deletes the file. Verified end-to-end against this Mac's Dia
   profile (1 login + 3052 cookies decrypted, staged, applied on relaunch, idempotent on re-run).
+- [O] Cra's own Safe Storage (reported by Rainatsu, 27 Oct 2026). Until then Cra ran Chromium with
+  `--use-mock-keychain`, so its profile's v10 values used the public secret "mock_password", and imports
+  moved Keychain-protected data under it. Now Chromium reads "Cra Safe Storage" (account "Chromium"):
+  `scripts/cef-patches/keychain-service-name.patch`, and for the cef-156.0.14-codecs2 framework a
+  binary patch in `fetch-cef.sh`. The compiler folded the name's length (21) into both places that copy it
+  into a `std::string` (`mov wN, #0x15` at 0x215fe50 / 0x215ff8c), and builds the 8-byte account
+  "Chromium" from `movk` immediates. Padding a shorter name with NULs is therefore not enough: the
+  lengths must be patched too, and the account cannot be renamed that way. Before Chromium starts, a
+  signed Cra creates the item (16 random bytes, base64, as Chromium does) and, the first time, re-encrypts
+  every mock-keychain BLOB in each profile's Cookies / Login Data / Web Data databases and the staged
+  import. Unsigned dev builds stay on the mock keychain for profiles that never used the Keychain.
+  `Sessions_Encrypted` is not migrated (Cra does not use Chromium's session restore).
 - [U] Dia's exact top-sites ranking, its default checkbox states, and the encrypted SNSS v2/v4 session
   format. Firefox saved logins are not read from `logins.json`/`key4.db`; Cra takes Firefox passwords
   only via its own exported CSV, like Safari.
@@ -1325,3 +1400,89 @@ Arc's popup this time, so geometry is not measured.
 - Chrome-style page windows that Cra re-parents keep Chrome's `BridgedContentView` at y −22 (where the title bar ended):
   the page is drawn 22 pt low and its bottom cut off unless the content view is reset to the full window frame
   (MainWindowController.fillContentView did this for tabs; Little Windows and the popup window now do too).
+
+## Downloads and Chrome's download bubble (Arc 1.170, 27 Oct 2026, static strings + Cra test)
+
+- Arc never shows Chromium's download UI. Downloads go through ADK (`ADK.ContextDownloadDelegate`,
+  `ArcBrowserContextDownloadsDelegate`, `ADKClient/DownloadManager.swift`) into Arc's own views:
+  `DownloadsUI.DownloadToLibraryWindowController`, the Library's downloads page (`HomeButton/DownloadsPageReducer`,
+  `DownloadsContentView`, filter by profile), Little Arc's `LittleBrowserDownloadsTrayViewController`, plus Tidy
+  Downloads renaming (`DownloadRenamedToastContentView`). Arc's Chromium profile sets no `download_bubble.*` pref:
+  Chrome's toolbar UI simply isn't there.
+- Cra (CEF Chrome style) handles every download itself (OnBeforeDownload returns true), but Chrome's bubble still
+  popped up when a download finished: a window titled "Recent Download History" (320×120 for one item), invisible
+  with no toolbar to anchor to, which swallowed the next click on the page. Cra turns it off the way Chrome's
+  "Show downloads when they're done" setting does: `download_bubble.partial_view_enabled` = false on the global and
+  incognito request contexts (CraCEF.mm HideDownloadBubble). Verified in a test instance: no bubble window, the first
+  click after a download reaches the page, Cra's toast still shows.
+- Chrome's download-started animation (DownloadBubbleStartedAnimationViews, Chromium 156.0.8078.48): a views popup
+  parented to the page, `accept_events = false`, 2 × kIconBackgroundRadius 32 = 64×64 pt, 500 ms, flying to the hidden
+  toolbar's download button. Only reduced motion turns it off (CEF_CTBT_DOWNLOAD is deprecated: downloads became a
+  pinned toolbar action). Cra orders that window out as it appears (ChromeDownloadAnimation, a 2 s watch after each
+  new download); verified: every sighting of the 64×64 window was off screen.
+
+### Arc's download animation (DownloadsUI.DownloadToLibrary, live, 60 fps app-only ScreenCaptureKit captures)
+
+ObjC metadata: `DownloadToLibrary.ViewModel` (_downloads, _binPositionX, windowSize, binPositionXAnimator, showsBin,
+animationGroup), `DownloadViewModel` (source, destination, _projectileIconKeyframeAnimation, _iconOffsetX,
+iconOffsetXAnimator, iconBounceAnimator, lazy g / vx0 / vy0 / projectileMotionDuration / apex / apexTime),
+`WindowController` (parentWindow, dismiss, isAnimating): a window over the browser window. Measured (window 1728×1084):
+- Source is the pointer (logged with `cliclick p` every 30 ms): the glyph launched at the pointer; with the pointer off
+  to the right of the window it entered from the window's edge. Destination is the bin.
+- Projectile: constant horizontal speed (−1232 pt/s on a 1361 pt run, every frame within ~10 pt), apex 90 pt above
+  the launch point, g ≈ 2630 pt/s²; 1.10 s from the top of the page to the bin.
+- Glyph: navy disc #04072A, ring #EFEFFF, white down arrow, faint blue glow. Ring diameter 32 pt at launch, 48 pt at the
+  apex, then linear down to ~10 pt at the bin; opacity rises linearly to 1 by the apex; the arrow reads ↘ early and
+  ↓ by mid-flight.
+- Bin: the file's Quick Look thumbnail (a .txt showed its text on a white page), 32 pt, ~8 pt corners, resting 9 pt
+  right of and 12 pt above the Library glyph's centre (the glyph's box peeks out under it). It appears with the launch
+  6 pt high, drops to 12 pt low at ~0.15 s, back to −2 pt, settled by ~0.4 s. Faint grey while Arc's window is in
+  the background, white when it is key. It leaves 30 s after the glyph lands (appeared 8.47 s, faded 39.37-39.53 s
+  in a 60 fps capture), fading over 0.15 s, the same with Arc in front or behind.
+- With Tidy Downloads on, Arc also shows a "Download renamed to:" card above the bin; Cra has no Tidy Downloads.
+- Cra: DownloadFlight (overlay panel, Core Animation keyframes sampled from the same projectile) and DownloadBin in
+  SpaceDock. Verified side by side with fixed-source test builds.
+- Tidy Downloads card (only with Arc Max's renaming): in over ~0.2 s once the rename is ready, gone after 8.0 s in
+  under 0.1 s. Prompt and inputs (filename, tab title, domain; JSON `newName`) are in the binary next to
+  beginRename(browserContextID:downloadID:defaultFilename:sourceUrl:webContentsTitle:referrerTitle:). Not built in
+  Cra: Victor doesn't want AI features for now (27 Oct 2026).
+
+### Arc's downloads list on hovering the Library button (live, 60 fps, 1728×1084 window)
+
+- Rows for the recent downloads still on disk, oldest at the top, the newest ending 2 pt below the list viewport
+  (just above the dock). Rows 56 pt apart: 40 pt thumbnail (Quick Look, 6 pt corners) at x 8, the file name at
+  x 61 in 14 pt white 82 %, "54 seconds ago" (RelativeDateTimeFormatter, full) in 12 pt white 50 %. Four rows were
+  observed with four downloads available; the maximum is unknown (Cra shows five).
+- The tab list behind is hidden from 3 pt above the first row and fades back in linearly over the 170 pt above it.
+- Opens 0.2 s into the hover: rows fade in and rise 5 pt in ~0.12 s, bottom row first, ~25 ms apart; the fade comes
+  in over ~0.18 s. Closes ~0.07 s after the pointer leaves: rows gone within ~0.05 s (bottom first), the fade
+  out over ~0.13 s. Arc's own "View Library ⇧⌘L" tooltip shows under the button meanwhile.
+- Cra: DownloadsTray / DownloadsTrayMask (sidebar), DownloadHistory (downloads.json). The mask must be a single
+  GeometryReader gradient: fixed-height layers in it raised the sidebar's minimum height and the window grew.
+
+## Tab switcher (Arc 1.170, 27 Oct 2026, live: 100 fps region recordings + 1× stills)
+
+Arc's `ModalItemSwitcher` (`ModalItemSwitcherWindowController`, `ModalItemSwitcherSnapshotUpdateCancellableID`;
+strings "Opens the tab switcher, where you can cycle through recent tabs like Command+Tab on your computer!" and
+"Cycles backwards through your most recent tabs…"). Arc's help centre: the five most recently visited tabs.
+
+- **List:** the focused space's tabs by `timeLastActiveAt`, newest first (checked against StorableSidebar.json: the
+  JYSK space's top four plus one more JYSK tab, skipping a newer one in another space). The current tab is card 0.
+- **Keys:** ⌃Tab opens on card 1 and moves on; ⇧Tab, ← and → move too. All of them wrap at both ends. Releasing ⌃
+  switches, Esc cancels (the tab stays). A tap (⌃ up 0.13 s after Tab) switches with no panel; the panel appeared
+  0.18–0.26 s after the key, so there is a short show delay.
+- **Pointer:** moving over a card selects it (no separate hover style). It stays selected after the pointer leaves.
+- **No animation:** the panel appears, moves its selection and closes from one frame to the next.
+- **Geometry (pt):** centred on the whole window (sidebar included), integral origin. Panel 941×190 for five cards:
+  16.5 left/right, 16 top/bottom, cards 180×158 on a 182 pitch. Thumbnail 158×105 at (11.5, 12), corners about 6.5
+  (continuous), soft shadow below. Title row under it: favicon 16×16 at (13.5, 130.5), title 8 pt after it, SF 14
+  medium (ink width of "Example Domain" 108 px, "DL nine" 48 px, cap top to baseline 148–160 from the panel top), tail
+  truncation. Panel corners continuous ≈ 26, card highlight ≈ 8.
+- **Colours (dark):** panel #1C1B1A, 1 px outer line #030303, 1 px inner line #504F4F (white 23%). Empty thumbnail
+  #1C1C1C. Missing favicon: a rounded square, white 14%. Selected card: the space's semantic `hover` colour
+  (JYSK dark: extended sRGB 0.360/0.392/1.019 at α 0.48, measured 58/61/136 over the panel). In Arc's data both
+  spaces' dark `hover` sit at OKLab L ≈ 0.60 in the theme's hue near sRGB's maximum chroma; Cra derives it that way
+  from the theme accent. Light appearance not observed (the Mac runs dark); Cra's light colours are a guess.
+- **Cra test (CraTK, pid-targeted keys):** geometry, borders, text and favicon position match Arc's captures to the
+  pixel. Thumbnails come from `Page.captureScreenshot` of the visible viewport (Chromium draws nothing for hidden
+  pages), taken 1 s after a tab shows or finishes loading and again for the current tab when the switcher opens.

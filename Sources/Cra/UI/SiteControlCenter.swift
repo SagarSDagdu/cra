@@ -115,7 +115,7 @@ struct SiteControlCenterView: View {
             .padding(.horizontal, 10)
             .frame(height: 32)
             .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(colors.footerFill))
-            .help(isSecure ? "Your connection to this site is secure" : "Your connection to this site is not secure")
+            .arcTooltip(isSecure ? "Your connection to this site is secure" : "Your connection to this site is not secure")
             Spacer(minLength: 0)
             SiteControlCenterMoreButton(colors: colors, actions: actions)
         }
@@ -196,7 +196,7 @@ private struct SiteControlCenterTile<Label: View>: View {
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
-        .help(help)
+        .arcTooltip(help)
     }
 }
 
@@ -221,7 +221,7 @@ private struct SiteControlCenterActionButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
-        .help(help)
+        .arcTooltip(help)
     }
 }
 
@@ -250,7 +250,7 @@ private struct SiteControlCenterExtensionButton: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help(entry.name)
+            .arcTooltip(entry.name)
             .accessibilityLabel(entry.name)
             if pinned || hovered {
                 Button(action: togglePin) {
@@ -264,7 +264,7 @@ private struct SiteControlCenterExtensionButton: View {
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
-                .help(pinned ? "Unpin" : "Pin")
+                .arcTooltip(pinned ? "Unpin" : "Pin")
                 .accessibilityLabel(pinned ? "Unpin" : "Pin")
                 .offset(x: 37, y: 21)
             }
@@ -323,7 +323,7 @@ private struct SiteControlCenterMoreButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
-        .help("More")
+        .arcTooltip("More")
         .accessibilityLabel("More")
     }
 

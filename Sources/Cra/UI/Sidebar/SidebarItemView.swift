@@ -68,9 +68,10 @@ struct TabRow: View {
     @State private var hover = false
     @State private var draft = ""
     @FocusState private var renameFocused: Bool
+    @AppStorage("didShowRenameHint") private var didShowRenameHint = false
 
     private var tab: TabData { item.tab! }
-    private var selected: Bool { store.selectedTabID == item.id }
+    private var selected: Bool { store.selectedTabID(window: ui.windowID) == item.id }
     /// While tabs are ⌘/⇧-picked the highlight follows the picks, not the open tab.
     private var highlighted: Bool { ui.multiSelection.isEmpty ? selected : ui.multiSelection.contains(item.id) }
     /// Close acts on every picked tab when this row is one of them.
@@ -114,8 +115,18 @@ struct TabRow: View {
                 }
             }
             Spacer(minLength: 4)
+            if ui.capturingTabIDs.contains(item.id) {
+                // Arc's recording indicator; a red dot by the title, with Arc's tooltip.
+                Circle().fill(Color.red).frame(width: 7, height: 7)
+                    .frame(width: 16, height: 16)
+                    .contentShape(Rectangle())
+                    .arcTooltip("This tab is using your camera or microphone")
+            }
             if tab.muted {
-                Image(systemName: "speaker.slash.fill").font(.system(size: 10)).foregroundStyle(palette.textTertiary)
+                SidebarIconButton(symbol: "speaker.slash.fill", palette: palette, help: "Unmute Tab", size: 20, iconSize: 10) {
+                    store.setMuted(item.id, false)
+                    actions.performAction("muteTab:\(item.id)")
+                }
             }
             if item.isUnread && !selected && !hover {
                 Circle().fill(palette.textPrimary.opacity(0.55)).frame(width: 6, height: 6)
@@ -126,9 +137,24 @@ struct TabRow: View {
                         actions.resetPinnedTab(item.id)
                     }
                 }
-                SidebarIconButton(symbol: "xmark", palette: palette,
-                                  help: closeGroup.count > 1 ? "Close \(closeGroup.count) Tabs (⌘W)" : (pinned ? "Close (keeps the pinned tab)" : "Archive (⌘W)"), size: 22) {
-                    closeTabs(closeGroup)
+                if closeGroup.count > 1 {
+                    SidebarIconButton(symbol: "xmark", palette: palette, help: "Close \(closeGroup.count) Tabs (⌘W)", size: 22) {
+                        closeTabs(closeGroup)
+                    }
+                } else if pinned && selected {
+                    // Arc: the open pinned tab shows a minus; it unloads and stays pinned.
+                    SidebarIconButton(symbol: "minus", palette: palette, help: "Close and Keep Pinned (⌘W)", size: 22) {
+                        closeTabs([item.id])
+                    }
+                } else if pinned {
+                    // Arc: any other pinned tab shows ✕, which archives it out of the pinned section.
+                    SidebarIconButton(symbol: "xmark", palette: palette, help: "Archive this tab", size: 22) {
+                        withAnimation(.snappy(duration: 0.22, extraBounce: 0)) { store.archiveTab(item.id, reason: .manual) }
+                    }
+                } else {
+                    SidebarIconButton(symbol: "xmark", palette: palette, help: "Archive (⌘W)", size: 22) {
+                        closeTabs(closeGroup)
+                    }
                 }
             }
         }
@@ -155,7 +181,7 @@ struct TabRow: View {
                 if editing { commitRename() }
                 ui.clearPicks(anchor: item.id)
                 ui.keyboardFocusID = nil
-                store.selectTab(item.id)
+                store.selectTab(item.id, window: ui.windowID)
             }
         }
         .draggable(SidebarDragItem.begin(item.id, session)) {
@@ -176,7 +202,11 @@ struct TabRow: View {
             .background(RoundedRectangle(cornerRadius: 8).fill(.regularMaterial))
         }
         .contextMenu { contextMenu }
-        .help(tab.url)
+        // Arc's row tip is the tab's title by the pointer; the close buttons' own tips win over it.
+        // Like Arc (didShowRenameHint), "Double-click to rename" rides along once.
+        .arcTooltip(editing ? "" : item.displayTitle, followsCursor: true,
+                    subtitle: didShowRenameHint || item.title != nil ? nil : "Double-click to rename",
+                    onShow: { if !didShowRenameHint && item.title == nil { didShowRenameHint = true } })
         .modifier(SidebarDropPreview(id: item.id, palette: palette, depth: depth))
     }
 
@@ -188,7 +218,8 @@ struct TabRow: View {
 
     private func closeTabs(_ ids: [UUID]) {
         // The open tab goes last so closing it doesn't hop through tabs about to close.
-        let ordered = ids.filter { $0 != store.selectedTabID } + ids.filter { $0 == store.selectedTabID }
+        let open = store.selectedTabID(window: ui.windowID)
+        let ordered = ids.filter { $0 != open } + ids.filter { $0 == open }
         withAnimation(.snappy(duration: 0.22, extraBounce: 0)) {
             for id in ordered { actions.closeTab(id) }
             ui.multiSelection.subtract(ids)
@@ -210,7 +241,7 @@ struct TabRow: View {
     /// Move to Folder / New Folder for this tab, or for every picked tab.
     @ViewBuilder
     private func folderMenu(_ ids: [UUID]) -> some View {
-        let folders = store.children(of: store.focusedSpace.pinnedContainerID).filter { $0.isFolder }
+        let folders = store.children(of: store.focusedSpace(window: ui.windowID).pinnedContainerID).filter { $0.isFolder }
         if !folders.isEmpty {
             Menu(ids.count > 1 ? "Move \(ids.count) Tabs to Folder" : "Move to Folder") {
                 ForEach(folders) { f in
@@ -261,8 +292,12 @@ struct TabRow: View {
         }
         folderMenu([item.id])
         Divider()
-        Button(pinned ? "Close" : "Archive") { actions.closeTab(item.id) }
-        if pinned { Button("Unpin and Archive") { store.archiveTab(item.id, reason: .manual) } }
+        if pinned {
+            if selected || loaded { Button("Close and Keep Pinned") { actions.closeTab(item.id) } }
+            Button("Archive Tab") { store.archiveTab(item.id, reason: .manual) }
+        } else {
+            Button("Archive") { actions.closeTab(item.id) }
+        }
     }
 }
 

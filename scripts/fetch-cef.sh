@@ -42,4 +42,27 @@ if [ ! -f vendor/cef/build/libcef_dll_wrapper/libcef_dll_wrapper.a ]; then
     -DCMAKE_OSX_ARCHITECTURES=arm64 > vendor/cef/build-configure.log
   cmake --build vendor/cef/build --target libcef_dll_wrapper -j "$(sysctl -n hw.ncpu)" > vendor/cef/build-wrapper.log
 fi
+
+# Chromium encrypts cookies, passwords and card numbers with a secret from the login
+# Keychain item "Chromium Safe Storage", which every Chromium-based app without its own
+# name shares. Cra's is "Cra Safe Storage" (SafeStorage.swift creates it before Chromium
+# starts; scripts/cef-patches/keychain-service-name.patch renames it in CEF builds).
+# cef-156.0.14-codecs2 predates that patch, so its framework is patched here: the name
+# in os_crypt's constant pool, and the length (21) the compiler folded into both places
+# that copy it into a std::string. Any other build must come with the source patch.
+# Stop rather than ship a framework that looks for the old item: Cra would encrypt with
+# one secret and Chromium decrypt with another.
+FRAMEWORK_BIN="vendor/cef/Release/Chromium Embedded Framework.framework/Chromium Embedded Framework"
+if LC_ALL=C grep -qa "Chromium Safe Storage" "$FRAMEWORK_BIN"; then
+  if [ "$(shasum -a 256 "$FRAMEWORK_BIN" | cut -d' ' -f1)" != a910874407a9064fb6a944b2ffa0f86d9b5e1ea0a790608e8febea8d4949c7be ]; then
+    echo "This CEF build still uses Chromium Safe Storage; build it with scripts/cef-patches" >&2
+    exit 1
+  fi
+  patch_at() { printf "$2" | dd of="$FRAMEWORK_BIN" bs=1 seek=$(($1)) conv=notrunc status=none; }
+  patch_at 0xc4fcaa1 'Cra Safe Storage\000\000\000\000\000'  # was "Chromium Safe Storage"
+  patch_at 0x215fe50 '\011\002\200\122'                      # mov w9, #16 (was #21)
+  patch_at 0x215ff8c '\010\002\200\122'                      # mov w8, #16 (was #21)
+  echo "Renamed the Keychain item to Cra Safe Storage"
+fi
+LC_ALL=C grep -qa "Cra Safe Storage" "$FRAMEWORK_BIN" || { echo "CEF names no Cra Safe Storage" >&2; exit 1; }
 echo "CEF ready: vendor/cef"

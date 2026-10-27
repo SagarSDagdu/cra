@@ -21,7 +21,8 @@ struct Shortcut: Codable, Hashable {
     var flags: NSEvent.ModifierFlags { NSEvent.ModifierFlags(rawValue: modifiers) }
 
     /// Shift turns "[" into "{" in charactersIgnoringModifiers; undo that.
-    private static let unshift: [String: String] = ["{": "[", "}": "]", "<": ",", ">": ".", "?": "/", "+": "=", "_": "-", "~": "`", ":": ";", "\"": "'", "|": "\\"]
+    /// ⇧Tab arrives as backtab (U+0019).
+    private static let unshift: [String: String] = ["\u{19}": Shortcut.tab, "{": "[", "}": "]", "<": ",", ">": ".", "?": "/", "+": "=", "_": "-", "~": "`", ":": ";", "\"": "'", "|": "\\"]
 
     /// Physical-key fallbacks so ⌘[ / ⌘] work on layouts (Danish, German...)
     /// where those characters live on other keys. Key codes are ANSI positions.
@@ -154,6 +155,8 @@ final class KeyBindingRegistry {
             // File
             KeyAction(id: "newTab", name: "New Tab…", section: .file, shortcuts: [Shortcut("t", cmd)], triggers: ["new tab"]),
             KeyAction(id: "newWindow", name: "New Window", section: .file, shortcuts: [Shortcut("n", cmd)], inCommandBar: false),
+            KeyAction(id: "newIncognitoWindow", name: "New Incognito Window", section: .file, shortcuts: [Shortcut("n", cmdShift)],
+                      triggers: ["incognito", "private"]),
             // Arc: File ▸ New Little Arc Window ⌥⌘N.
             KeyAction(id: "newLittleWindow", name: "New Little Window", section: .file, shortcuts: [Shortcut("n", cmdOpt)], triggers: ["little window", "little arc"]),
             KeyAction(id: "reopenClosedTab", name: "Restore Last Closed Tab", section: .file, shortcuts: [Shortcut("t", cmdShift)], triggers: ["reopen", "undo close", "restore"]),
@@ -203,7 +206,8 @@ final class KeyBindingRegistry {
             KeyAction(id: "pinTab", name: "Pin/Unpin Tab", section: .tabs, shortcuts: [Shortcut("d", cmd)], triggers: ["pin", "unpin"]),
             KeyAction(id: "nextTab", name: "Next Tab", section: .tabs, shortcuts: [Shortcut(Shortcut.down, cmdOpt)], inCommandBar: false),
             KeyAction(id: "previousTab", name: "Previous Tab", section: .tabs, shortcuts: [Shortcut(Shortcut.up, cmdOpt)], inCommandBar: false),
-            KeyAction(id: "recentTab", name: "Toggle Recent Tabs", section: .tabs, shortcuts: [Shortcut(Shortcut.tab, .control)], inCommandBar: false),
+            KeyAction(id: "recentTab", name: "Next Recent Tab", section: .tabs, shortcuts: [Shortcut(Shortcut.tab, .control)], inCommandBar: false),
+            KeyAction(id: "recentTabBackward", name: "Previous Recent Tab", section: .tabs, shortcuts: [Shortcut(Shortcut.tab, [.control, .shift])], inCommandBar: false),
             KeyAction(id: "clearToday", name: "Clear Today", section: .tabs, shortcuts: [Shortcut("k", cmdShift)], triggers: ["clear", "tidy"]),
             KeyAction(id: "favoriteTab", name: "Add to Favorites", section: .tabs, shortcuts: [], triggers: ["favorite", "top app"]),
             KeyAction(id: "renameTab", name: "Rename Tab…", section: .tabs, shortcuts: [], triggers: ["rename"]),

@@ -215,10 +215,11 @@ struct SpaceBackground: View {
 
     var body: some View {
         if let pager {
-            let spaces = pager.store.orderedSpaces
-            let index = spaces.firstIndex { $0.id == pager.store.focusedSpaceID } ?? 0
+            let spaces = pager.store.pagedSpaces(window: pager.ui.windowID)
+            let focused = pager.store.focusedSpaceID(window: pager.ui.windowID)
+            let index = spaces.firstIndex { $0.id == focused } ?? 0
             PagedSpaceBackground(palettes: spaces.map(\.theme.palette), position: Double(index) + Double(pager.ui.spaceSwipe))
-                .animation(pager.ui.spaceSettleAnimation, value: pager.store.focusedSpaceID)
+                .animation(pager.ui.spaceSettleAnimation, value: focused)
         } else {
             gradient
         }

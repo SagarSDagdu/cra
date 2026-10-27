@@ -129,8 +129,10 @@ final class FaviconCache {
         try? FileManager.default.removeItem(at: AppPaths.favicons.appendingPathComponent(Self.fileName(key)))
     }
 
-    func store(_ image: NSImage, forKey key: String) {
+    /// `persist` false keeps the icon in memory only (incognito pages).
+    func store(_ image: NSImage, forKey key: String, persist: Bool = true) {
         images[key] = image
+        guard persist else { return }
         let file = AppPaths.favicons.appendingPathComponent(Self.fileName(key))
         DispatchQueue.global(qos: .utility).async {
             guard let tiff = image.tiffRepresentation,

@@ -9,14 +9,14 @@ struct SidebarRootView: View {
     @Environment(\.sidebarActions) private var actions
 
     var body: some View {
-        let space = store.focusedSpace
+        let space = store.focusedSpace(window: ui.windowID)
         let palette = space.theme.palette
         VStack(spacing: 0) {
             SidebarTopBar(palette: palette)
             // Dia's paging container: every space's list sits side by side and the
             // strip follows the swipe 1:1, then a spring settles it on a page.
             GeometryReader { g in
-                let spaces = store.orderedSpaces
+                let spaces = store.pagedSpaces(window: ui.windowID)
                 let index = CGFloat(spaces.firstIndex { $0.id == space.id } ?? 0)
                 HStack(alignment: .top, spacing: 0) {
                     ForEach(spaces) { s in
@@ -36,6 +36,8 @@ struct SidebarRootView: View {
             }
             .frame(maxHeight: .infinity, alignment: .top)
             .clipped()
+            .mask { DownloadsTrayMask(rows: DownloadHistory.shared.recent.count, open: ui.downloadsListOpen) }
+            .overlay(alignment: .bottom) { DownloadsTray(palette: palette) }
             UpdateBanner(palette: palette)
                 .padding(.horizontal, 8)
             // Arc's list viewport ends 50pt above the window bottom; the dock sits centred in that band.
@@ -46,8 +48,8 @@ struct SidebarRootView: View {
         }
         .foregroundStyle(palette.textPrimary)
         .ignoresSafeArea()
-        .onChange(of: store.focusedSpaceID) { _, _ in ui.clearPicks() }
-        .animation(ui.spaceSettleAnimation, value: store.focusedSpaceID)
+        .onChange(of: space.id) { _, _ in ui.clearPicks() }
+        .animation(ui.spaceSettleAnimation, value: space.id)
     }
 }
 
@@ -82,7 +84,7 @@ struct SidebarTopBar: View {
                 Spacer()
                 if compact {
                     headerNavButtons
-                } else if let t = store.selectedTab?.tab, store.settings.isDeveloperMode(url: t.url) {
+                } else if let t = store.selectedTab(window: ui.windowID)?.tab, store.settings.isDeveloperMode(url: t.url) {
                     navButtons
                 }
             }
@@ -138,7 +140,7 @@ struct SidebarTopBar: View {
     }
 
     private var urlPill: some View {
-        let tab = store.selectedTab
+        let tab = store.selectedTab(window: ui.windowID)
         let url = tab?.tab?.url ?? ""
         let host = URL(string: url)?.host ?? ""
         let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -180,7 +182,7 @@ struct SidebarTopBar: View {
         .contentShape(shape)
         .onHover { hoverPill = $0 }
         .animation(.easeOut(duration: 0.15), value: hoverHeader)
-        .help(url)
+        .arcTooltip(url, followsCursor: true)
     }
 
     /// Arc's URL-bar accessories: pinned extensions, Copy Link, then the site controls
@@ -225,7 +227,7 @@ private struct PillImageButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
-        .help(help)
+        .arcTooltip(help)
     }
 }
 
@@ -233,6 +235,8 @@ struct SidebarIconButton: View {
     let symbol: String
     let palette: SpacePalette
     var help: String = ""
+    /// Tooltip while ⌥ is held, for buttons that do something else on ⌥-click.
+    var optionHelp: String? = nil
     var enabled: Bool = true
     var size: CGFloat = 28
     var height: CGFloat? = nil
@@ -263,7 +267,7 @@ struct SidebarIconButton: View {
         .buttonStyle(.plain)
         .disabled(!enabled)
         .onHover { hover = $0 }
-        .help(help)
+        .arcTooltip(help, optionHelp: optionHelp)
     }
 }
 
@@ -391,7 +395,7 @@ struct SpaceSectionView: View {
 
     private var rows: some View {
         let todayItems = store.children(of: space.todayContainerID)
-        let pinnedItems = store.listedPinnedItems(in: space)
+        let pinnedItems = store.listedPinnedItems(in: space, window: ui.windowID)
         return VStack(alignment: .leading, spacing: 0) {
             VStack(spacing: CraMetrics.rowSpacing) {
                 ForEach(pinnedItems) { item in
@@ -415,6 +419,7 @@ struct SpaceSectionView: View {
                 if hoverDivider && !todayItems.isEmpty {
                     Button("Clear") { store.clearToday(space.id) }
                         .buttonStyle(.plain)
+                        .arcTooltip("Clear Today tabs")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(palette.textSecondary)
                         .transition(.opacity)
