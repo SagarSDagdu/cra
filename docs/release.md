@@ -59,6 +59,27 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
+### Clips in the release notes
+
+When a release changes something you can see (UI, animations, dragging), give its
+highlight a short clip. `scripts/clips/` records one from a test copy of Cra (CraClip, own
+data folder, the website's demo profile) at 120 fps with a pointer that glides like a hand;
+the `release-clips` skill in `.claude/skills/` has the steps. Then encode it from the
+website repo:
+
+```sh
+FPS=120 scripts/release-clip.sh 0.1.14 reorder-spaces ../cra/build/clips/rec/dock.mov 0.9 5.9
+```
+
+It writes `public/releases/<version>/<name>.mp4` (H.264, silent, ≤1520 px) and a poster
+`.jpg`, and prints a `media: {…}` entry to paste into that highlight in `releases.ts` (fill
+in `alt`). A `.png` works too, for still changes. The release notes page loops clips muted
+while they're on screen. Keep them under ~8 s and ~2 MB.
+
+A Claude Code hook (`.claude/settings.json` → `scripts/clips/check-release-media.sh`) blocks
+pushing a `v*` tag when `Sources/Cra/UI` changed since the previous tag and the release's
+entry has no `media`. If there is nothing to film, add `// no clip: <reason>` to the entry.
+
 Artifacts land on the GitHub release: `Cra.dmg`, `Cra.zip`, `SHA256SUMS.txt`. The names
 carry no version so `releases/latest/download/Cra.dmg` always resolves; the website's
 download button and `scripts/install.sh` rely on that.
