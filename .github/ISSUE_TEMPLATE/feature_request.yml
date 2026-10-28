@@ -1,0 +1,20 @@
+name: Feature request
+description: Something Arc did that Cra doesn't yet, or an idea of your own.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you'd like
+      description: What it should do, and what you'd use it for.
+    validations:
+      required: true
+  - type: textarea
+    id: arc
+    attributes:
+      label: How Arc did it
+      description: If this is an Arc feature, how it looked and behaved there. Screenshots or a recording from Arc are gold.
+  - type: markdown
+    attributes:
+      value: |
+        Cra has no built-in AI, account or telemetry, so requests in those directions will be closed. The [roadmap](https://crabrowser.app/roadmap) lists what's already planned.

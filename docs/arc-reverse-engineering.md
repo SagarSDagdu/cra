@@ -12,7 +12,7 @@ Legend: [O] observed in shipped artifact or data file, [I] inference, [U] unknow
   SpaceStyleEditor, TypeTravel, LittleBrowser, HoverCards...). UI is AppKit: SidebarViewController, SidebarDockViewController,
   NSCollectionView layouts, CommandBarTextField, SuggestionsView.
 - [O] Web content is embedded Chromium ("User Data/Default" is a Chrome profile: History, Cookies, Extensions, Preferences).
-- [I] So Arc = native chrome + Chromium engine. Cra uses WKWebView instead (design choice, not a copy).
+- [I] So Arc = native chrome + Chromium engine. Cra does the same, with Chromium through CEF.
 
 ## Sidebar data model (StorableSidebar.json)
 - [O] `sidebar.containers` = [ {global}, {spaces, topAppsContainerIDs, items} ]. Lists are flat [id, object, id, object...].

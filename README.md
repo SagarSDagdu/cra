@@ -2,140 +2,157 @@
   <img src="brand/cra-segments-icon.svg" alt="Cra logo" width="128" height="128">
 </p>
 
-# Cra
+<h1 align="center">Cra</h1>
 
-A native macOS browser built on Chromium (CEF), shaped after the parts of Arc
-worth keeping: a sidebar instead of a tab strip, spaces, pinned tabs with a
-home URL, favorites shared across spaces, a command bar for new tabs that
-searches open and archived tabs, auto-archiving, folders, and Chrome DevTools.
+<p align="center">
+  A native macOS browser with a sidebar instead of a tab strip.<br>
+  Free and open-source, built to replace Arc one to one.
+</p>
 
-Shell: Swift (AppKit + SwiftUI). Engine: Chromium Embedded Framework.
+<p align="center">
+  <a href="https://github.com/VictorKildahl/cra/releases/latest/download/Cra.dmg"><b>Download for macOS</b></a> ·
+  <a href="https://crabrowser.app">crabrowser.app</a> ·
+  <a href="https://crabrowser.app/release-notes">What's new</a> ·
+  <a href="https://crabrowser.app/help">Help</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/VictorKildahl/cra/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/VictorKildahl/cra?label=release"></a>
+  <img alt="macOS 14+, Apple silicon" src="https://img.shields.io/badge/macOS-14%2B%20·%20Apple%20silicon-lightgrey">
+  <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/github/license/VictorKildahl/cra"></a>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/cra.jpg" alt="Cra with favorites, a space with pinned tabs and folders, and a split view in the sidebar" width="760">
+</p>
+
+Arc ends on 22 December 2026. Cra keeps the parts of it worth keeping: spaces, pinned tabs
+that remember where they started, favorites, a command bar that searches everything,
+Today tabs that archive themselves, split view, Little Windows and Arc's keyboard
+shortcuts. Import your Arc sidebar in one go and carry on where you left off.
+
+The app is Swift (AppKit and SwiftUI) and the engine is Chromium, through the Chromium
+Embedded Framework, so sites and Chrome extensions work as they do in Chrome.
 
 ## Install
 
-Needs macOS 14 or later on Apple silicon.
+<p align="center">
+  <a href="https://github.com/VictorKildahl/cra/releases/latest/download/Cra.dmg"><img alt="Download for Mac" src="docs/assets/download.png" width="272" height="60"></a>
+</p>
 
-**[Download Cra.dmg](https://github.com/VictorKildahl/cra/releases/latest/download/Cra.dmg)**,
-open it and drag Cra to Applications. Cra is signed and notarized by Apple, so it opens
-like any other app, and from then on it keeps itself up to date (Cra ▸ Check for Updates…).
+<p align="center">
+  Open the DMG and drag Cra to Applications.<br>
+  It's signed and notarized by Apple, and keeps itself up to date. Needs Apple silicon.
+</p>
 
-**Prefer Terminal?** This puts the latest Cra in your Applications folder and opens it:
+## Coming from Arc
 
-    curl -fsSL https://raw.githubusercontent.com/VictorKildahl/cra/main/scripts/install.sh | bash
+| Arc feature | Cra |
+|---|:---:|
+| Spaces | ✅ |
+| Pinned tabs | ✅ |
+| Today tabs and auto-archive | ✅ |
+| Favorites | ✅ |
+| Folders | ✅ |
+| Command bar | ✅ |
+| Little Arc | ✅ |
+| Split View | ✅ |
+| Picture in Picture | ✅ |
+| Developer Mode | ✅ |
+| Library | ✅ |
+| Air Traffic Control | ✅ |
+| Live folders | ✅ |
+| Profiles | ✅ |
+| Private windows | ✅ |
+| Arc's keyboard shortcuts | ✅ |
+| Import from Arc | ✅ |
+| Easels | Not yet |
+| Boosts | Not yet |
+| Peek | Not yet |
+| Notes | Not yet |
+| Arc Max | No, Cra has no built-in AI |
 
-## Support Cra
-
-Cra is free, open source and has no investors or ads. If it earns a place on your Mac,
-[sponsor it on GitHub](https://github.com/sponsors/VictorKildahl): it pays for the Chromium
-updates, the Apple signing and the time it takes to keep a browser going. Sponsoring unlocks
-nothing in the app; every feature stays free for everyone.
-[Where the money goes](https://crabrowser.app/support).
-
-## Build
-
-    scripts/build.sh          # fetches CEF on first run, builds build/Cra.app
-    scripts/run.sh            # build if needed, then open
-    scripts/dev.sh            # dev loop: debug CraDev.app, rebuilds + relaunches on save (~4 s)
-
-Requirements: Xcode 16+, CMake (`brew install cmake`).
-
-## Release
-
-`scripts/release.sh` builds, signs with a Developer ID, notarizes, and packages a DMG and
-zip into `build/dist`. Pushing a `v*` tag runs the same through GitHub Actions and
-publishes a release. See `docs/release.md` for the one-time certificate setup.
-
-## Layout
-
-- `Sources/Cra` — the app (model, store, sidebar, command bar, windows)
-- `Sources/CraCEF` — Objective-C++ bridge to CEF
-- `Sources/CraHelper` — Chromium subprocess executable
-- `docs/arc-reverse-engineering.md` — what was learned from Arc and how
-- `vendor/cef` — CEF binary distribution (not committed)
-
-Data lives in `~/Library/Application Support/Cra`.
-
-## Scripting hooks
-
-Cra registers the `cra://` scheme so it can be driven from a shell (handy for
-testing without touching the keyboard):
-
-    open "cra://action/newTab"              # any action id from KeyBindings.swift
-    open "cra://commandbar?query=github"    # open the command bar with text
-    open "cra://open?url=https://example.com&background=1"
-    open "cra://dismiss"                    # close sheets, command bar, find bar
-
-Links from other apps and browsers only reach `commandbar`, `dismiss` and `open` with an
-http(s) URL; pages inside Cra reach none of them. The rest (`action`, `navigate`, `key`,
-`import`, `debug`) run scripts and DevTools Protocol commands, so they need either
-`defaults write dk.kildahl.cra scriptingURLs -bool YES` or a test instance's
-`CRA_COMMAND_FILE`.
-
-## Little Windows (Arc's Little Arc)
-
-Links from other apps open in a Little Window: a small, sidebar-less window with one
-search pill and an "Open in <Space> ⌘O" button. The page is not in the sidebar; closing
-the window (⌘W) archives it to the Library, ⌘O (or the chevron menu) moves it into a space
-as a Today tab, keeping the live page. ⌥⌘N opens an empty one. Settings → Tabs turns the
-link routing off; `open "cra://open?url=…&little=1"` opens one from a shell.
+The [roadmap](https://crabrowser.app/roadmap) lists what's next.
 
 ## Import
 
-Cra menu → Import from Arc or Dia…, or Settings → Import. Imports from Arc, Dia,
-Chrome, Brave, Edge, Opera, Opera GX, Vivaldi, Chromium, Firefox, Zen and Safari: Arc's
-StorableSidebar.json / StorableArchiveItems.json, Dia's profile containers, and
-bookmarks, history, extensions, passwords and cookies from the other browsers.
-Spaces with the same name merge; tabs already present are skipped.
-Headless: `open "cra://import?source=arc&archive=1&settings=1"`.
+On first launch, or later from Cra ▸ Import from Arc or Dia…, Cra brings over:
+
+- **Arc:** spaces, pinned tabs, folders, favorites and the archive, plus passwords and
+  sign-ins.
+- **Dia, Chrome, Brave, Edge, Opera, Vivaldi, Chromium:** tabs, bookmarks, history,
+  passwords, sign-ins and extensions.
+- **Zen and Firefox:** open tabs, bookmarks and history, and Zen's spaces, Essentials and
+  pinned tabs.
+- **Safari:** whatever Safari exports itself (File ▸ Export Browsing Data): bookmarks,
+  history and passwords.
+
+Spaces with the same name merge, tabs that are already there are skipped, and every
+step can be skipped.
 
 ## Keyboard
 
-Arc's defaults: ⌘T new tab · ⌘L command bar / edit URL · ⌘W close tab (window
-when no tab) · ⇧⌘W close window · ⇧⌘T restore closed tab · ⌘S sidebar ·
-⇧⌘D toolbar · ⌘D pin/unpin · ⇧⌘C copy URL · ⇧⌥⌘C copy as Markdown ·
-⌘1…9 go to tab · ⌃1…9 go to space · ⌥⌘←/→ spaces · ⌥⌘↑/↓ tabs · ⌃Tab recent
-tab · ⇧⌘K clear Today · ⌘[ / ⌘] back/forward · ⌘Y history · ⇧⌘L library ·
-⇧⌘J downloads · ⌥⌘I DevTools · ⌥⌘J console · ⌥⌘U source · ⌘F find.
-Like Chrome, pages get first chance at unreserved shortcuts (⌘F in Docs works).
-Every shortcut can be changed in Settings → Shortcuts; overrides are saved to
-`~/Library/Application Support/Cra/keybindings.json`.
+Cra uses Arc's defaults, and every one can be changed in Settings ▸ Shortcuts. The ones
+you'll use most:
 
-## Rendering calibration hook
+| Shortcut | Action |
+|---|---|
+| <kbd>⌘</kbd> <kbd>T</kbd> | New tab (command bar) |
+| <kbd>⌘</kbd> <kbd>L</kbd> | Edit the URL |
+| <kbd>⌘</kbd> <kbd>W</kbd> | Close tab |
+| <kbd>⇧</kbd> <kbd>⌘</kbd> <kbd>T</kbd> | Restore closed tab |
+| <kbd>⌘</kbd> <kbd>D</kbd> | Pin or unpin tab |
+| <kbd>⌘</kbd> <kbd>S</kbd> | Show or hide the sidebar |
+| <kbd>⌃</kbd> <kbd>1</kbd>…<kbd>9</kbd> | Go to space |
+| <kbd>⌘</kbd> <kbd>1</kbd>…<kbd>9</kbd> | Go to tab |
+| <kbd>⌃</kbd> <kbd>Tab</kbd> | Switch to recent tab |
+| <kbd>⌃</kbd> <kbd>⇧</kbd> <kbd>=</kbd> | Split view |
+| <kbd>⌥</kbd> <kbd>⌘</kbd> <kbd>N</kbd> | New Little Window |
+| <kbd>⇧</kbd> <kbd>⌘</kbd> <kbd>N</kbd> | New incognito window |
+| <kbd>⇧</kbd> <kbd>⌘</kbd> <kbd>C</kbd> | Copy URL |
+| <kbd>⇧</kbd> <kbd>⌘</kbd> <kbd>K</kbd> | Clear Today |
+| <kbd>⌘</kbd> <kbd>Y</kbd> | History and archive |
+| <kbd>⌃</kbd> <kbd>D</kbd> | Developer Mode |
+| <kbd>⌥</kbd> <kbd>⌘</kbd> <kbd>I</kbd> | DevTools |
 
-`open "cra://debug?lift=0&liftInactive=0.75&alpha=1&material=13&state=follows&appearance=dark"`
-changes the vibrancy parameters live (see `Sources/Cra/UI/Tuning.swift`). `material` is the
-raw `NSVisualEffectView.Material` value, `alpha` scales the gradient opacity.
+Pages get the first chance at shortcuts Cra doesn't reserve, like in Chrome, so ⌘F in
+Google Docs works. The [full list](https://crabrowser.app/shortcuts) is on the site.
 
-## DevTools
+## Privacy and security
 
-⌥⌘I toggles Chrome DevTools docked on the right of the page (drag the divider to resize);
-Inspect Element from the context menu opens it at the clicked node. Each tab keeps its own
-DevTools; the dock follows the selected tab.
+Cra has no account and no server, and the app collects no analytics. Spaces, tabs and the
+archive are plain JSON in `~/Library/Application Support/Cra`. A built-in blocker stops
+requests to more than 22,000 ad and tracker domains.
 
-## Brand
+Pages run in Chromium's sandbox with site isolation, passwords and cookies are encrypted
+with a key in your Keychain, and new Chromium releases are checked daily and shipped as
+signed updates. [crabrowser.app/security](https://crabrowser.app/security) says what is
+and isn't covered. To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
-`brand/` holds the marks; `resources/brand/*.png` are WebKit renders of them (so the
-multiply blends survive) used by `BrandMark`, and `resources/AppIcon.icns` is built from
-`brand/cra-segments-icon.svg` (render at 1024 px, `iconutil`).
+## Support Cra
 
-## Website and brand
+Cra is free and open source and has no investors or ads. If it earns a place on your Mac,
+sponsoring it pays for the Chromium updates, the Apple signing and the time it takes to
+keep a browser going. It unlocks nothing in the app, and every feature stays free for
+everyone.
 
-The marketing site lives in a separate private repository (VictorKildahl/cra-website).
-Logo sources are in `brand/` (see `brand/README.md`); `resources/brand` holds the PNGs the
-app loads and `resources/AppIcon.icns` the app icon.
+<p align="center">
+  <a href="https://github.com/sponsors/VictorKildahl"><img alt="Sponsor on GitHub" src="docs/assets/sponsor.png" width="272" height="60"></a>
+</p>
 
-## Developer Mode and shortcuts
+<p align="center"><a href="https://crabrowser.app/support">Where the money goes</a></p>
 
-⌃D toggles Arc's per-site Developer Mode: the toolbar switches from the friendly centred
-URL (nav buttons at its left) to the full monospace URL with the developer icons, and the
-nav buttons move into the sidebar. Every shortcut can be changed in Settings → Shortcuts
-(click the shortcut, press new keys; Esc cancels, ⌫ removes; conflicts are flagged).
-Overrides live in `keybindings.json` in the app's support folder.
+## Build from source
 
-## Picture in Picture
+    scripts/build.sh          # fetches CEF on first run, builds build/Cra.app
+    scripts/run.sh            # build if needed, then open
+    scripts/dev.sh            # dev loop: debug CraDev.app, rebuilds + relaunches on save
 
-View ▸ Picture in Picture (or "pip" in the command bar, or the context menu on a video) pops the
-page's video out into Arc's floating window: bare 16:9, 6 pt corners, top-right, draggable and
-resizable from its edges. Hovering it shows close, back to tab, play/pause and ±15 s buttons. Leaving a tab whose video is playing pops it
-out automatically (Settings ▸ Tabs, "Enable Picture in Picture when you leave a video tab"), and
-coming back to the tab brings the video home. `open "cra://action/pictureInPicture"` toggles it.
+Needs Xcode 16+ and CMake (`brew install cmake`). [CONTRIBUTING.md](CONTRIBUTING.md)
+covers sending a change, and [docs/development.md](docs/development.md) covers the code
+layout, scripting hooks and test instances.
+
+## Licence
+
+MIT, see [LICENSE](LICENSE). Arc is a trademark of The Browser Company. Cra is an
+independent project and is not affiliated with it.
