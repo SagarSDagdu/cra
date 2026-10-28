@@ -73,7 +73,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         LiveFolderManager.shared.start(store: store)
         // A restart into an update while the user was away leaves the front app alone.
-        if !SoftwareUpdater.shared.launchedByAutoUpdate { NSApp.activate(ignoringOtherApps: true) }
+        if HitchMonitor.background {
+            // Measured behind whatever is in front; still on screen, so pages keep drawing.
+            for w in mainWindows { w.window?.orderBack(nil) }
+        } else if !SoftwareUpdater.shared.launchedByAutoUpdate {
+            NSApp.activate(ignoringOtherApps: true)
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.installURLEventHandler() }
         // Extension welcome pages and chrome.tabs.create land in Cra, not in a Chrome window.
         // --load-extension extensions count as freshly installed on every launch, so their
@@ -422,13 +427,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let comps = URLComponents(url: u, resolvingAgainstBaseURL: false)
         func q(_ name: String) -> String? { comps?.queryItems?.first { $0.name == name }?.value }
         // Actions keep their target: a key Little Window stays key (perform routes to it).
-        if u.host != "action" || keyLittleWindow == nil {
+        // A background test instance (CRA_TEST_BACKGROUND) never comes to the front.
+        if (u.host != "action" || keyLittleWindow == nil) && !HitchMonitor.background {
             main.showWindow(nil)
             NSApp.activate(ignoringOtherApps: true)
         }
         switch u.host {
         case "commandbar":
-            main.openCommandBar(q("mode") == "edit" ? .editURL : .newTab)
+            // With the bar already open a new query is the next keystroke, not a new session.
+            if !(main.commandBar.isOpen && q("query") != nil) { main.openCommandBar(q("mode") == "edit" ? .editURL : .newTab) }
             if let text = q("query") { main.commandBar.setQuery(text) }
         case "action":
             perform(String(u.path.dropFirst()))
@@ -623,9 +630,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Keys the page let through (CEF OnKeyEvent). Anything we know runs here;
     /// returning false lets CEF pass the key on to the menu bar (⌘Q, ⌘H…).
     func handleUnhandledKey(_ event: NSEvent) -> Bool {
-        guard let action = bindings.action(for: event) else { return false }
-        perform(action.id)
-        return true
+        if let action = bindings.action(for: event) {
+            perform(action.id)
+            return true
+        }
+        // Chromium hands a ⌘-key the page left alone back to the menu bar through its own
+        // window's command dispatcher (⌘C, ⌘V, ⌘A, ⌘Z exist only as Edit menu items). An
+        // embedded page sits in Cra's window, which has none: the key was dropped.
+        if event.modifierFlags.contains(.command), let key = NSApp.keyWindow,
+           !key.responds(to: NSSelectorFromString("commandDispatcher")) {
+            return NSApp.mainMenu?.performKeyEquivalent(with: event) ?? false
+        }
+        return false
     }
 
     func perform(_ id: String) {

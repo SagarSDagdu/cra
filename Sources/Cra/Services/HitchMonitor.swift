@@ -1,7 +1,7 @@
 import Foundation
 import QuartzCore
 
-/// Testing aid: with CRA_HITCH_LOG=<path> set, every main-thread stall of 8 ms or
+/// Testing aids. With CRA_HITCH_LOG=<path> set, every main-thread stall of 8 ms or
 /// more is appended to that file, with the actions that ran through CRA_COMMAND_FILE
 /// as markers between them. The main thread is also Chromium's browser UI thread,
 /// so a stall here delays input, scrolling and page-window moves as well as Cra's UI.
@@ -9,7 +9,16 @@ enum HitchMonitor {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var handle: FileHandle?
 
+    /// CRA_TEST_BACKGROUND=1: a test instance measured behind other apps. Scripted commands
+    /// don't bring it to the front, and App Nap doesn't slow it down.
+    static let background = ProcessInfo.processInfo.environment["CRA_TEST_BACKGROUND"] == "1"
+    nonisolated(unsafe) private static var activity: NSObjectProtocol?
+
     static func startIfRequested() {
+        if background {
+            activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical, .idleSystemSleepDisabled],
+                                                             reason: "Background test instance")
+        }
         guard let path = ProcessInfo.processInfo.environment["CRA_HITCH_LOG"], !path.isEmpty else { return }
         FileManager.default.createFile(atPath: path, contents: nil)
         handle = FileHandle(forWritingAtPath: path)

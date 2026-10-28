@@ -255,6 +255,18 @@ final class ShellView: NSView {
             return
         }
 
+        // One pane before and after, a plain tab switch: the card follows the tab.
+        if paneCards.count == 1, shownIDs.count == 1, let card = paneCards.first,
+           (card.tabID == ShellView.noTabID) == (shownIDs[0] == ShellView.noTabID) {
+            let id = shownIDs[0]
+            card.retarget(to: id, toolbar: makeToolbar?(id == ShellView.noTabID ? nil : id) ?? AnyView(EmptyView()))
+            card.pageColor = pageColors[id]
+            card.toolbarColor = toolbarColors[id]
+            card.hasPage = id != ShellView.noTabID && !empty.contains(id)
+            needsLayout = true
+            return
+        }
+
         let oldFrames = Dictionary(uniqueKeysWithValues: paneCards.map { ($0.tabID, $0.frame) })
         var cards: [PaneCardView] = []
         for id in shownIDs {

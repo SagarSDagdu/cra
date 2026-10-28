@@ -652,7 +652,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         var panels: [NSPanel?] = [overlayPanel]
         if !overlay.toasts.isEmpty { panels.append(toastPanel) }
         if overlay.findVisible { panels.append(findPanel) }
-        for case let panel? in panels {
+        let wanted = panels.compactMap { $0 }
+        // Already the last children, in order, and showing: re-adding each one rebuilt the
+        // window's ordering group, a window server round trip, on every tab switch.
+        let children = window.childWindows ?? []
+        if children.suffix(wanted.count).elementsEqual(wanted, by: ===), wanted.allSatisfy(\.isVisible) { return }
+        for panel in wanted {
             window.removeChildWindow(panel)
             window.addChildWindow(panel, ordered: .above)
             panel.orderFront(nil)
@@ -715,7 +720,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
             positionPageWindows(lastPaneFrames)
             w.contentView?.isHidden = false
             embedPage(id, from: w)
-            w.orderFront(nil)
+            // Ordering a window that is already showing is a window server round trip too.
+            if !w.isVisible { w.orderFront(nil) }
             if focus, w === focused, EmbeddedPages.isEnabled, browsers.visibleDevToolsWindow == nil {
                 // Focus goes to the page inside this window; one not embedded yet takes it when it is.
                 embedFocusTab = id
@@ -1403,6 +1409,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
                         return event
                     }
                     self.swipeAxis = .horizontal
+                    HitchMonitor.mark("swipe-begin")
                     self.beginSpaceSwipe()
                     self.trackSpaceSwipe(by: self.swipeX, at: event.timestamp)
                     return nil
@@ -1450,6 +1457,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
     }
 
     private func endSpaceSwipe() {
+        HitchMonitor.mark("swipe-lift")
         let width = max(1, shell.sidebarWidth)
         let pages = sidebarUI.spaceSwipe
         let span = (swipeSamples.last?.time ?? 0) - (swipeSamples.first?.time ?? 0)
@@ -1462,9 +1470,22 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         if !(0..<store.spaceOrder.count).contains(index + step) { step = 0 }
         let remaining = CGFloat(step) - pages
         sidebarUI.spaceSettleVelocity = abs(remaining) > 0.001 ? Double(max(-4, min(12, velocity / remaining))) : 0
-        withAnimation(sidebarUI.spaceSettleAnimation) {
+        // The new space becomes the strip's page at once, with the swipe re-based so nothing moves,
+        // and only the swipe springs home. It moves the strip as a render effect; animating the
+        // page change moved every row's layout on every frame of the settle.
+        let generation = sidebarUI.beginSpaceSettle()
+        if step != 0 {
+            var instant = Transaction()
+            instant.disablesAnimations = true
+            withTransaction(instant) {
+                sidebarUI.spaceSwipe = pages - CGFloat(step)
+                store.focusSpace(store.spaceOrder[index + step], window: windowID)
+            }
+        }
+        withAnimation(sidebarUI.spaceSettleAnimation, completionCriteria: .logicallyComplete) {
             sidebarUI.spaceSwipe = 0
-            if step != 0 { store.focusSpace(store.spaceOrder[index + step], window: windowID) }
+        } completion: { [weak self] in
+            self?.sidebarUI.endSpaceSettle(generation)
         }
         // Clicks and shortcuts that switch spaces later start from rest.
         DispatchQueue.main.async { [weak self] in self?.sidebarUI.spaceSettleVelocity = 0 }
@@ -1662,7 +1683,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         positionCommandPanel()
         if commandPanel.parent == nil { window.addChildWindow(commandPanel, ordered: .above) }
         commandBarOpenedAt = Date()
-        NSApp.activate(ignoringOtherApps: true)
+        if !HitchMonitor.background { NSApp.activate(ignoringOtherApps: true) }
         // Key immediately (typing never waits); CommandBarView fades itself in.
         commandPanel.makeKeyAndOrderFront(nil)
         observeCommandBar()

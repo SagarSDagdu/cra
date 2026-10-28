@@ -6,7 +6,7 @@ import SwiftUI
 /// A pane without a page (Arc's "Search or Enter URL…" pane) is a translucent
 /// tinted card with nothing but the toolbar.
 final class PaneCardView: NSView {
-    let tabID: UUID
+    private(set) var tabID: UUID
     let toolbarHost: NSHostingView<AnyView>
     /// The theme the toolbar's root view was made with: it is rebuilt only when that changes.
     var toolbarTheme: SpaceTheme?
@@ -48,6 +48,17 @@ final class PaneCardView: NSView {
     }
     var showsElsewhere = false { didSet { elsewhereView.isHidden = !showsElsewhere } }
     private let elsewhereView = NSView()
+
+    /// The card shows another tab now (a tab switch with one pane before and after). Building
+    /// a new card made a new SwiftUI toolbar host on every switch.
+    func retarget(to id: UUID, toolbar: AnyView) {
+        tabID = id
+        toolbarHost.rootView = toolbar
+        frozenWebBounds = nil
+        showsElsewhere = false
+        elsewhereSnapshot = nil
+        needsLayout = true
+    }
 
     init(tabID: UUID, toolbar: AnyView) {
         self.tabID = tabID

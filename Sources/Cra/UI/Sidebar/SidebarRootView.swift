@@ -35,21 +35,22 @@ struct SidebarRootView: View {
             GeometryReader { g in
                 let spaces = store.pagedSpaces(window: ui.windowID)
                 let index = CGFloat(spaces.firstIndex { $0.id == space.id } ?? 0)
-                HStack(alignment: .top, spacing: 0) {
-                    ForEach(spaces) { s in
-                        // Arc 1.170 keeps favorites and the space header fixed; only the
-                        // space's tab list scrolls (SpaceSectionView owns that scroll view).
-                        // Favorites belong to the space, so they page with it.
-                        VStack(spacing: 0) {
-                            FavoritesGrid(space: s, palette: s.theme.palette)
-                                .padding(.horizontal, 8)
-                            SpaceSectionView(space: s, palette: s.theme.palette)
+                SpacePagerStrip(index: index, width: g.size.width) {
+                    HStack(alignment: .top, spacing: 0) {
+                        ForEach(spaces) { s in
+                            // Arc 1.170 keeps favorites and the space header fixed; only the
+                            // space's tab list scrolls (SpaceSectionView owns that scroll view).
+                            // Favorites belong to the space, so they page with it.
+                            VStack(spacing: 0) {
+                                FavoritesGrid(space: s, palette: s.theme.palette)
+                                    .padding(.horizontal, 8)
+                                SpaceSectionView(space: s, palette: s.theme.palette)
+                            }
+                            .foregroundStyle(s.theme.palette.textPrimary)
+                            .frame(width: g.size.width, height: g.size.height, alignment: .top)
                         }
-                        .foregroundStyle(s.theme.palette.textPrimary)
-                        .frame(width: g.size.width, height: g.size.height, alignment: .top)
                     }
                 }
-                .offset(x: -(index + ui.spaceSwipe) * g.size.width)
             }
             .frame(maxHeight: .infinity, alignment: .top)
             .clipped()
@@ -296,14 +297,14 @@ struct SpaceSectionView: View {
     @Environment(SidebarUIState.self) private var ui
     @Environment(\.sidebarActions) private var actions
     @State private var hoverDivider = false
-    @State private var rowsFrame = CGRect.zero
+    /// Arc 1.170 draws a full-width 1pt hairline (~5% black over the light theme) at an edge of
+    /// the list only while rows are hidden past it, fading over ~0.25s. Only whether rows hide
+    /// past each edge is kept, not the rows' frame: that changed on every frame of a scroll and
+    /// re-ran this whole list's body each time.
+    @State private var scrolledUnderTop = false
+    @State private var rowsBelowBottom = false
     @State private var viewportHeight: CGFloat = 0
     @State private var autoscroller = DragAutoscroller()
-
-    /// Arc 1.170 draws a full-width 1pt hairline (~5% black over the light theme) at an edge of
-    /// the list only while rows are hidden past it, fading over ~0.25s.
-    private var scrolledUnderTop: Bool { rowsFrame.minY < -0.5 }
-    private var rowsBelowBottom: Bool { rowsFrame.maxY > viewportHeight + 0.5 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -314,7 +315,8 @@ struct SpaceSectionView: View {
                 ScrollView(.vertical, showsIndicators: false) {
                     rows
                         .padding(.top, 3)
-                        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.scrollSpace)) } action: { rowsFrame = $0 }
+                        .onGeometryChange(for: Bool.self) { $0.frame(in: .named(Self.scrollSpace)).minY < -0.5 } action: { scrolledUnderTop = $0 }
+                        .onGeometryChange(for: Bool.self) { [viewportHeight] in $0.frame(in: .named(Self.scrollSpace)).maxY > viewportHeight + 0.5 } action: { rowsBelowBottom = $0 }
                         // Arc leaves ~121pt of empty list after the last row at full scroll.
                         .padding(.bottom, 121)
                         .overlay(alignment: .topLeading) { dropLine }
@@ -547,5 +549,44 @@ private struct SpaceListMenu: View {
             Button("Clear Today") { store.clearToday(space.id) }
         }
         Button("Edit Space…") { actions.editSpace(space) }
+    }
+}
+
+/// The strip of space lists. It moves as a render effect, never by layout: a layout offset
+/// moved the geometry of every row in every space on every frame, re-ran hover for the rows
+/// sliding under a resting pointer and had SwiftUI rebuild its key view loop (~1 s of main
+/// thread over six swipes). The page index places the strip at once; what is left to travel,
+/// a live swipe or the spring after a space change, is the render offset. The strip takes no
+/// clicks or hovers under the fingers. Only this view reads the swipe; the caller builds the lists.
+private struct SpacePagerStrip<Content: View>: View {
+    let index: CGFloat
+    let width: CGFloat
+    @ViewBuilder let content: Content
+    @Environment(SidebarUIState.self) private var ui
+    /// Pages still to travel after a space change by click or shortcut; springs to 0.
+    @State private var shift: CGFloat = 0
+
+    var body: some View {
+        let x = -(ui.spaceSwipe + shift) * width
+        content
+            .offset(x: -index * width)
+            .animation(nil, value: index)
+            .visualEffect { view, _ in view.offset(x: x) }
+            // Off only under the fingers: ignoring clicks for the whole spring made the sidebar
+            // feel unresponsive right after a space change.
+            .allowsHitTesting(ui.spaceSwipe == 0 && shift == 0)
+            .onChange(of: index) { old, new in
+                // A swipe re-bases itself (MainWindowController.endSpaceSwipe).
+                guard !ui.spaceSettling else { return }
+                var instant = Transaction()
+                instant.disablesAnimations = true
+                withTransaction(instant) { shift = old - new }
+                let generation = ui.beginSpaceSettle()
+                withAnimation(ui.spaceSettleAnimation, completionCriteria: .logicallyComplete) {
+                    shift = 0
+                } completion: {
+                    ui.endSpaceSettle(generation)
+                }
+            }
     }
 }

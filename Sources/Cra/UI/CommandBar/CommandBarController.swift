@@ -45,6 +45,7 @@ final class CommandBarController {
     }
 
     func open(mode: CommandBarMode, prefill: String?) {
+        engine.resetIndex()
         self.mode = mode
         query = prefill ?? ""
         fieldText = query
@@ -123,6 +124,7 @@ final class CommandBarController {
     func close() {
         guard isOpen else { return }
         isOpen = false
+        engine.resetIndex()
         onClose()
     }
 }

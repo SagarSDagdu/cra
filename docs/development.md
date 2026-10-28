@@ -54,10 +54,11 @@ To measure smoothness, add `CRA_HITCH_LOG=/tmp/cra-hitch.log`: every main-thread
 there delays input and scrolling too. Compare builds by running the same command
 script against each.
 
-`CRA_EMBED_PAGES=1` (or `defaults write dk.kildahl.cra embedPages -bool YES`) turns on the
-experimental page embedding in `EmbeddedPages.swift`: Chromium's page view moves from its
-Chrome window into the pane card, like Arc and Dia, and the Chrome window stays behind
-invisible and click-through. Pages go back into their window while DevTools is open.
+Pages are embedded in their pane cards (`EmbeddedPages.swift`): Chromium's page views move
+from their Chrome window into the card, like Arc and Dia, and the Chrome window stays behind
+empty, click-through and never key. Pages go back into their window while DevTools is open.
+`CRA_EMBED_PAGES=0` (or `defaults write dk.kildahl.cra embedPages -bool NO`) keeps pages in
+their own child windows, the hosting before 0.1.17, for comparing the two.
 
 ## Scripting hooks
 

@@ -74,7 +74,7 @@ final class SuggestionEngine {
         // Incognito: the window's own tabs, search and commands; nothing from the normal profile.
         if !incognito {
             items.append(contentsOf: archiveSuggestions(q))
-            items.append(contentsOf: historySuggestions(q, openURLs: Set(store.profileTabs(window: nil).compactMap { $0.tab?.url })))
+            items.append(contentsOf: historySuggestions(q, openURLs: searchIndex.openURLs))
             items.append(contentsOf: topDomainSuggestions(q))
         }
         items.append(contentsOf: commandSuggestions(q, currentTabID: currentTabID))
@@ -101,6 +101,51 @@ final class SuggestionEngine {
         result.inlineCompletion = completion?.text
         return result
     }
+
+    // MARK: Search index
+
+    /// What scoring needs from a title and a URL. Worked out per keystroke for every tab,
+    /// archived tab and history entry (a URL parse each) it held up typing in the command bar.
+    struct Searchable {
+        let title: String
+        let words: [Substring]
+        let url: String
+        let host: String
+        let bareHost: String
+
+        init(title: String, url: String) {
+            self.title = title.lowercased()
+            words = self.title.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            self.url = SuggestionEngine.humanURL(url).lowercased()
+            host = (URL(string: url)?.host ?? "").lowercased()
+            bareHost = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+        }
+    }
+
+    private struct SearchIndex {
+        var tabs: [(SidebarItem, Searchable)] = []
+        var archive: [(ArchivedItem, Searchable)] = []
+        var history: [(HistoryEntry, Searchable)] = []
+        var openURLs: Set<String> = []
+    }
+
+    private var index: SearchIndex?
+
+    /// Built on the first keystroke after the command bar opens, kept until it closes.
+    private var searchIndex: SearchIndex {
+        if let index { return index }
+        var i = SearchIndex()
+        let tabs = store.profileTabs(window: nil)
+        i.tabs = tabs.compactMap { tab in tab.tab.map { (tab, Searchable(title: tab.displayTitle, url: $0.url)) } }
+        i.openURLs = Set(tabs.compactMap { $0.tab?.url })
+        i.archive = store.archive.prefix(400).compactMap { e in e.item.tab.map { (e, Searchable(title: e.item.displayTitle, url: $0.url)) } }
+        i.history = store.history.values.map { ($0, Searchable(title: $0.title, url: $0.url)) }
+        index = i
+        return i
+    }
+
+    /// The command bar opened or closed: what it searches may have changed since.
+    func resetIndex() { index = nil }
 
     // MARK: Typed text
 
@@ -141,9 +186,9 @@ final class SuggestionEngine {
 
     private func tabSuggestions(_ q: String, excluding current: UUID?) -> [Suggestion] {
         var out: [Suggestion] = []
-        for tab in store.profileTabs(window: nil) where tab.id != current {
+        for (tab, key) in searchIndex.tabs where tab.id != current {
             guard let t = tab.tab else { continue }
-            var score = textScore(q, title: tab.displayTitle, url: t.url)
+            var score = Self.score(q, key)
             if let custom = tab.title?.lowercased(), custom.hasPrefix(q) { score += 40 }
             if score < 30 { continue }
             score += recencyBoost(t.timeLastActiveAt)
@@ -161,9 +206,9 @@ final class SuggestionEngine {
 
     private func archiveSuggestions(_ q: String) -> [Suggestion] {
         var out: [Suggestion] = []
-        for entry in store.archive.prefix(400) {
+        for (entry, key) in searchIndex.archive {
             guard let t = entry.item.tab else { continue }
-            var score = textScore(q, title: entry.item.displayTitle, url: t.url) * 0.85
+            var score = Self.score(q, key) * 0.85
             if score < 30 { continue }
             score += recencyBoost(entry.archivedAt) * 0.5
             let spaceName = entry.sourceSpaceID.flatMap { store.space($0)?.title } ?? ""
@@ -176,8 +221,8 @@ final class SuggestionEngine {
 
     private func historySuggestions(_ q: String, openURLs: Set<String>) -> [Suggestion] {
         var out: [Suggestion] = []
-        for h in store.history.values where !openURLs.contains(h.url) {
-            var score = textScore(q, title: h.title, url: h.url) * 0.8
+        for (h, key) in searchIndex.history where !openURLs.contains(h.url) {
+            var score = Self.score(q, key) * 0.8
             if score < 30 { continue }
             score += min(Double(h.visitCount), 20) * 1.5 + recencyBoost(h.lastVisit) * 0.6
             out.append(Suggestion(id: "hist:\(h.url)", kind: .history, title: h.title.isEmpty ? Self.humanURL(h.url) : h.title,
@@ -269,10 +314,11 @@ final class SuggestionEngine {
 
     /// 0...100 from how well the query matches a title and a URL.
     func textScore(_ q: String, title: String, url: String) -> Double {
-        let t = title.lowercased()
-        let u = Self.humanURL(url).lowercased()
-        let host = (URL(string: url)?.host ?? "").lowercased()
-        let bareHost = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+        Self.score(q, Searchable(title: title, url: url))
+    }
+
+    private static func score(_ q: String, _ key: Searchable) -> Double {
+        let t = key.title, u = key.url, host = key.host, bareHost = key.bareHost
         var score = 0.0
         let tokens = q.split(separator: " ").map(String.init)
         if tokens.count > 1 {
@@ -283,7 +329,7 @@ final class SuggestionEngine {
             return score
         }
         if t.hasPrefix(q) { score = 100 }
-        else if t.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).contains(where: { $0.hasPrefix(q) }) { score = 85 }
+        else if key.words.contains(where: { $0.hasPrefix(q) }) { score = 85 }
         else if t.contains(q) { score = 65 }
         else if let f = fuzzy(q, in: t) { score = 25 + 25 * f }
         if bareHost.hasPrefix(q) || host.hasPrefix(q) { score = max(score, 95) }
@@ -293,7 +339,7 @@ final class SuggestionEngine {
     }
 
     /// Subsequence match quality (0...1) or nil when not a subsequence.
-    private func fuzzy(_ q: String, in text: String) -> Double? {
+    private static func fuzzy(_ q: String, in text: String) -> Double? {
         guard q.count >= 3 else { return nil }
         var it = text.makeIterator()
         var matched = 0
@@ -355,7 +401,7 @@ final class SuggestionEngine {
 
     // MARK: Formatting
 
-    static func humanURL(_ url: String) -> String {
+    nonisolated static func humanURL(_ url: String) -> String {
         var s = url
         for p in ["https://www.", "http://www.", "https://", "http://"] where s.hasPrefix(p) { s = String(s.dropFirst(p.count)); break }
         if s.hasSuffix("/") { s.removeLast() }
@@ -363,10 +409,14 @@ final class SuggestionEngine {
         return s
     }
 
-    static func relative(_ date: Date) -> String {
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .short
-        return f.localizedString(for: date, relativeTo: Date())
+        return f
+    }()
+
+    static func relative(_ date: Date) -> String {
+        relativeFormatter.localizedString(for: date, relativeTo: Date())
     }
 }
 

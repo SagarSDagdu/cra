@@ -69,6 +69,27 @@ final class SidebarUIState {
     var spaceSwipe: CGFloat = 0
     /// Release velocity for the settle spring, relative to the distance left to travel.
     var spaceSettleVelocity: Double = 0
+    /// The strip is springing onto its page (after a swipe or a space change); it takes no
+    /// clicks or hovers until then.
+    var spaceSettling = false
+    @ObservationIgnored private var settleGeneration = 0
+
+    /// Returns the settle's number for `endSpaceSettle`.
+    func beginSpaceSettle() -> Int {
+        spaceSettling = true
+        settleGeneration &+= 1
+        let generation = settleGeneration
+        // A spring cut short may never report back: don't leave the strip ignoring clicks.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.endSpaceSettle(generation) }
+        return generation
+    }
+
+    /// An earlier settle ending late leaves a newer one alone.
+    func endSpaceSettle(_ generation: Int) {
+        guard generation == settleGeneration, spaceSettling else { return }
+        spaceSettling = false
+        HitchMonitor.mark("swipe-settled")
+    }
     /// Dia settles pages with a zero-bounce spring that picks up the release speed.
     var spaceSettleAnimation: Animation {
         .interpolatingSpring(duration: 0.4, bounce: 0, initialVelocity: spaceSettleVelocity)

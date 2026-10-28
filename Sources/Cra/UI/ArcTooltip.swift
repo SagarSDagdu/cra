@@ -15,8 +15,8 @@ final class ArcTooltipController {
     static let warmWindow: TimeInterval = 0.5
 
     private var panel: LittleTooltipPanel?
-    private weak var shownFor: ArcTooltipAnchorView?
-    private weak var pendingFor: ArcTooltipAnchorView?
+    private weak var shownFor: (any ArcTooltipTarget)?
+    private weak var pendingFor: (any ArcTooltipTarget)?
     private var timer: Timer?
     private var lastHiddenAt = Date.distantPast
     private var clickMonitor: Any?
@@ -25,7 +25,7 @@ final class ArcTooltipController {
     /// innermost (smallest) one owns the tip (Arc: TooltipController.enteredViewStack).
     private var hovered: [WeakAnchor] = []
 
-    private struct WeakAnchor { weak var view: ArcTooltipAnchorView? }
+    private struct WeakAnchor { weak var view: (any ArcTooltipTarget)? }
 
     private init() {
         clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown]) { [weak self] e in
@@ -39,11 +39,11 @@ final class ArcTooltipController {
         }
     }
 
-    func mouseMoved(in view: ArcTooltipAnchorView) {
+    func mouseMoved(in view: any ArcTooltipTarget) {
         if !hovered.contains(where: { $0.view === view }) { hovered.append(WeakAnchor(view: view)) }
         let mouse = NSEvent.mouseLocation
         hovered.removeAll { a in
-            guard let v = a.view, v.window != nil else { return true }
+            guard let v = a.view, v.hostWindow != nil else { return true }
             return !v.screenFrame.contains(mouse)
         }
         guard let target = hovered.compactMap(\.view).min(by: { $0.screenFrame.width * $0.screenFrame.height < $1.screenFrame.width * $1.screenFrame.height }),
@@ -56,7 +56,7 @@ final class ArcTooltipController {
         startTip(for: target)
     }
 
-    private func startTip(for view: ArcTooltipAnchorView) {
+    private func startTip(for view: any ArcTooltipTarget) {
         if panel != nil || Date().timeIntervalSince(lastHiddenAt) < Self.warmWindow {
             show(for: view)
             return
@@ -72,12 +72,12 @@ final class ArcTooltipController {
         }
     }
 
-    func mouseExited(_ view: ArcTooltipAnchorView) {
+    func mouseExited(_ view: any ArcTooltipTarget) {
         hovered.removeAll { $0.view === view || $0.view == nil }
         if pendingFor === view { cancelPending() }
         if shownFor === view { hide() }
         // Leaving a close button for the rest of its row hands the tip back to the row.
-        if let outer = hovered.last?.view, outer.window != nil { mouseMoved(in: outer) }
+        if let outer = hovered.last?.view, outer.hostWindow != nil { mouseMoved(in: outer) }
     }
 
     /// A click or key press: the next tip waits for the pointer to rest again, so a row that
@@ -94,9 +94,9 @@ final class ArcTooltipController {
         pendingFor = nil
     }
 
-    private func show(for view: ArcTooltipAnchorView) {
+    private func show(for view: any ArcTooltipTarget) {
         cancelPending()
-        guard let window = view.window, !view.text.isEmpty else { return }
+        guard let window = view.hostWindow, !view.text.isEmpty else { return }
         removePanel()
         let p = LittleTooltipPanel()
         let option = NSEvent.modifierFlags.contains(.option) ? view.optionText : nil
@@ -146,8 +146,21 @@ final class ArcTooltipController {
     }
 }
 
-/// Tracks the pointer over a control without taking its clicks.
-final class ArcTooltipAnchorView: NSView {
+/// What a tip belongs to: an AppKit control's anchor view, or a SwiftUI view's hover.
+@MainActor
+protocol ArcTooltipTarget: AnyObject {
+    var text: String { get }
+    var keys: [String] { get }
+    var followsCursor: Bool { get }
+    var subtitle: String? { get }
+    var optionText: String? { get }
+    var onShow: (() -> Void)? { get }
+    var screenFrame: NSRect { get }
+    var hostWindow: NSWindow? { get }
+}
+
+/// Tracks the pointer over an AppKit control without taking its clicks.
+final class ArcTooltipAnchorView: NSView, ArcTooltipTarget {
     var text = ""
     var keys: [String] = []
     var followsCursor = false
@@ -158,6 +171,7 @@ final class ArcTooltipAnchorView: NSView {
     var onShow: (() -> Void)?
 
     var screenFrame: NSRect { window?.convertToScreen(convert(bounds, to: nil)) ?? .zero }
+    var hostWindow: NSWindow? { window }
 
     /// For AppKit controls: an anchor filling `control`.
     static func attach(to control: NSView, help: String) -> ArcTooltipAnchorView {
@@ -189,21 +203,70 @@ final class ArcTooltipAnchorView: NSView {
     }
 }
 
-private struct ArcTooltipAnchor: NSViewRepresentable {
+/// A SwiftUI view's tip, fed by its hover. No AppKit view per tip: the sidebar has hundreds of
+/// rows and buttons across its spaces, and an anchor view in each one had SwiftUI move every
+/// one of them, AppKit redo their tracking areas and rebuild its key view loop on every frame
+/// of a space swipe or sidebar scroll.
+@MainActor
+private final class ArcTooltipSource: ArcTooltipTarget {
+    var text = ""
+    var keys: [String] = []
+    var followsCursor = false
+    var subtitle: String?
+    var optionText: String?
+    var onShow: (() -> Void)?
+    var size = CGSize.zero
+    /// The view's frame on screen, worked out from the last hover: the pointer's screen
+    /// position and its position in the view.
+    private(set) var screenFrame = NSRect.zero
+    private(set) weak var hostWindow: NSWindow?
+
+    /// Called on every pointer move. The window under the pointer is a window server query,
+    /// so it is looked up once per visit (`entered`), not per move.
+    func hovered(at local: CGPoint, entered: Bool) {
+        let mouse = NSEvent.mouseLocation
+        // SwiftUI's local y grows downwards, the screen's upwards.
+        screenFrame = NSRect(x: mouse.x - local.x, y: mouse.y + local.y - size.height, width: size.width, height: size.height)
+        if entered || hostWindow == nil {
+            hostWindow = NSApp.window(withWindowNumber: NSWindow.windowNumber(at: mouse, belowWindowWithWindowNumber: 0))
+        }
+    }
+
+    /// Between the pointer arriving and leaving.
+    var isHovered = false
+}
+
+private struct ArcTooltipModifier: ViewModifier {
     let text: String
     let keys: [String]
     let followsCursor: Bool
     let subtitle: String?
     let optionText: String?
     let onShow: (() -> Void)?
-    func makeNSView(context: Context) -> ArcTooltipAnchorView { ArcTooltipAnchorView() }
-    func updateNSView(_ v: ArcTooltipAnchorView, context: Context) {
-        v.text = text
-        v.keys = keys
-        v.followsCursor = followsCursor
-        v.subtitle = subtitle
-        v.optionText = optionText
-        v.onShow = onShow
+    @State private var source = ArcTooltipSource()
+
+    func body(content: Content) -> some View {
+        content
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { source.size = $0 }
+            .onContinuousHover(coordinateSpace: .local) { phase in
+                switch phase {
+                case .active(let location):
+                    source.text = text
+                    source.keys = keys
+                    source.followsCursor = followsCursor
+                    source.subtitle = subtitle
+                    source.optionText = optionText
+                    source.onShow = onShow
+                    source.hovered(at: location, entered: !source.isHovered)
+                    source.isHovered = true
+                    ArcTooltipController.shared.mouseMoved(in: source)
+                case .ended:
+                    source.isHovered = false
+                    ArcTooltipController.shared.mouseExited(source)
+                }
+            }
+            // Row buttons vanish when the row loses hover; their tip goes with them.
+            .onDisappear { ArcTooltipController.shared.mouseExited(source) }
     }
 }
 
@@ -213,7 +276,7 @@ extension View {
     func arcTooltip(_ help: String, followsCursor: Bool = false, subtitle: String? = nil,
                     optionHelp: String? = nil, onShow: (() -> Void)? = nil) -> some View {
         let (text, keys) = ArcTooltipLabel.split(help)
-        return background(ArcTooltipAnchor(text: text, keys: keys, followsCursor: followsCursor, subtitle: subtitle,
+        return modifier(ArcTooltipModifier(text: text, keys: keys, followsCursor: followsCursor, subtitle: subtitle,
                                            optionText: optionHelp, onShow: onShow))
     }
 }

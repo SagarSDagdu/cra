@@ -196,6 +196,7 @@ final class BrowserManager: NSObject, @preconcurrency CraBrowserDelegate {
         }
         visibleTabIDs = shown
         visibleTabID = focused.flatMap { newSet.contains($0) ? $0 : nil } ?? shown.first
+        if wasVisible != Set(shown) { HitchMonitor.mark("page-shown") }
         if focus, let f = visibleTabID, let rt = runtimes[f] { rt.browser.setFocused(true) }
         for id in shown where !wasVisible.contains(id) { scheduleSnapshot(id) }
         syncDevToolsVisibility()

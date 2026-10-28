@@ -2098,6 +2098,15 @@ static void MarkProfileExitedCleanly(NSString* profileDir) {
 - (BOOL)isHandlingSendEvent { return _handlingSendEvent; }
 - (void)setHandlingSendEvent:(BOOL)handlingSendEvent { _handlingSendEvent = handlingSendEvent; }
 
+// A Chromium page view, wherever it lives: in its own window, or embedded in a Cra
+// window's pane (EmbeddedPages.swift), where sendEvent's other two checks miss it.
+static BOOL CraIsInPageView(NSView* v) {
+    for (NSView* p = v; p; p = p.superview) {
+        if ([NSStringFromClass([p class]) isEqualToString:@"WebContentsViewCocoa"]) return YES;
+    }
+    return NO;
+}
+
 // Chrome's rule: when a web view has focus, ⌘-shortcuts go to the page
 // first and only reach the menu bar if the page leaves them alone (so ⌘F in
 // Google Docs or ⌘← in a text field keep working). Reserved shortcuts are
@@ -2118,7 +2127,7 @@ static void MarkProfileExitedCleanly(NSString* profileDir) {
         if ([fr isKindOfClass:[NSView class]]) {
             NSView* v = (NSView*)fr;
             for (CraBrowser* b in [g_allBrowsers allObjects]) {
-                if ([v isDescendantOf:b.containerView] || (b.hostWindow && key == b.hostWindow)) {
+                if ([v isDescendantOf:b.containerView] || (b.hostWindow && key == b.hostWindow) || CraIsInPageView(v)) {
                     if (!_forwardedKeyEvents) _forwardedKeyEvents = [NSHashTable weakObjectsHashTable];
                     [_forwardedKeyEvents addObject:event];
                     [key sendEvent:event];
