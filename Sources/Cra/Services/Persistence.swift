@@ -39,6 +39,11 @@ enum AppPaths {
     static func file(_ name: String) -> URL { supportDir.appendingPathComponent(name) }
 }
 
+/// Where every JSONStore encodes and writes, one file at a time and in call order. Off the
+/// main thread, which is also Chromium's UI thread: encoding a 2000-entry archive.json
+/// took ~30 ms there, two to four dropped frames after every tab switch.
+private let persistenceQueue = DispatchQueue(label: "dk.kildahl.cra.persistence", qos: .utility)
+
 /// One JSON file, loaded once, saved with a short debounce. Writes are atomic
 /// and the previous version is kept as `<name>.bak`, which is what Arc does
 /// with its timestamped Storable*.json copies, minus the pile-up.
@@ -69,14 +74,19 @@ final class JSONStore<T: Codable> {
 
     func save(_ value: T, delay: TimeInterval = 0.4) {
         pending?.cancel()
-        let item = DispatchWorkItem { [weak self] in self?.saveNow(value) }
+        let item = DispatchWorkItem { [weak self] in self?.write(value) }
         pending = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+        persistenceQueue.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
+    /// Writes before returning (quit, launch-time bookkeeping), after any write in flight.
     func saveNow(_ value: T) {
         pending?.cancel()
         pending = nil
+        persistenceQueue.sync { write(value) }
+    }
+
+    private func write(_ value: T) {
         guard let data = try? encoder.encode(value) else { return }
         let fm = FileManager.default
         let bak = url.appendingPathExtension("bak")

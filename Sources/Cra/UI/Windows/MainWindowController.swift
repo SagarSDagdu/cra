@@ -35,6 +35,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
     /// The tab whose page (a video) is in element fullscreen.
     private var contentFullscreenTab: UUID?
     private var lastSidebarVisible = true
+    /// The theme the background and placeholder root views were made with.
+    private var shownTheme: SpaceTheme?
     private var lastSidebarWidth: CGFloat = 0
     private var commandBarOpenedAt = Date.distantPast
     private var commandObserving = false
@@ -174,7 +176,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         refresh()
         shell.onDevToolsFrame = { [weak self] rect in self?.positionDevToolsWindow(rect) }
         shell.onPaneFrames = { [weak self] frames in self?.positionPageWindows(frames) }
-        shell.onAnimatePaneFrames = { [weak self] frames, d in self?.animatePageWindows(to: frames, duration: d) }
+        shell.onAnimatePaneFrames = { [weak self] frames, d, timing in self?.animatePageWindows(to: frames, duration: d, timing: timing) }
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.shell.windowActive = true; self?.sidebarUI.appActive = true }
         }
@@ -279,18 +281,25 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         guard !isTornDown else { return }
         let space = focusedSpace
         let palette = space.theme.palette
-        shell.backgroundHost.rootView = SpaceBackground(palette: palette, pager: SpacePager(store: store, ui: sidebarUI))
-        shell.placeholderHost.rootView = AnyView(EmptyContentView(space: space))
-        shell.isDarkTheme = palette.isDark
-        window?.appearance = NSAppearance(named: palette.isDark ? .darkAqua : .aqua)
-        // Vibrant themes see through to the desktop like Arc; others are opaque.
-        shell.vibrancy.isHidden = !palette.vibrant
-        shell.vibrancyLift.isHidden = !palette.vibrant
-        shell.vibrantDark = palette.isDark
-        shell.vibrantLight = palette.vibrant && !palette.isDark
-        shell.refreshLift()
-        window?.isOpaque = !palette.vibrant
-        window?.backgroundColor = palette.vibrant ? .clear : NSColor(palette.gradientColors.first ?? .gray)
+        // refresh runs on every store change (each page title, each window move). A new root
+        // view rebuilds its whole SwiftUI tree, and a new window appearance or background redraws
+        // every view, so all of these follow the theme only when it changes. What the root
+        // views show beyond the palette they observe themselves.
+        if shownTheme != space.theme {
+            shownTheme = space.theme
+            shell.backgroundHost.rootView = SpaceBackground(palette: palette, pager: SpacePager(store: store, ui: sidebarUI))
+            shell.placeholderHost.rootView = AnyView(EmptyContentView(space: space))
+            shell.isDarkTheme = palette.isDark
+            window?.appearance = NSAppearance(named: palette.isDark ? .darkAqua : .aqua)
+            // Vibrant themes see through to the desktop like Arc; others are opaque.
+            shell.vibrancy.isHidden = !palette.vibrant
+            shell.vibrancyLift.isHidden = !palette.vibrant
+            shell.vibrantDark = palette.isDark
+            shell.vibrantLight = palette.vibrant && !palette.isDark
+            shell.refreshLift()
+            window?.isOpaque = !palette.vibrant
+            window?.backgroundColor = palette.vibrant ? .clear : NSColor(palette.gradientColors.first ?? .gray)
+        }
 
         browsers.pruneMissingTabs()
         let selected = selectedTabID
@@ -299,7 +308,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         let split = selected.flatMap { store.splitContaining($0) }
         let factors = SplitPaneLayout.normalizedFactors(ids: panes, stored: split?.split?.widthFactors ?? [:])
         let empty = Set(panes.filter { store.item($0)?.isEmptyTab == true })
-        shell.showToolbar = store.settings.showToolbar
+        if shell.showToolbar != store.settings.showToolbar { shell.showToolbar = store.settings.showToolbar }
         shell.setPanes(panes, factors: factors, orientation: split?.split?.orientation ?? .horizontal, focused: selected, empty: empty, animated: true)
         // A page is on screen in one window at a time. Arc keeps the tab selected in every window
         // that has it open: the window in use holds the page, the others show a blurred snapshot
@@ -308,7 +317,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         let live = panes.filter { !elsewhere.contains($0) }
         let liveFocus = selected.flatMap { elsewhere.contains($0) ? nil : $0 }
         for c in shell.paneCards {
-            c.toolbarHost.rootView = shell.makeToolbar?(c.tabID == ShellView.noTabID ? nil : c.tabID) ?? AnyView(EmptyView())
+            if c.toolbarTheme != space.theme {
+                c.toolbarTheme = space.theme
+                c.toolbarHost.rootView = shell.makeToolbar?(c.tabID == ShellView.noTabID ? nil : c.tabID) ?? AnyView(EmptyView())
+            }
             c.showsElsewhere = elsewhere.contains(c.tabID)
             c.elsewhereSnapshot = c.showsElsewhere ? app.runtime(for: c.tabID)?.snapshot : nil
         }
@@ -349,16 +361,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         return showing.first.map { $0.id != windowID } ?? false
     }
 
+    /// Runs on every page event (progress, title, favicon). An @Observable property notifies
+    /// on every assignment, equal or not, and every sidebar row reads some of these, so each
+    /// one is assigned only when it changed.
     private func syncSidebarUI() {
-        sidebarUI.loadedTabIDs = Set(app.mainWindows.flatMap { $0.browsers.runtimes.keys })
+        let loaded = Set(app.mainWindows.flatMap { $0.browsers.runtimes.keys })
+        if loaded != sidebarUI.loadedTabIDs { sidebarUI.loadedTabIDs = loaded }
         let capturing = Set(app.mainWindows.flatMap { $0.browsers.runtimes.filter { $0.value.browser.isCapturingMedia }.keys })
         if capturing != sidebarUI.capturingTabIDs { sidebarUI.capturingTabIDs = capturing }
         let b = browsers.visibleRuntime?.browser
-        sidebarUI.canGoBack = b?.canGoBack ?? false
-        sidebarUI.canGoForward = b?.canGoForward ?? false
-        sidebarUI.isLoading = b?.isLoading ?? false
-        sidebarUI.pageThemeColor = browsers.visibleRuntime?.themeColor ?? ""
-        for (id, rt) in browsers.runtimes { sidebarUI.progress[id] = rt.progress }
+        if sidebarUI.canGoBack != (b?.canGoBack ?? false) { sidebarUI.canGoBack = b?.canGoBack ?? false }
+        if sidebarUI.canGoForward != (b?.canGoForward ?? false) { sidebarUI.canGoForward = b?.canGoForward ?? false }
+        if sidebarUI.isLoading != (b?.isLoading ?? false) { sidebarUI.isLoading = b?.isLoading ?? false }
+        let themeColor = browsers.visibleRuntime?.themeColor ?? ""
+        if sidebarUI.pageThemeColor != themeColor { sidebarUI.pageThemeColor = themeColor }
+        for (id, rt) in browsers.runtimes where sidebarUI.progress[id] != rt.progress { sidebarUI.progress[id] = rt.progress }
         var nav: [UUID: TabNavState] = [:]
         for id in browsers.visibleTabIDs {
             guard let rt = browsers.runtime(for: id) else { continue }
@@ -651,6 +668,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
     /// Attaches the visible tabs' Chrome windows over their pane areas, hides the others.
     func browserManagerPageWindowsChanged(focus: Bool) {
         guard let window else { return }
+        // A focus still waiting for its page to embed is stale once pages change without one.
+        if !focus { embedFocusTab = nil }
         ensureOverlayPanel()
         let visibleIDs = Set(browsers.visibleTabIDs)
         let focused = browsers.visibleRuntime?.hostWindow
@@ -660,8 +679,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
             // NSView ancestor), so hidden tabs stayed "visible": background tabs autoplayed video
             // and ran at full speed. A hidden content view makes the tab hidden like Chrome's
             // background tabs: media waits until the tab is first shown.
-            w.contentView?.isHidden = !visibleIDs.contains(id)
-            if !visibleIDs.contains(id) { if w.isVisible { w.orderOut(nil) }; continue }
+            if !visibleIDs.contains(id) {
+                w.contentView?.isHidden = true
+                // An embedded page leaves the window with its card, so Chromium sees it hidden.
+                if EmbeddedPages.isHost(w), let views = EmbeddedPages.pageViews(of: w) {
+                    for v in views where v.superview !== w.contentView { v.removeFromSuperview() }
+                }
+                if w.isVisible { w.orderOut(nil) }
+                continue
+            }
             if w.parent !== window {
                 // Borderless: a titled window gets macOS's rounded corners on all four sides,
                 // which shows under the toolbar and where the page meets DevTools.
@@ -685,18 +711,91 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
                 }
                 window.addChildWindow(w, ordered: .above)
             }
+            // Hidden pages are not kept in step with the panes, so size this one before it shows.
             positionPageWindows(lastPaneFrames)
+            w.contentView?.isHidden = false
+            embedPage(id, from: w)
             w.orderFront(nil)
-            if focus, w === focused {
+            if focus, w === focused, EmbeddedPages.isEnabled, browsers.visibleDevToolsWindow == nil {
+                // Focus goes to the page inside this window; one not embedded yet takes it when it is.
+                embedFocusTab = id
+                focusEmbeddedPage(id)
+            } else if focus, w === focused {
                 w.makeKey()
                 devToolsLog("page win \(w.windowNumber) makeKey -> isKey=\(w.isKeyWindow) canBecomeKey=\(w.canBecomeKey) style \(w.styleMask.rawValue)")
             }
         }
+        releaseUnfocusedEmbeddedPage()
         if let dev = browsers.visibleDevToolsWindow, dev.parent === window {
             raisePageWindows(above: dev)
         } else {
             raiseOverlayPanels()
         }
+    }
+
+    /// Moves the page's view from its Chrome window into its card (EmbeddedPages). With
+    /// DevTools open the page goes back: Chrome's docked frontend lays it out in its window.
+    private func embedPage(_ id: UUID, from w: NSWindow) {
+        guard EmbeddedPages.isEnabled else { return }
+        guard let views = EmbeddedPages.pageViews(of: w) else { return }
+        let target: NSView
+        if browsers.visibleDevToolsWindow != nil, let cv = w.contentView {
+            EmbeddedPages.unmarkHost(w)
+            target = cv
+        } else if let card = shell.paneCards.first(where: { $0.tabID == id }) {
+            EmbeddedPages.markHost(w)
+            target = card.webArea
+        } else {
+            return
+        }
+        // Compositor first, the page's input view above it.
+        if views.contains(where: { $0.superview !== target }) {
+            for v in views { target.addSubview(v) }
+        }
+        let bounds = shell.paneCards.first { $0.webArea === target }?.frozenWebBounds ?? target.bounds
+        for v in views where v.frame != bounds { v.frame = bounds }
+        if embedFocusTab == id { focusEmbeddedPage(id) }
+    }
+
+    /// `cra://debug?embedDump=1`: where every page view is, for EmbeddedPages work.
+    func embeddedPagesDump() -> String {
+        func tree(_ v: NSView, _ depth: Int) -> String {
+            var s = String(repeating: "  ", count: depth) + "\(type(of: v)) \(v.frame) hidden=\(v.isHidden) layer=\(v.layer.map { "\(type(of: $0)) \($0.bounds) hidden=\($0.isHidden) sub=\($0.sublayers?.count ?? 0)" } ?? "nil")\n"
+            if depth < 4 { for sub in v.subviews { s += tree(sub, depth + 1) } }
+            return s
+        }
+        var out = "embedded pages (enabled=\(EmbeddedPages.isEnabled)) key=\(window?.isKeyWindow ?? false) fr=\(String(describing: window?.firstResponder))\n"
+        for c in shell.paneCards { out += "card \(c.tabID.uuidString.prefix(8)) \(c.frame)\n" + tree(c.webArea, 1) }
+        for (id, rt) in browsers.runtimes {
+            guard let w = rt.hostWindow else { continue }
+            out += "host \(id.uuidString.prefix(8)) win \(w.windowNumber) alpha=\(w.alphaValue) visible=\(w.isVisible) host=\(EmbeddedPages.isHost(w)) frame \(w.frame)\n"
+            if let cv = w.contentView { out += tree(cv, 1) }
+        }
+        return out
+    }
+
+    /// An embedded page stays this window's first responder after its pane loses focus (an empty
+    /// split pane opened beside it). When the window became key again (the command bar closing)
+    /// the page reported focus, which selects its pane, and the URL meant for the empty pane
+    /// opened as a new tab. A page window never had that: it was a window of its own.
+    private func releaseUnfocusedEmbeddedPage() {
+        guard EmbeddedPages.isEnabled, let window, let responder = window.firstResponder as? NSView,
+              NSStringFromClass(type(of: responder)) == "RenderWidgetHostViewCocoa" else { return }
+        let focused = browsers.visibleTabID.flatMap { browsers.runtime(for: $0)?.hostWindow }.flatMap(EmbeddedPages.pageViews(of:)) ?? []
+        if !focused.contains(where: { responder.isDescendant(of: $0) }) { window.makeFirstResponder(nil) }
+    }
+
+    /// The tab whose embedded page should take keyboard focus once it is in its card.
+    private var embedFocusTab: UUID?
+
+    private func focusEmbeddedPage(_ id: UUID) {
+        guard let window, let host = browsers.runtime(for: id)?.hostWindow,
+              let view = EmbeddedPages.pageViews(of: host)?.last, view.window === window else { return }
+        embedFocusTab = nil
+        // Never from a panel that has the keys (the command bar filling a split pane, the find bar).
+        if let key = NSApp.keyWindow, key !== window, !EmbeddedPages.isHost(key), key.parent === window { return }
+        window.makeKey()
+        if let render = EmbeddedPages.renderView(in: view) { window.makeFirstResponder(render) }
     }
 
     /// Diagnostic log shared with the bridge: `defaults write dk.kildahl.cra devToolsLog -bool YES`.
@@ -709,20 +808,25 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         else { try? line.write(toFile: path, atomically: true, encoding: .utf8) }
     }
 
-    /// Every visible page window follows its pane; hidden tabs park on the focused rect.
+    /// Every visible page window follows its pane. Hidden tabs are left where they are and
+    /// sized when they show (browserManagerPageWindowsChanged): each resize makes Chromium lay
+    /// the page out synchronously, ~5 ms a window, which once ran for every loaded tab on
+    /// every sidebar toggle and every step of a window resize.
     private func positionPageWindows(_ frames: [UUID: NSRect]) {
         guard let window, !frames.isEmpty else { return }
         lastPaneFrames = frames
         let focusRect = (browsers.visibleTabID.flatMap { frames[$0] }) ?? frames.values.first!
         let focusPage = browsers.visibleTabID.map { pageRect(forBody: focusRect, tab: $0) } ?? focusRect
         let live = pageWindowsFollowLive || shell.devToolsFrontendDocked
-        for (id, rt) in browsers.runtimes {
-            guard let w = rt.hostWindow else { continue }
+        for id in browsers.visibleTabIDs {
+            guard let w = browsers.runtime(for: id)?.hostWindow else { continue }
             let body = frames[id] ?? focusRect
             let page = pageRect(forBody: body, tab: id)
             let target = window.convertToScreen(page)
             if w.frame != target { w.setFrame(target, display: live) }
             updatePageCorners(w, page: page, body: body)
+            // A switch can show the page before its card exists; the card is laid out by now.
+            embedPage(id, from: w)
             if shell.devToolsFrontendDocked, w.isVisible {
                 devToolsLog("page win \(w.windowNumber) '\(w.title)' tab \(id.uuidString.prefix(8)) visible=\(browsers.visibleTabIDs.contains(id)) body \(body) page \(page) style \(w.styleMask.rawValue) parent \(w.parent?.windowNumber ?? -1)")
             }
@@ -735,20 +839,35 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         layoutToastPanel()
     }
 
-    private func animatePageWindows(to frames: [UUID: NSRect], duration: TimeInterval) {
+    /// Pages follow their cards without Chromium laying them out on every frame (an animated
+    /// window frame resized the page at each step, a synchronous layout each time, and the
+    /// page trailed its card). Each page takes its final frame at once; one that grows is
+    /// revealed from its old edges by a mask animated in step with the card. One that shrinks
+    /// needs nothing: its card, painted in the page's colour, slides under the gap.
+    private func animatePageWindows(to frames: [UUID: NSRect], duration: TimeInterval, timing: CAMediaTimingFunction) {
         guard let window, !frames.isEmpty else { return }
         lastPaneFrames = frames
         let focusRect = (browsers.visibleTabID.flatMap { frames[$0] }) ?? frames.values.first!
         let focusPage = browsers.visibleTabID.map { pageRect(forBody: focusRect, tab: $0) } ?? focusRect
+        for id in browsers.visibleTabIDs {
+            guard let w = browsers.runtime(for: id)?.hostWindow, let body = frames[id] else { continue }
+            let page = pageRect(forBody: body, tab: id)
+            let target = window.convertToScreen(page)
+            let from = w.frame
+            CATransaction.begin()
+            if from != target {
+                w.setFrame(target, display: true)
+                fillContentView(w)
+            }
+            updatePageCorners(w, page: page, body: body)
+            if w.isVisible, !EmbeddedPages.isHost(w), let cv = w.contentView {
+                revealPage(cv, from: from, to: target, duration: duration, timing: timing)
+            }
+            CATransaction.commit()
+        }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = duration
-            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.85, 0.25, 1)
-            for id in browsers.visibleTabIDs {
-                guard let w = browsers.runtime(for: id)?.hostWindow, let body = frames[id] else { continue }
-                let page = pageRect(forBody: body, tab: id)
-                w.animator().setFrame(window.convertToScreen(page), display: true)
-                updatePageCorners(w, page: page, body: body)
-            }
+            ctx.timingFunction = timing
             if shell.devToolsFrontendDocked, let dev = browsers.visibleDevToolsWindow, dev.parent === window,
                let focusID = browsers.visibleTabID, let body = frames[focusID] {
                 dev.animator().setFrame(window.convertToScreen(body), display: true)
@@ -757,6 +876,42 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
             findPanel?.animator().setFrame(findPanelFrame(page: window.convertToScreen(focusPage)), display: true)
             if !overlay.toasts.isEmpty { toastPanel?.animator().setFrame(toastPanelFrame(page: window.convertToScreen(focusPage)), display: true) }
         }
+    }
+
+    /// Masks a page that just grew from `from` to `to` (screen rects) down to the part it
+    /// covered before, then opens the mask to the full page over the card's animation.
+    private func revealPage(_ view: NSView, from: NSRect, to: NSRect, duration: TimeInterval, timing: CAMediaTimingFunction) {
+        guard duration > 0, let layer = view.layer else { return }
+        let shown = from.intersection(to)
+        guard !shown.isEmpty, shown.width < to.width - 0.5 || shown.height < to.height - 0.5 else { return }
+        let start = NSRect(x: shown.minX - to.minX, y: view.isFlipped ? to.maxY - shown.maxY : shown.minY - to.minY,
+                           width: shown.width, height: shown.height)
+        let end = view.bounds
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let mask = CALayer()
+        mask.backgroundColor = NSColor.black.cgColor
+        // The moving edge is the card's edge, rounded like it.
+        mask.cornerRadius = layer.cornerRadius
+        mask.cornerCurve = .continuous
+        mask.maskedCorners = layer.maskedCorners
+        mask.frame = end
+        layer.mask = mask
+        CATransaction.setCompletionBlock { [weak layer, weak mask] in
+            if let layer, let mask, layer.mask === mask { layer.mask = nil }
+        }
+        let bounds = CABasicAnimation(keyPath: "bounds")
+        bounds.fromValue = NSValue(rect: NSRect(origin: .zero, size: start.size))
+        bounds.toValue = NSValue(rect: NSRect(origin: .zero, size: end.size))
+        let position = CABasicAnimation(keyPath: "position")
+        position.fromValue = NSValue(point: NSPoint(x: start.midX, y: start.midY))
+        position.toValue = NSValue(point: NSPoint(x: end.midX, y: end.midY))
+        let group = CAAnimationGroup()
+        group.animations = [bounds, position]
+        group.duration = duration
+        group.timingFunction = timing
+        mask.add(group, forKey: "reveal")
+        CATransaction.commit()
     }
 
     /// Where a page goes inside its pane body: the whole body, or, with Chrome's docked
@@ -832,10 +987,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         let selfDock = visible != nil && browsers.visibleRuntime?.hostWindow != nil
         let docked = browsers.visibleTabID.flatMap { browsers.devToolsDockedState[$0] } ?? true
         devToolsLog("devToolsChanged visible=\(visible?.windowNumber ?? -1) selfDock=\(selfDock) docked=\(docked) visibleTabs=\(browsers.visibleTabIDs.map { $0.uuidString.prefix(8) }) overlay=\(overlayPanel?.windowNumber ?? -1)")
-        shell.devToolsFrontendDocked = selfDock
-        shell.devToolsVisible = visible != nil && (docked || !selfDock)
-        shell.needsLayout = true
-        shell.layoutSubtreeIfNeeded()
+        // This runs on every tab switch; the shell is laid out again only when the dock changed.
+        let devToolsVisible = visible != nil && (docked || !selfDock)
+        if visible != nil || shell.devToolsFrontendDocked != selfDock || shell.devToolsVisible != devToolsVisible {
+            shell.devToolsFrontendDocked = selfDock
+            shell.devToolsVisible = devToolsVisible
+            shell.needsLayout = true
+            shell.layoutSubtreeIfNeeded()
+        }
         guard let w = visible else {
             if shell.frontendPageRect != nil { shell.frontendPageRect = nil }
             positionPageWindows(lastPaneFrames)
@@ -978,7 +1137,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         }
     }
 
-    func browserManagerHandleKey(_ event: NSEvent) -> Bool { app.handleReservedKey(event) }
+    func browserManagerHandleKey(_ event: NSEvent) -> Bool {
+        // Chrome: Escape leaves a page's element fullscreen, before the page sees the key.
+        // Chrome's own handling never got it here: the video stayed fullscreen.
+        if event.keyCode == 53, event.modifierFlags.intersection([.command, .shift, .option, .control]).isEmpty,
+           let id = contentFullscreenTab, let browser = browsers.runtime(for: id)?.browser {
+            browser.exitFullscreen()
+            return true
+        }
+        return app.handleReservedKey(event)
+    }
     func browserManagerHandleUnhandledKey(_ event: NSEvent) -> Bool { app.handleUnhandledKey(event) }
     /// A hidden page asked for focus: the Picture in Picture window's "back to tab" button.
     func browserManagerFocusedBrowser(_ tabID: UUID) {
@@ -1717,6 +1885,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
 
     /// Back in this window: pages that moved to another window come back (Arc's untargeted
     /// reparenting). After AppDelegate has made this the active window.
+    /// This window shows the tab's blurred stand-in while another window holds its page.
+    func isShowingElsewhere(_ tabID: UUID) -> Bool {
+        !isTornDown && shell.paneCards.contains { $0.tabID == tabID && $0.showsElsewhere }
+    }
+
+    /// A page handed over by a window that is closing.
+    func takePage(_ rt: TabRuntime) {
+        browsers.adopt(rt.browser, for: rt.tabID)
+        refresh()
+    }
+
     private func reclaimPages() {
         guard shell.paneCards.contains(where: \.showsElsewhere) else { return }
         DispatchQueue.main.async { [weak self] in self?.refresh() }
@@ -1744,10 +1923,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         shell.needsLayout = true
     }
 
+    /// The frame lives in the store's observed prefs, which every sidebar row reads (selection):
+    /// it is stored once a resize or move settles, not on every step of it.
     private func saveFrame() {
-        guard let window, !window.styleMask.contains(.fullScreen) else { return }
-        store.updateWindow(windowID) { $0.frame = NSStringFromRect(window.frame) }
+        frameSaveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let window = self.window, !window.styleMask.contains(.fullScreen) else { return }
+            self.store.updateWindow(self.windowID) { $0.frame = NSStringFromRect(window.frame) }
+        }
+        frameSaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
+    private var frameSaveWork: DispatchWorkItem?
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if sender === window { commandBar.close() }
@@ -1765,6 +1952,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
     func tearDown() {
         isTornDown = true
         dismissTransientUI()
+        // A page another window shows behind its blurred stand-in moves there with its history
+        // and state; closed with this window, that window loaded it again from scratch.
+        for id in Array(browsers.runtimes.keys) {
+            guard let other = app.mainWindows.first(where: { $0 !== self && $0.isShowingElsewhere(id) }),
+                  let rt = browsers.release(id) else { continue }
+            other.takePage(rt)
+        }
         browsers.closeAll()
         for monitor in [scrollMonitor, childClickMonitor, middleClickMonitor].compactMap({ $0 }) { NSEvent.removeMonitor(monitor) }
         scrollMonitor = nil

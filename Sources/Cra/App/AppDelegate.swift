@@ -45,6 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         NSApp.setActivationPolicy(.regular)
         installURLEventHandler()
         CraCEFRuntime.setChromeHosting(store.settings.chromeEngine)
+        CraCEFRuntime.setOwnContextMenus(EmbeddedPages.isEnabled)
         startContentBlocking()
         SoftwareUpdater.shared.start(app: self)
         buildMenus()
@@ -475,6 +476,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             var dict: [String: String] = [:]
             for item in comps?.queryItems ?? [] { if let v = item.value { dict[item.name] = v } }
             if let js = dict["devtoolsjs"] { main.debugRunInDevTools(js) }
+            if dict["embedDump"] != nil { NSLog("%@", main.embeddedPagesDump()); return }
             if let id = dict["extensionAction"] { main.runExtensionAction(id); return }
             if let f = dict["floatingSidebar"] { if f == "1" { main.floatingSidebar?.show() } else { main.floatingSidebar?.hide(animated: true) }; return }
             if let method = dict["bcdp"] {
@@ -515,6 +517,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
             CraTuning.shared.apply(dict)
             main.refresh()
+            main.shell.refreshLift()
             if let w = main.window {
                 let v = main.shell.vibrancy
                 NSLog("Cra debug: opaque=%d bg=%@ key=%d main=%d vibHidden=%d state=%ld material=%ld blend=%ld appearance=%@ shellLayerOpaque=%d contentViewIsShell=%d",
@@ -580,6 +583,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 let data = h.readDataToEndOfFile()
                 self.commandFileOffset = size
                 for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
+                    HitchMonitor.mark(String(line))
                     if let u = URL(string: line.trimmingCharacters(in: .whitespaces)) { self.handleInternalURL(u) }
                 }
             }

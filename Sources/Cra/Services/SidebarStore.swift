@@ -13,9 +13,17 @@ final class SidebarStore {
     private(set) var spaceOrder: [UUID] = []
     /// Profiles besides Default, in the order they were made.
     private(set) var profiles: [BrowserProfile] = []
-    private(set) var items: [UUID: SidebarItem] = [:]
-    private(set) var archive: [ArchivedItem] = []
-    var prefs = WindowPrefs() { didSet { prefsStore.save(prefs.withoutIncognito) } }
+    /// Observed item by item (ItemTable): a view re-renders when an item it read changes.
+    let items = ItemTable()
+    private(set) var archive: [ArchivedItem] = [] { didSet { archiveChanged = true } }
+    /// archive.json is by far the largest file; it is written only when the archive changed.
+    @ObservationIgnored private var archiveChanged = false
+    var prefs = WindowPrefs() {
+        didSet {
+            prefsStore.save(prefs.withoutIncognito)
+            notifyItemReaders(of: oldValue)
+        }
+    }
     var settings = AppSettings() { didSet { settingsStore.save(settings) } }
     private(set) var history: [String: HistoryEntry] = [:]
     private(set) var ranking = RankingData()
@@ -49,6 +57,7 @@ final class SidebarStore {
         for s in doc.spaces where !spaceOrder.contains(s.id) { spaceOrder.append(s.id) }
         for it in doc.items { items[it.id] = it }
         archive = archiveFile.load(or: { [] })
+        archiveChanged = false
         prefs = prefsStore.load(or: { WindowPrefs() })
         settings = settingsStore.load(or: { AppSettings() })
         for h in historyFile.load(or: { [] }) { history[h.url] = h }
@@ -90,11 +99,11 @@ final class SidebarStore {
             for it in doc.items { items[it.id] = it }
         }
         // Drop children references that do not resolve and orphans.
-        for (id, var it) in items {
+        for (id, var it) in items.all {
             it.children = it.children.filter { items[$0] != nil && items[$0]?.parentID == id }
             items[id] = it
         }
-        for (id, it) in items where it.container == nil {
+        for (id, it) in items.all where it.container == nil {
             if let p = it.parentID, let parent = items[p], parent.children.contains(id) { continue }
             // Orphan: put it in the first space's today list rather than losing it.
             if let space = spaceOrder.first.flatMap({ spaces[$0] }) {
@@ -146,7 +155,10 @@ final class SidebarStore {
 
     func save() {
         sidebarFile.save(document)
-        archiveFile.save(archive)
+        if archiveChanged {
+            archiveChanged = false
+            archiveFile.save(archive)
+        }
     }
 
     func saveAll() {
@@ -412,9 +424,15 @@ final class SidebarStore {
         }
         // A live folder's tab keeps the pull request's title (Arc shows that, not the page's).
         if let title, !(t.liveItemURL.map { t.url.hasPrefix($0) } ?? false) { t.savedTitle = title }
+        // Pages report titles and addresses over and over while they load, and every write to
+        // `items` re-renders the sidebar's lists: only real changes are written.
+        guard t != it.tab else { return }
+        let wasEmpty = it.isEmptyTab
         it.data = .tab(t)
         items[id] = it
-        revision &+= 1
+        // The window's layout (refresh) only depends on a tab becoming or ceasing to be an
+        // empty pane; the rows and the toolbar observe the tab themselves.
+        if it.isEmptyTab != wasEmpty { revision &+= 1 }
         sidebarFile.save(SidebarDocument(version: 1, spaceOrder: spaceOrder, spaces: orderedSpaces,
                                          items: Array(items.values), profiles: profiles), delay: 2)
     }
@@ -929,13 +947,57 @@ final class SidebarStore {
         touch()
     }
 
-    func isExpanded(_ id: UUID) -> Bool { prefs.expandedFolders.contains(id) }
+    // Rows read their own expansion, collapse and selection through these. They depend on
+    // the item's signal, not on `prefs`, which changes on every tab switch and window move;
+    // `notifyItemReaders` signals the items whose state actually changed.
+
+    func isExpanded(_ id: UUID) -> Bool {
+        items.observe(id)
+        return _prefs.expandedFolders.contains(id)
+    }
+
+    /// Whether `id` is the open tab of the window's focused space, or of `space`.
+    func isSelected(_ id: UUID, inSpace space: UUID? = nil, window: UUID?) -> Bool {
+        items.observe(id)
+        let w = untrackedWindow(window)
+        if let space { return w.selectedTabPerSpace[space] == id }
+        return Self.openTab(in: w, firstSpace: spaceOrder.first) == id
+    }
+
+    private func untrackedWindow(_ id: UUID?) -> WindowSession {
+        let windows = _prefs.windows
+        return windows.first { $0.id == (id ?? activeWindowID) } ?? windows.first { $0.id == activeWindowID } ?? windows[0]
+    }
+
+    private static func openTab(in w: WindowSession, firstSpace: UUID?) -> UUID? {
+        (w.focusedSpaceID ?? firstSpace).flatMap { w.selectedTabPerSpace[$0] }
+    }
+
+    private func notifyItemReaders(of old: WindowPrefs) {
+        for id in old.expandedFolders.symmetricDifference(prefs.expandedFolders) { items.notify(id) }
+        for id in old.collapsedPinnedSpaces.symmetricDifference(prefs.collapsedPinnedSpaces) { items.notify(id) }
+        let first = spaceOrder.first
+        for w in prefs.windows {
+            let was = old.windows.first { $0.id == w.id }
+            var changed: Set<UUID?> = []
+            let before = was.flatMap { Self.openTab(in: $0, firstSpace: first) }, now = Self.openTab(in: w, firstSpace: first)
+            if before != now { changed.formUnion([before, now]) }
+            let oldPicks = was?.selectedTabPerSpace ?? [:]
+            for space in Set(oldPicks.keys).union(w.selectedTabPerSpace.keys) where oldPicks[space] != w.selectedTabPerSpace[space] {
+                changed.formUnion([oldPicks[space], w.selectedTabPerSpace[space]])
+            }
+            for case let id? in changed { items.notify(id) }
+        }
+    }
     func setExpanded(_ id: UUID, _ expanded: Bool) {
         if expanded { prefs.expandedFolders.insert(id) } else { prefs.expandedFolders.remove(id) }
     }
 
     /// Arc's spacesWithCollapsedPinnedSections: clicking the space name hides its pinned tabs.
-    func isPinnedCollapsed(_ spaceID: UUID) -> Bool { prefs.collapsedPinnedSpaces.contains(spaceID) }
+    func isPinnedCollapsed(_ spaceID: UUID) -> Bool {
+        items.observe(spaceID)
+        return _prefs.collapsedPinnedSpaces.contains(spaceID)
+    }
     func togglePinnedCollapsed(_ spaceID: UUID) {
         if prefs.collapsedPinnedSpaces.remove(spaceID) == nil { prefs.collapsedPinnedSpaces.insert(spaceID) }
     }
@@ -945,8 +1007,20 @@ final class SidebarStore {
     var liveFolders: [SidebarItem] { items.values.filter(\.isLiveFolder) }
 
     /// The space's live folder for a source (Dia: one Pull Requests folder per space).
+    /// Walks only the space's own lists, so a view that asks depends on those items alone.
     func liveFolder(_ source: LiveFolderSource, inSpace sid: UUID) -> SidebarItem? {
-        liveFolders.first { $0.liveFolder?.source == source && spaceID(ofItem: $0.id) == sid }
+        guard let space = spaces[sid] else { return nil }
+        func find(under id: UUID) -> SidebarItem? {
+            for c in children(of: id) where c.isFolder || c.isSplit {
+                if c.liveFolder?.source == source { return c }
+                if let found = find(under: c.id) { return found }
+            }
+            return nil
+        }
+        for root in [space.favoritesContainerID, space.pinnedContainerID, space.todayContainerID] {
+            if let found = find(under: root) { return found }
+        }
+        return nil
     }
 
     /// Arc's "Pull Requests" folder at the top of the space's pinned tabs, open.

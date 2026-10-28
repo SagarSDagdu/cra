@@ -64,7 +64,7 @@ struct FavoriteCell: View {
     @State private var hover = false
     @State private var targeted = false
 
-    private var selected: Bool { store.selectedTabID(in: space.id, window: ui.windowID) == item.id }
+    private var selected: Bool { store.isSelected(item.id, inSpace: space.id, window: ui.windowID) }
     private var tileColor: String? { item.tab?.tileColor }
     private var tileIsDark: Bool { tileColor.flatMap(HexColor.luminance).map { $0 < 0.5 } ?? palette.isDark }
 

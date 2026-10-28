@@ -93,7 +93,9 @@ final class SplitDraggerHandleView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         if event.clickCount == 2 { onDoubleClick?(); return }
-        dragStart = convert(event.locationInWindow, from: nil)
+        // Window coordinates: the handle itself moves with the divider while it is dragged,
+        // and in its own coordinates half the pointer's travel cancelled out.
+        dragStart = event.locationInWindow
         dragging = true
         refreshPill()
         onDragBegan?()
@@ -101,7 +103,7 @@ final class SplitDraggerHandleView: NSView {
 
     override func mouseDragged(with event: NSEvent) {
         guard let start = dragStart else { return }
-        let p = convert(event.locationInWindow, from: nil)
+        let p = event.locationInWindow
         // Vertical layouts stack downwards; AppKit's y grows upwards.
         let delta = orientation == .horizontal ? p.x - start.x : start.y - p.y
         onDrag?(delta)

@@ -71,6 +71,58 @@ static CefString CefStringFromNS(NSString* s) {
     return CefString(std::string(s.UTF8String ?: ""));
 }
 
+/// Page context menus shown by Cra (RunContextMenu) instead of Chrome.
+static BOOL g_ownContextMenus = NO;
+
+/// The command picked from a context menu Cra shows; -1 while none is.
+@interface CraMenuPick : NSObject
+@property (nonatomic) int commandID;
+- (void)choose:(NSMenuItem*)item;
+@end
+
+@implementation CraMenuPick
+- (instancetype)init {
+    if ((self = [super init])) _commandID = -1;
+    return self;
+}
+- (void)choose:(NSMenuItem*)item { self.commandID = (int)item.tag; }
+@end
+
+/// Chrome's labels mark mnemonics with "&" ("&&" is a literal ampersand).
+static NSString* CraMenuLabel(CefRefPtr<CefMenuModel> model, size_t i) {
+    NSString* s = NSStringFromCef(model->GetLabelAt(i));
+    s = [s stringByReplacingOccurrencesOfString:@"&&" withString:@"\u0001"];
+    s = [s stringByReplacingOccurrencesOfString:@"&" withString:@""];
+    return [s stringByReplacingOccurrencesOfString:@"\u0001" withString:@"&"];
+}
+
+static NSMenu* CraMenuFromModel(CefRefPtr<CefMenuModel> model, CraMenuPick* pick) {
+    NSMenu* menu = [[NSMenu alloc] initWithTitle:@""];
+    menu.autoenablesItems = NO;
+    for (size_t i = 0; i < model->GetCount(); i++) {
+        cef_menu_item_type_t type = model->GetTypeAt(i);
+        if (type == MENUITEMTYPE_SEPARATOR) {
+            if (menu.numberOfItems > 0 && !menu.itemArray.lastObject.isSeparatorItem) [menu addItem:[NSMenuItem separatorItem]];
+            continue;
+        }
+        if (type == MENUITEMTYPE_NONE) continue;
+        NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:CraMenuLabel(model, i) action:nil keyEquivalent:@""];
+        if (type == MENUITEMTYPE_SUBMENU) {
+            item.submenu = CraMenuFromModel(model->GetSubMenuAt(i), pick);
+        } else {
+            item.action = @selector(choose:);
+            item.target = pick;
+            item.tag = model->GetCommandIdAt(i);
+            if (model->IsCheckedAt(i)) item.state = NSControlStateValueOn;
+        }
+        item.enabled = model->IsEnabledAt(i);
+        item.hidden = !model->IsVisibleAt(i);
+        [menu addItem:item];
+    }
+    while (menu.itemArray.lastObject.isSeparatorItem) [menu removeItem:menu.itemArray.lastObject];
+    return menu;
+}
+
 enum CraMenuCommand {
     kMenuOpenLinkInNewTab = MENU_ID_USER_FIRST + 1,
     kMenuOpenLinkInBackgroundTab,
@@ -1076,6 +1128,25 @@ public:
 
     // Context menu --------------------------------------------------------
 
+    // Embedded pages (EmbeddedPages.swift): Chrome shows the menu through the views widget that
+    // owns the page's view, found through the view's window, which is now Cra's: it showed
+    // nothing. Cra shows the menu itself and hands the pick back.
+    bool RunContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                        CefRefPtr<CefContextMenuParams> params, CefRefPtr<CefMenuModel> model,
+                        CefRefPtr<CefRunContextMenuCallback> callback) override {
+        if (!g_ownContextMenus || model->GetCount() == 0) return false;
+        CraMenuPick* pick = [CraMenuPick new];
+        NSMenu* menu = CraMenuFromModel(model, pick);
+        NSPoint at = [NSEvent mouseLocation];
+        CefRefPtr<CefRunContextMenuCallback> done = callback;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [menu popUpMenuPositioningItem:nil atLocation:at inView:nil];
+            if (pick.commandID >= 0) done->Continue(pick.commandID, EVENTFLAG_NONE);
+            else done->Cancel();
+        });
+        return true;
+    }
+
     void OnBeforeContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                              CefRefPtr<CefContextMenuParams> params, CefRefPtr<CefMenuModel> model) override {
         size_t index = 0;
@@ -1424,7 +1495,10 @@ class CraDevToolsObserver : public CefDevToolsMessageObserver {
 }
 
 - (void)createNow {
-    if (_isClosed || _browser) return;
+    // Closing pages at quit changes the sidebar, and the window's refresh then asked for a
+    // page Chromium could no longer make: Cra crashed at quit in CreateBrowserView or
+    // CreateTopLevelWindow.
+    if (_isClosed || _browser || g_quitting) return;
     if (!_isIncognito && !ProfileReady(_profilePath, self)) return;
     if (g_chromeHosting) {
         CefBrowserSettings settings;
@@ -1822,6 +1896,7 @@ static void MarkProfileExitedCleanly(NSString* profileDir) {
 @implementation CraCEFRuntime
 
 + (void)setChromeHosting:(BOOL)enabled { g_chromeHosting = enabled; }
++ (void)setOwnContextMenus:(BOOL)enabled { g_ownContextMenus = enabled; }
 + (BOOL)chromeHosting { return g_chromeHosting; }
 
 + (void)setContentBlockingEnabled:(BOOL)enabled { cra_blocker::Enabled().store(enabled); }

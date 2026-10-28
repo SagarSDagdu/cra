@@ -321,7 +321,7 @@ struct SpaceSectionView: View {
                         .background(DragAutoscroller.Anchor(scroller: autoscroller))
                         .contentShape(Rectangle())
                         // Right-click on empty list space; rows have their own menus.
-                        .contextMenu { listMenu }
+                        .contextMenu { SpaceListMenu(space: space) }
                         .onDrop(of: [.craSidebarItem], delegate: SidebarListDropDelegate(space: space, store: store, ui: ui, autoscroller: autoscroller))
                         // Safety net: a drag that ended without an exit callback leaves no preview behind.
                         .onContinuousHover { _ in if ui.listDrop != nil, NSEvent.pressedMouseButtons == 0 { ui.listDrop = nil } }
@@ -343,19 +343,6 @@ struct SpaceSectionView: View {
     }
 
     private static let scrollSpace = "spaceSectionScroll"
-
-    @ViewBuilder
-    private var listMenu: some View {
-        Button("New Tab") { actions.openCommandBar(.newTab) }
-        Button("New Folder") { actions.performAction("newFolder") }
-        Button("New GitHub Live Folder") { actions.performAction("newGitHubLiveFolder") }
-            .disabled(store.liveFolder(.github, inSpace: space.id) != nil)
-        Divider()
-        if !store.children(of: space.todayContainerID).isEmpty {
-            Button("Clear Today") { store.clearToday(space.id) }
-        }
-        Button("Edit Space…") { actions.editSpace(space) }
-    }
 
     @ViewBuilder
     private var dropLine: some View {
@@ -540,5 +527,25 @@ struct NewTabRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
+    }
+}
+
+/// The space list's context menu. Its own view: finding the live folder walks every item,
+/// which would make the whole list re-render on any change to any item.
+private struct SpaceListMenu: View {
+    let space: Space
+    @Environment(SidebarStore.self) private var store
+    @Environment(\.sidebarActions) private var actions
+
+    var body: some View {
+        Button("New Tab") { actions.openCommandBar(.newTab) }
+        Button("New Folder") { actions.performAction("newFolder") }
+        Button("New GitHub Live Folder") { actions.performAction("newGitHubLiveFolder") }
+            .disabled(store.liveFolder(.github, inSpace: space.id) != nil)
+        Divider()
+        if !store.children(of: space.todayContainerID).isEmpty {
+            Button("Clear Today") { store.clearToday(space.id) }
+        }
+        Button("Edit Space…") { actions.editSpace(space) }
     }
 }

@@ -48,6 +48,17 @@ build next to your daily Cra with its own data folder and a command file:
 Every line appended to `CRA_COMMAND_FILE` is handled like a `cra://` URL, including the
 scripting hosts below.
 
+To measure smoothness, add `CRA_HITCH_LOG=/tmp/cra-hitch.log`: every main-thread stall of
+8 ms or more is logged (`<seconds> stall <ms>`), with each command-file line as a
+`mark` between them. The main thread is also Chromium's browser UI thread, so a stall
+there delays input and scrolling too. Compare builds by running the same command
+script against each.
+
+`CRA_EMBED_PAGES=1` (or `defaults write dk.kildahl.cra embedPages -bool YES`) turns on the
+experimental page embedding in `EmbeddedPages.swift`: Chromium's page view moves from its
+Chrome window into the pane card, like Arc and Dia, and the Chrome window stays behind
+invisible and click-through. Pages go back into their window while DevTools is open.
+
 ## Scripting hooks
 
 Cra registers the `cra://` scheme so it can be driven from a shell:

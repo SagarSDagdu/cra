@@ -8,6 +8,8 @@ import SwiftUI
 final class PaneCardView: NSView {
     let tabID: UUID
     let toolbarHost: NSHostingView<AnyView>
+    /// The theme the toolbar's root view was made with: it is rebuilt only when that changes.
+    var toolbarTheme: SpaceTheme?
     /// Where the Chromium view lives (or where the page window is positioned).
     let webArea = NSView()
     /// Hairline under the toolbar when the pane has no page (Arc draws it on the tinted card).

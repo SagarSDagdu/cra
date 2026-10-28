@@ -54,9 +54,12 @@ MainActor.assumeIsolated {
         exit(1)
     }
 
+    ChromiumBluetoothCache.install()
+
     // Belt and braces: Chromium's run loop drives NSApplication and should call
     // applicationDidFinishLaunching, but bootstrapping is idempotent either way.
     DispatchQueue.main.async { delegate.bootstrapIfNeeded() }
+    HitchMonitor.startIfRequested()
     CraCEFRuntime.runMessageLoop()
     delegate.applicationWillShutdown()
     CraCEFRuntime.shutdown()

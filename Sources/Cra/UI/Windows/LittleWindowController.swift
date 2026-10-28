@@ -694,7 +694,14 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
         if hasPage, self.window?.isKeyWindow == true || window.isKeyWindow { focusPage() }
     }
     func browserDidCloseDevTools(_ browser: CraBrowser) {}
-    func browser(_ browser: CraBrowser, handleKeyEvent event: NSEvent) -> Bool { app.handleReservedKey(event) }
+    func browser(_ browser: CraBrowser, handleKeyEvent event: NSEvent) -> Bool {
+        // Escape leaves the page's element fullscreen, as in the main window.
+        if pageFullscreen, event.keyCode == 53, event.modifierFlags.intersection([.command, .shift, .option, .control]).isEmpty {
+            browser.exitFullscreen()
+            return true
+        }
+        return app.handleReservedKey(event)
+    }
     func browser(_ browser: CraBrowser, handleUnhandledKeyEvent event: NSEvent) -> Bool { app.handleUnhandledKey(event) }
     func browser(_ browser: CraBrowser, didUpdateDownload download: CraDownloadInfo) { app.main.browserManager(download: download) }
 

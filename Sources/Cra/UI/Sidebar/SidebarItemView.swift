@@ -72,7 +72,7 @@ struct TabRow: View {
     @AppStorage("didShowRenameHint") private var didShowRenameHint = false
 
     private var tab: TabData { item.tab! }
-    private var selected: Bool { store.selectedTabID(window: ui.windowID) == item.id }
+    private var selected: Bool { store.isSelected(item.id, window: ui.windowID) }
     /// While tabs are ⌘/⇧-picked the highlight follows the picks, not the open tab.
     private var highlighted: Bool { ui.multiSelection.isEmpty ? selected : ui.multiSelection.contains(item.id) }
     /// Close acts on every picked tab when this row is one of them.
@@ -214,7 +214,7 @@ struct TabRow: View {
             .padding(8)
             .background(RoundedRectangle(cornerRadius: 8).fill(.regularMaterial))
         }
-        .contextMenu { contextMenu }
+        .contextMenu { TabRowMenu(item: item, pinned: pinned, navigatedAway: navigatedAway, closeGroup: closeGroup, close: closeTabs) }
         // Arc's row tip is the tab's title by the pointer; the close buttons' own tips win over it.
         // Like Arc (didShowRenameHint), "Double-click to rename" rides along once.
         .arcTooltip(editing ? "" : item.displayTitle, followsCursor: true,
@@ -238,13 +238,28 @@ struct TabRow: View {
             ui.multiSelection.subtract(ids)
         }
     }
+}
 
-    @ViewBuilder
-    private var contextMenu: some View {
+/// A tab row's context menu. Its own view: what it reads from the store (folders, spaces,
+/// favorites) would otherwise make every row's body depend on all of it, and every row
+/// re-rendered on each store change (a tab switch, a page title).
+private struct TabRowMenu: View {
+    let item: SidebarItem
+    let pinned: Bool
+    let navigatedAway: Bool
+    let closeGroup: [UUID]
+    let close: ([UUID]) -> Void
+    @Environment(SidebarStore.self) private var store
+    @Environment(SidebarUIState.self) private var ui
+    @Environment(\.sidebarActions) private var actions
+
+    private var tab: TabData { item.tab! }
+
+    var body: some View {
         if closeGroup.count > 1 {
             folderMenu(ui.group(for: item.id, in: store))
             Divider()
-            Button("Close \(closeGroup.count) Tabs") { closeTabs(closeGroup) }
+            Button("Close \(closeGroup.count) Tabs") { close(closeGroup) }
             Button("Deselect All") { ui.clearPicks() }
         } else {
             singleTabMenu
@@ -306,7 +321,9 @@ struct TabRow: View {
         folderMenu([item.id])
         Divider()
         if pinned {
-            if selected || loaded { Button("Close and Keep Pinned") { actions.closeTab(item.id) } }
+            if store.isSelected(item.id, window: ui.windowID) || ui.loadedTabIDs.contains(item.id) {
+                Button("Close and Keep Pinned") { actions.closeTab(item.id) }
+            }
             Button("Archive Tab") { store.archiveTab(item.id, reason: .manual) }
         } else {
             Button("Archive") { actions.closeTab(item.id) }

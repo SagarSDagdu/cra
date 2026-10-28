@@ -14,7 +14,7 @@ struct SplitRow: View {
     @State private var hover = false
 
     private var children: [SidebarItem] { store.children(of: item.id).filter { $0.isTab } }
-    private var selected: Bool { store.selectedTabID(window: ui.windowID).map { id in children.contains { $0.id == id } } ?? false }
+    private var selected: Bool { children.contains { store.isSelected($0.id, window: ui.windowID) } }
 
     enum Metrics {
         static let separatorInset: CGFloat = 9
@@ -26,7 +26,7 @@ struct SplitRow: View {
                 if i > 0 {
                     Rectangle().fill(palette.separator).frame(width: 1).padding(.vertical, Metrics.separatorInset)
                 }
-                SplitChildCell(item: child, palette: palette, groupHovered: hover, groupSelected: selected, focused: store.selectedTabID(window: ui.windowID) == child.id)
+                SplitChildCell(item: child, palette: palette, groupHovered: hover, groupSelected: selected, focused: store.isSelected(child.id, window: ui.windowID))
             }
         }
         .padding(.leading, CGFloat(depth) * CraMetrics.indent)

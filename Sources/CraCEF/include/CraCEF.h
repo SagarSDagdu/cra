@@ -176,6 +176,8 @@ typedef NS_ENUM(NSInteger, CraDownloadState) {
 /// DevTools) instead of embedded Alloy views. Set before any browser exists.
 + (void)setChromeHosting:(BOOL)enabled;
 + (BOOL)chromeHosting;
+/// Page context menus are shown by Cra, not Chrome (pages embedded in their cards).
++ (void)setOwnContextMenus:(BOOL)enabled;
 /// Third-party ad and tracker blocking: subresource and subframe requests whose host
 /// (or a parent domain) is on the blocked list are cancelled when they are third-party
 /// to the tab's top-level page. Main-frame navigations always load. Takes effect for

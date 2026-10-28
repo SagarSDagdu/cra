@@ -48,7 +48,7 @@ final class ShellView: NSView {
     /// Reports each pane's page area (window coordinates) so Chrome-style page windows follow it.
     var onPaneFrames: (([UUID: NSRect]) -> Void)?
     /// Animated transitions (sidebar, pane add/remove): target page areas + duration, so page windows animate alongside.
-    var onAnimatePaneFrames: (([UUID: NSRect], TimeInterval) -> Void)?
+    var onAnimatePaneFrames: (([UUID: NSRect], TimeInterval, CAMediaTimingFunction) -> Void)?
     /// The user dragged a divider and let go: new width factors per pane.
     var onPaneResizeEnded: (([UUID: CGFloat]) -> Void)?
     var onPaneResizeBegan: (() -> Void)?
@@ -314,7 +314,7 @@ final class ShellView: NSView {
         }
         animatingPanes = true
         let webTargets = paneWebFrames(target)
-        onAnimatePaneFrames?(webTargets, SplitPaneLayout.Constants.transitionDuration)
+        onAnimatePaneFrames?(webTargets, SplitPaneLayout.Constants.transitionDuration, SplitPaneLayout.Constants.transitionTiming)
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = SplitPaneLayout.Constants.transitionDuration
             ctx.timingFunction = SplitPaneLayout.Constants.transitionTiming
@@ -615,13 +615,14 @@ final class ShellView: NSView {
         }
         layoutContentChildren()
         animatingFrames = true
-        onAnimatePaneFrames?(webTargets, duration)
+        // Fast start, soft landing: feels immediate without a visible snap.
+        // Fitted to Arc 1.170's ⌘S hide at 60 fps: 66 / 87 / 96 / 99 % of the travel after
+        // frames 1–4 (card edge 568 → 204 → 90 → 42 → 24 → 20 px).
+        let timing = CAMediaTimingFunction(controlPoints: 0.15, 0.7, 0.3, 1)
+        onAnimatePaneFrames?(webTargets, duration, timing)
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = duration
-            // Fast start, soft landing: feels immediate without a visible snap.
-            // Fitted to Arc 1.170's ⌘S hide at 60 fps: 66 / 87 / 96 / 99 % of the travel after
-            // frames 1–4 (card edge 568 → 204 → 90 → 42 → 24 → 20 px).
-            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.15, 0.7, 0.3, 1)
+            ctx.timingFunction = timing
             ctx.allowsImplicitAnimation = true
             if !sidebarDetached { sidebarHost.animator().frame = target.sidebar }
             contentContainer.animator().frame = target.content
