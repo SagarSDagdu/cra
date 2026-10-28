@@ -59,10 +59,19 @@ reset() {
   (CRA_DATA_DIR="$CLIPS/data" CRA_COMMAND_FILE="$CLIPS/commands.txt" "$APP/Contents/MacOS/CraClip" > "$CLIPS/craclip.log" 2>&1 &)
   nap 5
   PID=$(clip_pid)
+  # The largest window is the main one; Chromium's page windows are AX windows too.
   read -r WX WY WW WH < <(osascript -e "tell application \"System Events\" to tell (first process whose unix id is $PID)
-    set {x, y} to position of window 1
-    set {w, h} to size of window 1
-    return (x as text) & \" \" & (y as text) & \" \" & (w as text) & \" \" & (h as text)
+    set best to \"\"
+    set area to 0
+    repeat with win in windows
+      set {x, y} to position of win
+      set {w, h} to size of win
+      if w * h > area then
+        set area to w * h
+        set best to (x as text) & \" \" & (y as text) & \" \" & (w as text) & \" \" & (h as text)
+      end if
+    end repeat
+    return best
   end tell")
   nap "${1:-3}"
 }

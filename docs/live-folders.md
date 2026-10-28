@@ -71,7 +71,8 @@ Legend: [O] observed, [I] inference, [U] unknown.
   title bold like other folders. A 26×26 trailing button showed a ⚠ that stayed on hover (the folder was in
   an error state; the healthy state's button was not seen).
 - [O] Pull request rows: GitHub mark as the icon, author login under the title for other people's pull
-  requests (`sidebarItemSubtitleTextField`), none under your own; unread dot; ✕ on hover like any pinned tab.
+  requests (`sidebarItemSubtitleTextField`), none under your own (Cra names your own too, Victor's call
+  28 Oct); unread dot; ✕ on hover like any pinned tab.
 - [O] Context menu strings: "Copy All Links as Markdown", "Delete Live Folder", repository list explained by
   "This list is generated based on your currently active pull requests.", "Failed to update". Deleting asks
   "Delete your %@ Live Folder?". Not in Arc's menu bar (only a debug menu "Automatic Live Folders").

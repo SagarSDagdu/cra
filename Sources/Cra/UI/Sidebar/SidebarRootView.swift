@@ -451,11 +451,12 @@ struct SpaceSectionView: View {
             .animation(.easeOut(duration: 0.15), value: hoverDivider)
 
             VStack(spacing: CraMetrics.rowSpacing) {
+                if store.settings.newTabButtonAtTop { NewTabRow(palette: palette) }
                 ForEach(todayItems) { item in
                     SidebarItemView(item: item, depth: 0, palette: palette, section: .today)
                         .id(item.id)
                 }
-                NewTabRow(palette: palette)
+                if !store.settings.newTabButtonAtTop { NewTabRow(palette: palette) }
             }
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(SidebarListDropDelegate.coordinateSpace)) } action: { ui.rowFrames[space.todayContainerID] = $0 }
             .padding(.horizontal, 10)

@@ -80,7 +80,7 @@ On first launch, or later from Cra ▸ Import from Arc or Dia…, Cra brings ove
 
 - **Arc:** spaces, pinned tabs, folders, favorites and the archive, plus passwords and
   sign-ins.
-- **Dia, Chrome, Brave, Edge, Opera, Vivaldi, Chromium:** tabs, bookmarks, history,
+- **Dia, Chrome, Brave, Edge, Opera, Vivaldi, Chromium, Helium:** tabs, bookmarks, history,
   passwords, sign-ins and extensions.
 - **Zen and Firefox:** open tabs, bookmarks and history, and Zen's spaces, Essentials and
   pinned tabs.

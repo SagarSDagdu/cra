@@ -22,6 +22,9 @@
 	<string>__BUILD__</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
+	<!-- Keeps the icon picked in Settings in the Dock while Cra is not running. -->
+	<key>NSDockTilePlugIn</key>
+	<string>CraDockTile.docktileplugin</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSApplicationCategoryType</key>

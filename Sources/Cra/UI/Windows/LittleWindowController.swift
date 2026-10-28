@@ -11,7 +11,7 @@ import SwiftUI
 /// Geometry and colours were measured from Arc 1.168's Little Arc on 24 Oct
 /// 2026 (docs/arc-reverse-engineering.md, "Little Arc"): a 46pt navy strip with
 /// muted traffic lights, one full-width search pill, and a split
-/// "Open in <Space> ⌘O | ⌄" button; the page fills the rest edge to edge.
+/// "Open in <Space> ⌘O | ⌄" button; the page fills the rest, inside the window's rim.
 @MainActor
 @Observable
 final class LittleWindowState {
@@ -54,7 +54,11 @@ enum LittleMetrics {
     static let pillGap: CGFloat = 10            // pill → button
     static let rightMargin: CGFloat = 7
     static let chevronWidth: CGFloat = 29
+    /// Arc's window corners; used when the system radius can't be read (see LittleWindow).
     static let cornerRadius: CGFloat = 10
+    /// The light rim macOS draws along the window's edge. The page is a child window
+    /// above the Little Window, so laid edge to edge it covered the rim on three sides.
+    static let edgeInset: CGFloat = 1
     static let popupWidth: CGFloat = 240
     static let popupRowHeight: CGFloat = 54
     static let popupHeaderHeight: CGFloat = 46
@@ -197,7 +201,12 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
     /// as a child window over the page area and round its bottom corners.
     private func attachHostWindow(_ w: NSWindow) {
         guard let window, w.parent !== window else { return }
+        // Borderless like MainWindowController's pages: a titled window gets macOS's
+        // rounded corners on all four sides and a resize zone past the page's edges.
+        w.styleMask.remove([.titled, .resizable])
         w.styleMask.insert(.fullSizeContentView)
+        ChromiumWindowCorners.setSquare(true, for: w)
+        ChromiumChildHover.setDocked(true, for: w)
         w.titlebarAppearsTransparent = true
         w.titleVisibility = .hidden
         w.isMovable = false
@@ -208,9 +217,9 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
         if let cv = w.contentView {
             cv.isHidden = false   // a background tab's page (MainWindowController hides it)
             cv.wantsLayer = true
-            cv.layer?.cornerRadius = LittleMetrics.cornerRadius
             cv.layer?.cornerCurve = .continuous
-            cv.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+            // Chromium's content view is flipped, so its layer's MaxY edge is the bottom.
+            cv.layer?.maskedCorners = cv.isFlipped ? [.layerMinXMaxYCorner, .layerMaxXMaxYCorner] : [.layerMinXMinYCorner, .layerMaxXMinYCorner]
             cv.layer?.masksToBounds = true
         }
         window.addChildWindow(w, ordered: .above)
@@ -228,7 +237,12 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
         // showed as a strip above the page and cut off its bottom.
         let full = NSRect(origin: .zero, size: onScreen.size)
         if let cv = w.contentView, cv.frame != full { cv.frame = full }
-        if let cv = w.contentView { cv.layer?.cornerRadius = window.styleMask.contains(.fullScreen) ? 0 : LittleMetrics.cornerRadius }
+        // Chromium can restore its own style mask (fullscreen, display changes).
+        if w.styleMask.contains(.titled) || w.styleMask.contains(.resizable) {
+            w.styleMask.remove([.titled, .resizable])
+            ChromiumWindowCorners.setSquare(true, for: w)
+        }
+        if let layer = w.contentView?.layer, layer.cornerRadius != shell.pageCornerRadius { layer.cornerRadius = shell.pageCornerRadius }
     }
 
     private func focusPage() {
@@ -738,7 +752,6 @@ final class LittleShellView: NSView {
         }
         addSubview(toolbarHost)
         page.wantsLayer = true
-        page.layer?.cornerRadius = LittleMetrics.cornerRadius
         page.layer?.cornerCurve = .continuous
         page.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         page.layer?.masksToBounds = true
@@ -794,10 +807,17 @@ final class LittleShellView: NSView {
         let fullscreen = window?.styleMask.contains(.fullScreen) ?? false
         let barH = LittleMetrics.barHeight
         toolbarHost.frame = NSRect(x: 0, y: b.maxY - barH, width: b.width, height: barH)
-        page.frame = NSRect(x: 0, y: b.minY, width: b.width, height: max(0, b.height - barH))
-        page.layer?.cornerRadius = fullscreen ? 0 : LittleMetrics.cornerRadius
+        let inset = fullscreen ? 0 : LittleMetrics.edgeInset
+        page.frame = NSRect(x: inset, y: b.minY + inset, width: max(0, b.width - 2 * inset), height: max(0, b.height - barH - inset))
+        page.layer?.cornerRadius = pageCornerRadius
         for sub in page.subviews where sub.frame != page.bounds { sub.frame = page.bounds }
         onPageFrame?(convert(page.frame, to: nil))
+    }
+
+    /// The page's bottom corners follow the window's, just inside its rim.
+    var pageCornerRadius: CGFloat {
+        guard let window = window as? LittleWindow, !window.styleMask.contains(.fullScreen) else { return 0 }
+        return max(0, window.systemCornerRadius - LittleMetrics.edgeInset)
     }
 }
 
@@ -809,6 +829,16 @@ final class LittleWindow: NSWindow {
     func hasActiveAppearance(forStandardWindowButton type: UInt) -> Bool { true }
     /// Arc's open animation: ~120 ms from a small rectangle to the full frame.
     override func animationResizeTime(_ newFrame: NSRect) -> TimeInterval { LittleMetrics.openDuration }
+
+    /// macOS's corner radius for this window (16 pt on macOS 26, larger than Arc's
+    /// 10), read from the frame view's private `_cornerRadius`.
+    var systemCornerRadius: CGFloat {
+        typealias RadiusIMP = @convention(c) (AnyObject, Selector) -> CGFloat
+        let sel = NSSelectorFromString("_cornerRadius")
+        guard let frameView = contentView?.superview, let method = class_getInstanceMethod(type(of: frameView), sel) else { return LittleMetrics.cornerRadius }
+        let radius = unsafeBitCast(method_getImplementation(method), to: RadiusIMP.self)(frameView, sel)
+        return radius > 0 ? radius : LittleMetrics.cornerRadius
+    }
 
     override func layoutIfNeeded() {
         super.layoutIfNeeded()

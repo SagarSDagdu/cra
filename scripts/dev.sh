@@ -65,7 +65,7 @@ build() {
     fi
   done
   cp "$bin/Cra" "$APP/Contents/MacOS/$NAME"
-  for d in web brand blocklist browsers; do
+  for d in web brand blocklist browsers app-icons; do
     [ -d "resources/$d" ] && rsync -a --delete "resources/$d/" "$APP/Contents/Resources/$d/"
   done
   codesign --force --sign - --entitlements resources/Cra.entitlements "$APP"

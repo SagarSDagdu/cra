@@ -982,7 +982,8 @@ final class SidebarStore {
         let firstFill = live.lastFetch == nil || (live.lastError != nil && existing.isEmpty)
         var order: [UUID] = []
         for pr in wanted {
-            let subtitle = pr.createdByMe ? nil : pr.author
+            // Arc leaves the author off your own pull requests; Cra names everyone's.
+            let subtitle = pr.author
             if let id = existing.removeValue(forKey: pr.url) ?? adoptableTab(for: pr, folderID: folderID),
                var it = items[id], var t = it.tab {
                 if it.parentID != folderID {
@@ -1075,21 +1076,24 @@ final class SidebarStore {
     // MARK: Archive
 
     func archiveTab(_ id: UUID, reason: ArchiveReason) {
-        guard var it = items[id], it.isTab else { return }
+        guard let it = items[id], it.isTab else { return }
         let sid = spaceID(ofItem: id)
         let selectedIn = sid.map { s in prefs.windows.filter { $0.selectedTabPerSpace[s] == id }.map(\.id) } ?? []
         let pinned = isPinned(id)
         let split = splitContaining(id)
-        // Closed out of a live folder: the item stays out (Arc: hiddenItems).
-        if let p = it.parentID, items[p]?.isLiveFolder == true {
-            hideLiveItem(id, in: p)
-            it = items[id] ?? it
+        let folder = it.parentID.flatMap { items[$0]?.isFolder == true ? $0 : nil }
+        let index = folder.flatMap { items[$0]?.children.firstIndex(of: id) }
+        // Closed out of a live folder: the item stays out (Arc: hiddenItems). The archive keeps
+        // the live copy so ⇧⌘T can put it back.
+        if let folder, items[folder]?.isLiveFolder == true {
+            hideLiveItem(id, in: folder)
         }
         detach(id)
         items[id] = nil
         // Empty panes never had a page and incognito pages leave no trace: nothing for the Library.
         if !it.isEmptyTab, !isIncognito(space: sid) {
-            archive.insert(ArchivedItem(archivedAt: Date(), reason: reason, sourceSpaceID: sid, wasPinned: pinned, item: it), at: 0)
+            archive.insert(ArchivedItem(archivedAt: Date(), reason: reason, sourceSpaceID: sid, wasPinned: pinned, item: it,
+                                        sourceFolderID: folder, sourceIndex: index), at: 0)
             if archive.count > 2000 { archive.removeLast(archive.count - 2000) }
         }
         if !selectedIn.isEmpty, let sid {
@@ -1127,13 +1131,24 @@ final class SidebarStore {
         var it = entry.item
         let sid = entry.sourceSpaceID.flatMap { spaces[$0] != nil ? $0 : nil } ?? focusedSpaceID
         let space = spaces[sid]!
-        let parent = entry.wasPinned ? space.pinnedContainerID : space.todayContainerID
+        // Back into the folder it was closed from, if that's still in the space.
+        let folder = entry.sourceFolderID.flatMap { items[$0]?.isFolder == true && spaceID(ofItem: $0) == sid ? $0 : nil }
+        let parent = folder ?? (entry.wasPinned ? space.pinnedContainerID : space.todayContainerID)
+        if let folder, let url = it.tab?.liveItemURL, items[folder]?.isLiveFolder == true {
+            updateLiveFolder(folder) { $0.hiddenItems.removeAll { $0 == url } }
+        } else if var t = it.tab, t.liveItemURL != nil {
+            t.liveItemURL = nil
+            t.liveSubtitle = nil
+            t.liveGoneAt = nil
+            it.data = .tab(t)
+        }
         it.parentID = parent
         it.children = []
         it.isUnread = false
         items[it.id] = it
         var p = items[parent]!
-        p.children.insert(it.id, at: entry.wasPinned ? p.children.count : 0)
+        let index = folder != nil ? min(entry.sourceIndex ?? 0, p.children.count) : entry.wasPinned ? p.children.count : 0
+        p.children.insert(it.id, at: index)
         items[parent] = p
         if select { selectTab(it.id) } else { touch() }
         return it

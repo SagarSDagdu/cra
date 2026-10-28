@@ -11,6 +11,7 @@ struct TabsPane: View {
         SettingsFormPane {
             SettingsFormRow(label: "General:") {
                 SettingsCheckbox(title: "Add new tabs to the top", isOn: $store.settings.newTabsAtTop)
+                SettingsCheckbox(title: "Show the New Tab button above tabs", isOn: $store.settings.newTabButtonAtTop)
                 SettingsCheckbox(title: "Haptic feedback when reordering tabs", isOn: $store.settings.hapticFeedbackOnReorder)
                 SettingsCheckbox(title: "Show toolbar above the page", isOn: $store.settings.showToolbar)
                 SettingsCheckbox(title: "Enable Picture in Picture when you leave a video tab", isOn: $store.settings.autoPictureInPicture)

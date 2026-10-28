@@ -1204,6 +1204,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
     private func installSwipeMonitor() {
         scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             guard let self else { return event }
+            // Any new gesture ends the last space swipe. Pages are child windows (and every
+            // main window has this monitor), so a scroll that starts there never reaches the
+            // phase switch below; a stale .horizontal would eat the page's momentum and
+            // scrolling would stop dead the moment the fingers lift.
+            if event.phase == .began || event.phase == .mayBegin { self.swipeAxis = .vertical }
             // The momentum tail of a space swipe belongs to the swipe, not the tab list.
             if !event.momentumPhase.isEmpty { return self.swipeAxis == .horizontal ? nil : event }
             guard event.window === self.window, event.hasPreciseScrollingDeltas else { return event }

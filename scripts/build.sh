@@ -41,6 +41,7 @@ echo -n "APPL????" > "$APP/Contents/PkgInfo"
 [ -d resources/brand ] && cp -R resources/brand "$APP/Contents/Resources/brand"
 [ -d resources/blocklist ] && cp -R resources/blocklist "$APP/Contents/Resources/blocklist"
 [ -d resources/browsers ] && cp -R resources/browsers "$APP/Contents/Resources/browsers"
+[ -d resources/app-icons ] && cp -R resources/app-icons "$APP/Contents/Resources/app-icons"
 
 FRAMEWORK_SRC="$ROOT/vendor/cef/Release/Chromium Embedded Framework.framework"
 cp -R "$FRAMEWORK_SRC" "$APP/Contents/Frameworks/"
@@ -61,6 +62,12 @@ for entry in "|" " (Alerts)|.alerts" " (GPU)|.gpu" " (Plugin)|.plugin" " (Render
       resources/Helper-Info.plist > "$HELPER/Contents/Info.plist"
   echo -n "APPL????" > "$HELPER/Contents/PkgInfo"
 done
+
+# The Dock tile plug-in (Info.plist NSDockTilePlugIn), a SwiftPM dynamic library in a bundle.
+DOCK_TILE="$APP/Contents/PlugIns/CraDockTile.docktileplugin"
+mkdir -p "$DOCK_TILE/Contents/MacOS"
+cp "$BIN/libCraDockTile.dylib" "$DOCK_TILE/Contents/MacOS/CraDockTile"
+sed -e "s/__VERSION__/$VERSION/" -e "s/__BUILD__/$BUILD_NUMBER/" resources/DockTile-Info.plist > "$DOCK_TILE/Contents/Info.plist"
 
 # Code signing, innermost first. Ad-hoc by default; set CRA_SIGN_IDENTITY to a
 # "Developer ID Application: …" identity for a distributable build with the
@@ -85,6 +92,7 @@ sign "$SPARKLE/Versions/B/Autoupdate"
 sign "$SPARKLE/Versions/B/Updater.app"
 sign "$SPARKLE"
 for h in "$APP"/Contents/Frameworks/*.app; do sign "$h" "$ROOT/resources/CraHelper.entitlements"; done
+sign "$DOCK_TILE"
 # Passkeys need entitlements only a provisioning profile can grant: the Touch ID
 # keychain group ("<app id>.webauthn", scripts/cef-patches) and, once Apple approves
 # it, iCloud Keychain (web-browser.public-key-credential). With

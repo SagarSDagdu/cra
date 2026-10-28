@@ -29,6 +29,9 @@ let package = Package(
     products: [
         .executable(name: "Cra", targets: ["Cra"]),
         .executable(name: "CraHelper", targets: ["CraHelper"]),
+        // Loaded by the Dock, not by Cra; scripts/build.sh wraps it in
+        // Cra.app/Contents/PlugIns/CraDockTile.docktileplugin.
+        .library(name: "CraDockTile", type: .dynamic, targets: ["CraDockTile"]),
     ],
     targets: [
         // Objective-C++ bridge between Swift and CEF.
@@ -56,6 +59,12 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("IOSurface"),
             ]
+        ),
+        // Dock tile plug-in: keeps the icon picked in Settings after Cra quits.
+        .target(
+            name: "CraDockTile",
+            path: "Sources/CraDockTile",
+            linkerSettings: [.linkedFramework("AppKit")]
         ),
         // The browser itself: AppKit window, SwiftUI sidebar and command bar.
         .executableTarget(

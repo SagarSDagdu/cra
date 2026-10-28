@@ -133,13 +133,16 @@ final class LiveFolderManager {
     /// One list from the folder's searches: who made it and who's asked come from the search
     /// it was found by, and from the author when the page names the signed-in user.
     static func merge(_ pages: [(GitHubLiveFilter.Attributes, GitHubLiveClient.Page)]) -> [LivePullRequest] {
-        let viewer = pages.lazy.compactMap { $0.1.viewer }.first { !$0.isEmpty }?.lowercased()
+        let viewerLogin = pages.lazy.compactMap { $0.1.viewer }.first { !$0.isEmpty }
+        let viewer = viewerLogin?.lowercased()
         var byURL: [String: LivePullRequest] = [:]
         var order: [String] = []
         for (attribute, page) in pages {
             for var pr in page.pullRequests {
                 if attribute == .authored { pr.createdByMe = true } else { pr.isAwaitingMyReview = true }
                 if let viewer, pr.author?.lowercased() == viewer { pr.createdByMe = true }
+                // Your own pull requests are named after you even when the page leaves the author out.
+                if pr.author == nil, attribute == .authored { pr.author = viewerLogin }
                 if var seen = byURL[pr.url] {
                     seen.createdByMe = seen.createdByMe || pr.createdByMe
                     seen.isAwaitingMyReview = seen.isAwaitingMyReview || pr.isAwaitingMyReview

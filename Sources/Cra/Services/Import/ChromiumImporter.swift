@@ -1,6 +1,6 @@
 import AppKit
 
-// Chrome, Brave, Edge, Vivaldi, Opera and Chromium (and Arc's and Dia's own
+// Chrome, Brave, Edge, Vivaldi, Opera, Chromium and Helium (and Arc's and Dia's own
 // Chromium profiles for passwords and cookies). Dia's import lists the same
 // browsers; each profile becomes a space with its bookmarks bar pinned and its
 // last session's tabs in Today.

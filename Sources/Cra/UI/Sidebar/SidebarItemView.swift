@@ -84,7 +84,7 @@ struct TabRow: View {
     /// Arc shows the host under a pinned tab only when it has left the pinned
     /// site (navigating within the same host shows nothing).
     private var subtitle: String? {
-        // A live folder's pull request by someone else shows its author (Arc's sidebarItemSubtitleTextField).
+        // A live folder's pull request shows its author (Arc's sidebarItemSubtitleTextField, mine too).
         if let author = tab.liveSubtitle, URL(string: tab.url)?.host == "github.com" { return author }
         guard navigatedAway, let host = URL(string: tab.url)?.host, let saved = URL(string: tab.savedURL)?.host,
               host.replacingOccurrences(of: "www.", with: "") != saved.replacingOccurrences(of: "www.", with: "") else { return nil }

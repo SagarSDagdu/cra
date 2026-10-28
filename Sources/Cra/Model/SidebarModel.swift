@@ -324,6 +324,10 @@ struct ArchivedItem: Codable, Identifiable, Equatable {
     /// Closed from a Little Window (Arc: archive source `littleArc`); never
     /// had a place in the sidebar, so restoring puts it in the focused space.
     var fromLittleWindow: Bool? = nil
+    /// The folder it was closed out of (live folders too) and its place there:
+    /// restoring puts it back while that folder is still in the space.
+    var sourceFolderID: UUID? = nil
+    var sourceIndex: Int? = nil
 }
 
 enum AutoArchiveThreshold: String, Codable, CaseIterable, Identifiable {
@@ -395,6 +399,9 @@ struct AppSettings: Codable, Equatable {
     var autoArchive: AutoArchiveThreshold = .twelveHours
     var searchEngine: SearchEngine = .google
     var newTabsAtTop: Bool = true
+    /// Tabs ▸ "Show the New Tab button above tabs": the + New Tab row leads Today
+    /// instead of following its last tab.
+    var newTabButtonAtTop: Bool = false
     var showStatusBar: Bool = true
     /// Arc's toolbar above the page (URL, copy link, DevTools). ⇧⌘D toggles. Off by
     /// default like Arc, which keeps the URL at the top of the sidebar.
@@ -509,6 +516,7 @@ extension AppSettings {
         autoArchive = try c.decodeIfPresent(AutoArchiveThreshold.self, forKey: .autoArchive) ?? .twelveHours
         searchEngine = try c.decodeIfPresent(SearchEngine.self, forKey: .searchEngine) ?? .google
         newTabsAtTop = try c.decodeIfPresent(Bool.self, forKey: .newTabsAtTop) ?? true
+        newTabButtonAtTop = try c.decodeIfPresent(Bool.self, forKey: .newTabButtonAtTop) ?? false
         showStatusBar = try c.decodeIfPresent(Bool.self, forKey: .showStatusBar) ?? true
         if try c.decodeIfPresent(Bool.self, forKey: .toolbarDefaultMigrated) == true {
             showToolbar = try c.decodeIfPresent(Bool.self, forKey: .showToolbar) ?? false
