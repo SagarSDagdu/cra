@@ -69,6 +69,15 @@ final class TabSwitcher {
         DispatchQueue.main.asyncAfter(deadline: .now() + TabSwitcherMetrics.showDelay, execute: work)
     }
 
+    /// Testing: open on the second card without a held key.
+    func debugOpen(_ list: [Item]) {
+        guard list.count > 1 else { return }
+        items = list
+        selectedIndex = 1
+        isOpen = true
+        onShow()
+    }
+
     func move(_ delta: Int) {
         guard !items.isEmpty else { return }
         let n = items.count

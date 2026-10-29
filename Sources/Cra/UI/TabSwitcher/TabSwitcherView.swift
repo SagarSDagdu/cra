@@ -31,103 +31,203 @@ enum TabSwitcherMetrics {
     }
 }
 
-struct TabSwitcherView: View {
-    let switcher: TabSwitcher
+/// The switcher panel: a dark rounded slab of cards, each a page thumbnail over its favicon
+/// and title, the selected one on the space's highlight.
+@MainActor
+final class TabSwitcherView: NSView {
     private typealias M = TabSwitcherMetrics
+    private let switcher: TabSwitcher
+    private let favicons: FaviconCache
+    private let panel = NSView()
+    private let innerLine = CALayer()
+    private var cards: [TabSwitcherCardView] = []
 
-    var body: some View {
-        let dark = switcher.isDark
-        let shape = RoundedRectangle(cornerRadius: M.cornerRadius, style: .continuous)
-        HStack(spacing: M.cardSpacing) {
-            ForEach(Array(switcher.items.enumerated()), id: \.element.id) { i, item in
-                card(item, selected: i == switcher.selectedIndex, dark: dark)
-                    .contentShape(Rectangle())
-                    .onContinuousHover { phase in
-                        if case .active = phase { switcher.hover(i) }
-                    }
-                    .onTapGesture { switcher.click(i) }
-            }
+    init(switcher: TabSwitcher, favicons: FaviconCache) {
+        self.switcher = switcher
+        self.favicons = favicons
+        super.init(frame: .zero)
+        wantsLayer = true
+        panel.wantsLayer = true
+        if let l = panel.layer {
+            l.cornerRadius = M.cornerRadius
+            l.cornerCurve = .continuous
+            l.borderWidth = 1
+            l.shadowColor = NSColor.black.cgColor
+            l.shadowRadius = 24
+            l.shadowOffset = CGSize(width: 0, height: -10)
+            innerLine.borderWidth = 1
+            innerLine.cornerRadius = M.cornerRadius - 1
+            innerLine.cornerCurve = .continuous
+            l.addSublayer(innerLine)
         }
-        .padding(.horizontal, M.paddingH)
-        .padding(.vertical, M.paddingV)
-        // Arc: #1C1B1A inside a near-black outer line and a 23% white inner line.
-        .background(shape.fill(dark ? Color(red: 28 / 255, green: 27 / 255, blue: 26 / 255) : Color(white: 0.97)))
-        .overlay(shape.inset(by: 1).strokeBorder(dark ? Color.white.opacity(0.23) : Color.white.opacity(0.8), lineWidth: 1))
-        .overlay(shape.strokeBorder(dark ? Color.black.opacity(0.92) : Color.black.opacity(0.12), lineWidth: 1))
-        .shadow(color: .black.opacity(dark ? 0.3 : 0.18), radius: 24, y: 10)
-        .padding(M.shadowMargin)
-        .environment(\.colorScheme, dark ? .dark : .light)
+        addSubview(panel)
+        observe()
     }
 
-    private func card(_ item: TabSwitcher.Item, selected: Bool, dark: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            thumbnail(item, dark: dark)
-                .frame(width: M.thumbnail.width, height: M.thumbnail.height)
-                .clipShape(RoundedRectangle(cornerRadius: M.thumbnailCornerRadius, style: .continuous))
-                .shadow(color: .black.opacity(dark ? 0.4 : 0.15), radius: 7, y: 3)
-                .padding(.leading, M.thumbnailOrigin.x)
-                .padding(.top, M.thumbnailOrigin.y)
-            HStack(spacing: 8) {
-                favicon(item, dark: dark)
-                Text(item.title)
-                    // Arc's titles measure as SF 14 medium (ink width and cap height match).
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(dark ? Color.white : Color.black.opacity(0.85))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func observe() {
+        let (items, selected, dark, highlight) = withObservationTracking {
+            (switcher.items, switcher.selectedIndex, switcher.isDark, switcher.highlight)
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.observe() }
+        }
+        appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        if let l = panel.layer {
+            // Arc: #1C1B1A inside a near-black outer line and a 23% white inner line.
+            l.backgroundColor = (dark ? NSColor(red: 28 / 255, green: 27 / 255, blue: 26 / 255, alpha: 1) : NSColor(white: 0.97, alpha: 1)).cgColor
+            l.borderColor = NSColor.black.withAlphaComponent(dark ? 0.92 : 0.12).cgColor
+            l.shadowOpacity = dark ? 0.3 : 0.18
+            innerLine.borderColor = NSColor.white.withAlphaComponent(dark ? 0.23 : 0.8).cgColor
+        }
+        while cards.count < items.count {
+            let c = TabSwitcherCardView()
+            c.onHover = { [weak self, weak c] in
+                guard let self, let c, let i = self.cards.firstIndex(where: { $0 === c }) else { return }
+                self.switcher.hover(i)
             }
-            .padding(.leading, 13.5)
-            .padding(.trailing, 10.5)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            c.onClick = { [weak self, weak c] in
+                guard let self, let c, let i = self.cards.firstIndex(where: { $0 === c }) else { return }
+                self.switcher.click(i)
+            }
+            cards.append(c)
+            panel.addSubview(c)
         }
-        .frame(width: M.card.width, height: M.card.height, alignment: .topLeading)
-        .background {
-            if selected { RoundedRectangle(cornerRadius: M.cardCornerRadius, style: .continuous).fill(switcher.highlight) }
+        while cards.count > items.count { cards.removeLast().removeFromSuperview() }
+        let fill = NSColor(highlight)
+        for (i, (c, item)) in zip(cards, items).enumerated() {
+            let icon = item.iconKey.flatMap { favicons.image(forKey: $0) }
+            let flip = icon != nil && favicons.glyphIsDark(forKey: item.iconKey) == dark
+            c.show(item, icon: switcher.palette == nil ? nil : icon, flip: flip, selected: i == selected, highlight: fill, dark: dark)
         }
+        needsLayout = true
     }
 
-    @ViewBuilder
-    private func thumbnail(_ item: TabSwitcher.Item, dark: Bool) -> some View {
+    override func layout() {
+        super.layout()
+        let p = bounds.insetBy(dx: M.shadowMargin, dy: M.shadowMargin)
+        panel.frame = p
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        innerLine.frame = panel.bounds.insetBy(dx: 1, dy: 1)
+        CATransaction.commit()
+        for (i, c) in cards.enumerated() {
+            c.frame = NSRect(x: M.paddingH + CGFloat(i) * (M.card.width + M.cardSpacing), y: M.paddingV,
+                             width: M.card.width, height: M.card.height)
+        }
+    }
+}
+
+private final class TabSwitcherCardView: NSView {
+    private typealias M = TabSwitcherMetrics
+    var onHover: () -> Void = {}
+    var onClick: () -> Void = {}
+    private let lift = CALayer()
+    private let thumb = CALayer()
+    private let favicon = NSImageView()
+    private let placeholder = NSView()
+    private let title = NSTextField.sidebarLabel(size: 14, weight: .medium)
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = M.cardCornerRadius
+        layer?.cornerCurve = .continuous
+        lift.shadowColor = NSColor.black.cgColor
+        lift.shadowRadius = 7
+        lift.shadowOffset = CGSize(width: 0, height: -3)
+        lift.cornerRadius = M.thumbnailCornerRadius
+        lift.cornerCurve = .continuous
+        thumb.cornerRadius = M.thumbnailCornerRadius
+        thumb.cornerCurve = .continuous
+        thumb.masksToBounds = true
+        thumb.contentsGravity = .resizeAspectFill
+        lift.addSublayer(thumb)
+        layer?.addSublayer(lift)
+        favicon.imageScaling = .scaleProportionallyUpOrDown
+        favicon.wantsLayer = true
+        favicon.layer?.cornerRadius = M.favicon * 0.22
+        favicon.layer?.cornerCurve = .continuous
+        favicon.layer?.masksToBounds = true
+        addSubview(favicon)
+        placeholder.wantsLayer = true
+        placeholder.layer?.cornerRadius = 4.5
+        placeholder.layer?.cornerCurve = .continuous
+        addSubview(placeholder)
+        addSubview(title)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func show(_ item: TabSwitcher.Item, icon: NSImage?, flip: Bool, selected: Bool, highlight: NSColor, dark: Bool) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer?.backgroundColor = selected ? highlight.cgColor : nil
+        lift.shadowOpacity = dark ? 0.4 : 0.15
         if let image = item.snapshot {
-            Image(nsImage: image).resizable().interpolation(.high).aspectRatio(contentMode: .fill)
+            thumb.contents = image.layerContents(forContentsScale: window?.backingScaleFactor ?? 2)
+            thumb.backgroundColor = nil
         } else {
             // A tab never seen since launch: Arc shows an empty #1C1C1C card.
-            Rectangle().fill(dark ? Color(white: 28 / 255) : Color(white: 0.9))
+            thumb.contents = nil
+            thumb.backgroundColor = (dark ? NSColor(white: 28 / 255, alpha: 1) : NSColor(white: 0.9, alpha: 1)).cgColor
         }
-    }
-
-    @ViewBuilder
-    private func favicon(_ item: TabSwitcher.Item, dark: Bool) -> some View {
-        if let palette = switcher.palette, item.iconKey != nil {
-            FaviconIconOrPlaceholder(key: item.iconKey, palette: palette, dark: dark)
+        CATransaction.commit()
+        // Arc's switcher draws a missing favicon as a faint rounded square, not a globe.
+        if let icon {
+            favicon.isHidden = false
+            placeholder.isHidden = true
+            if flip {
+                let t = icon.copy() as! NSImage
+                t.isTemplate = true
+                favicon.image = t
+                favicon.contentTintColor = dark ? NSColor.white.withAlphaComponent(0.92) : NSColor.black.withAlphaComponent(0.85)
+            } else {
+                favicon.image = icon
+                favicon.contentTintColor = nil
+            }
         } else {
-            FaviconPlaceholder(dark: dark)
+            favicon.isHidden = true
+            placeholder.isHidden = false
+            placeholder.layer?.backgroundColor = (dark ? NSColor.white.withAlphaComponent(0.14) : NSColor.black.withAlphaComponent(0.1)).cgColor
         }
+        // Arc's titles measure as SF 14 medium (ink width and cap height match).
+        title.stringValue = item.title
+        title.textColor = dark ? .white : NSColor.black.withAlphaComponent(0.85)
+        needsLayout = true
     }
-}
 
-/// Arc's switcher draws a missing favicon as a faint rounded square, not a globe.
-private struct FaviconIconOrPlaceholder: View {
-    let key: String?
-    let palette: SpacePalette
-    let dark: Bool
-    @Environment(FaviconCache.self) private var favicons
-
-    var body: some View {
-        if favicons.image(forKey: key) != nil {
-            FaviconView(key: key, palette: palette, size: TabSwitcherMetrics.favicon, onDark: dark)
-        } else {
-            FaviconPlaceholder(dark: dark)
-        }
+    override func layout() {
+        super.layout()
+        let h = bounds.height
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        lift.frame = NSRect(x: M.thumbnailOrigin.x, y: h - M.thumbnailOrigin.y - M.thumbnail.height,
+                              width: M.thumbnail.width, height: M.thumbnail.height)
+        lift.shadowPath = CGPath(roundedRect: lift.bounds, cornerWidth: M.thumbnailCornerRadius, cornerHeight: M.thumbnailCornerRadius, transform: nil)
+        thumb.frame = lift.bounds
+        CATransaction.commit()
+        // The title row fills what is left under the thumbnail, centred.
+        let rowTop = M.thumbnailOrigin.y + M.thumbnail.height
+        let mid = h - (rowTop + (h - rowTop) / 2)
+        let f = NSRect(x: 13.5, y: mid - M.favicon / 2, width: M.favicon, height: M.favicon)
+        favicon.frame = f
+        placeholder.frame = f
+        let tx = 13.5 + M.favicon + 8
+        title.frame = NSRect(x: tx - SidebarText.inset, y: mid - 17 / 2, width: bounds.width - tx - 10.5 + 2 * SidebarText.inset, height: 17)
     }
-}
 
-private struct FaviconPlaceholder: View {
-    let dark: Bool
-    var body: some View {
-        RoundedRectangle(cornerRadius: 4.5, style: .continuous)
-            .fill(dark ? Color.white.opacity(0.14) : Color.black.opacity(0.1))
-            .frame(width: TabSwitcherMetrics.favicon, height: TabSwitcherMetrics.favicon)
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for t in trackingAreas where t.owner === self { removeTrackingArea(t) }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self, userInfo: nil))
+    }
+
+    override func mouseEntered(with event: NSEvent) { onHover() }
+    override func mouseMoved(with event: NSEvent) { onHover() }
+    override func mouseDown(with event: NSEvent) {}
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick() }
     }
 }
 

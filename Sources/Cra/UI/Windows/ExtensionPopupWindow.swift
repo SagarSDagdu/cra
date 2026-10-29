@@ -14,13 +14,19 @@ final class ExtensionPopupWindow: NSWindow {
     /// Chrome's bubble draws a transparent margin around the page.
     static let bubbleInset: CGFloat = 7
     static let titleBarHeight: CGFloat = 28
-    private static let savedOriginKey = "extensionPopupWindowTopLeft"
+    /// Where the user dragged a popup to, relative to its anchor. (Cra ≤ 0.1.17 kept an
+    /// absolute screen point under "extensionPopupWindowTopLeft"; that one is dropped.)
+    private static let savedOffsetKey = "extensionPopupWindowOffset"
 
     private static var current: ExtensionPopupWindow?
 
     private weak var bubble: NSWindow?
-    /// The frame's top-left (screen): under the anchor, or where the user left it.
-    private var topLeft = NSPoint.zero
+    /// The top-right point (screen) the popup hangs from: right edge of its button, under the bar.
+    private var anchor = NSPoint.zero
+    /// Where the user dragged the frame, from hanging right under the anchor.
+    private var offset = NSPoint.zero
+    /// The frame's top-left when a title-bar drag began.
+    private var dragStart = NSPoint.zero
     private var observers: [NSObjectProtocol] = []
     private var placing = false
     /// A title-bar drag is under way (willMove is only posted for those, not when the main
@@ -52,12 +58,14 @@ final class ExtensionPopupWindow: NSWindow {
     }
 
     /// Wraps Chrome's popup `bubble`; `anchor` is the top-right point (screen) it hangs from
-    /// until the user moves the window.
+    /// (its right edge stays there as Chrome resizes the page), moved by the user's last drag.
     static func present(_ bubble: NSWindow, anchor: NSPoint) {
         current?.dismiss(closingBubble: false)
         let w = ExtensionPopupWindow()
         w.bubble = bubble
-        w.topLeft = placement(anchor: anchor, width: bubble.frame.width - 2 * bubbleInset)
+        w.anchor = anchor
+        UserDefaults.standard.removeObject(forKey: "extensionPopupWindowTopLeft")
+        w.offset = savedOffset ?? .zero
         w.appearance = bubble.parent?.effectiveAppearance ?? NSApp.effectiveAppearance
         w.backgroundColor = .windowBackgroundColor
         current = w
@@ -97,7 +105,11 @@ final class ExtensionPopupWindow: NSWindow {
             MainActor.assumeIsolated { w?.dismiss(closingBubble: true) }
         })
         w.observers.append(NotificationCenter.default.addObserver(forName: NSWindow.willMoveNotification, object: w, queue: .main) { [weak w] _ in
-            MainActor.assumeIsolated { w?.dragging = true }
+            MainActor.assumeIsolated {
+                guard let w else { return }
+                w.dragging = true
+                w.dragStart = NSPoint(x: w.frame.minX, y: w.frame.maxY)
+            }
         })
         w.observers.append(NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: w, queue: .main) { [weak w] _ in
             MainActor.assumeIsolated { w?.userMoved() }
@@ -118,7 +130,8 @@ final class ExtensionPopupWindow: NSWindow {
         defer { placing = false }
         let inset = Self.bubbleInset
         let size = NSSize(width: bubble.frame.width - 2 * inset, height: bubble.frame.height - 2 * inset + Self.titleBarHeight)
-        var topLeft = self.topLeft
+        // Right edge on the anchor whatever width the page reports (Bitwarden grows after it loads).
+        var topLeft = NSPoint(x: anchor.x - size.width + offset.x, y: anchor.y + offset.y)
         if let screen = (bubble.screen ?? NSScreen.main)?.visibleFrame {
             topLeft.x = min(max(topLeft.x, screen.minX + 4), screen.maxX - size.width - 4)
             topLeft.y = min(max(topLeft.y, screen.minY + size.height + 4), screen.maxY)
@@ -131,23 +144,28 @@ final class ExtensionPopupWindow: NSWindow {
 
     private func userMoved() {
         guard dragging, !placing, bubble != nil else { return }
-        topLeft = NSPoint(x: frame.minX, y: frame.maxY)
-        Self.savedTopLeft = topLeft
+        let moved = NSPoint(x: frame.minX, y: frame.maxY)
+        // A click on the title bar that barely moved it is not a new place.
+        guard hypot(moved.x - dragStart.x, moved.y - dragStart.y) > 4 else { return }
+        offset = NSPoint(x: moved.x - (anchor.x - frame.width), y: moved.y - anchor.y)
+        Self.savedOffset = offset
     }
 
-    /// Top-left of a popup window `width` wide: where the user last left one, else hanging
-    /// from `anchor` (top-right).
+    /// Top-left of a popup window `width` wide: hanging from `anchor` (top-right), moved by
+    /// where the user last dragged one to. The drag is kept relative to the anchor, so the
+    /// popup follows its button when the browser window moves or changes screen (GitHub #8:
+    /// an absolute screen point made it open in "random" places).
     static func placement(anchor: NSPoint, width: CGFloat) -> NSPoint {
-        savedTopLeft ?? NSPoint(x: anchor.x - width, y: anchor.y)
+        let offset = savedOffset ?? .zero
+        return NSPoint(x: anchor.x - width + offset.x, y: anchor.y + offset.y)
     }
 
-    private static var savedTopLeft: NSPoint? {
+    private static var savedOffset: NSPoint? {
         get {
-            guard let s = UserDefaults.standard.string(forKey: savedOriginKey) else { return nil }
-            let p = NSPointFromString(s)
-            return p == .zero ? nil : p
+            guard let s = UserDefaults.standard.string(forKey: savedOffsetKey) else { return nil }
+            return NSPointFromString(s)
         }
-        set { UserDefaults.standard.set(newValue.map(NSStringFromPoint), forKey: savedOriginKey) }
+        set { UserDefaults.standard.set(newValue.map(NSStringFromPoint), forKey: savedOffsetKey) }
     }
 
     override func performClose(_ sender: Any?) { dismiss(closingBubble: true) }
@@ -232,7 +250,8 @@ final class ExtensionPageWindow: NSWindow, NSWindowDelegate, @preconcurrency Cra
 
     private unowned let app: AppDelegate
     private var browser: CraBrowser?
-    private var topLeft: NSPoint
+    /// The frame's top-right (screen): the page grows to the left, away from its button.
+    private var topRight: NSPoint
     private var pageSize: NSSize?
     private var measureTimer: Timer?
     private var closing = false
@@ -256,7 +275,8 @@ final class ExtensionPageWindow: NSWindow, NSWindowDelegate, @preconcurrency Cra
     private init(url: String, anchor: NSPoint, app: AppDelegate) {
         self.app = app
         let start = NSSize(width: 360, height: 240)
-        topLeft = ExtensionPopupWindow.placement(anchor: anchor, width: start.width)
+        let tl = ExtensionPopupWindow.placement(anchor: anchor, width: start.width)
+        topRight = NSPoint(x: tl.x + start.width, y: tl.y)
         super.init(contentRect: NSRect(origin: .zero, size: start), styleMask: [.titled, .closable, .fullSizeContentView],
                    backing: .buffered, defer: false)
         titlebarAppearsTransparent = true
@@ -293,7 +313,7 @@ final class ExtensionPageWindow: NSWindow, NSWindowDelegate, @preconcurrency Cra
 
     private func frame(for page: NSSize) -> NSRect {
         let h = page.height + ExtensionPopupWindow.titleBarHeight
-        var tl = topLeft
+        var tl = NSPoint(x: topRight.x - page.width, y: topRight.y)
         if let screen = (screen ?? NSScreen.main)?.visibleFrame {
             tl.x = min(max(tl.x, screen.minX + 4), screen.maxX - page.width - 4)
             tl.y = min(max(tl.y, screen.minY + h + 4), screen.maxY)
@@ -363,7 +383,7 @@ final class ExtensionPageWindow: NSWindow, NSWindowDelegate, @preconcurrency Cra
     // MARK: Window
 
     func windowDidMove(_ notification: Notification) {
-        topLeft = NSPoint(x: frame.minX, y: frame.maxY)
+        topRight = NSPoint(x: frame.maxX, y: frame.maxY)
     }
 
     /// Like a popup: clicking anywhere else closes it (the page's own window is a child,

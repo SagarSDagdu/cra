@@ -54,6 +54,19 @@ To measure smoothness, add `CRA_HITCH_LOG=/tmp/cra-hitch.log`: every main-thread
 there delays input and scrolling too. Compare builds by running the same command
 script against each.
 
+`CRA_TEST_BACKGROUND=1` keeps a test instance behind whatever you are using: its windows
+open at the back and it ignores every request to activate (Chromium's included). Launch it
+with `open -g -n --env …` so macOS doesn't bring it forward either. Two command-file hooks
+drive the sidebar without touching the pointer: `cra://debug?swipe=-14,22` plays a space
+swipe (22 trackpad samples of 14 pt) and `cra://debug?scroll=30,30,150,700` scrolls the
+scroll view at x 150, y 700 of the window (from its top left) 30 pt a frame for 30 frames.
+Measure them with `sample <pid> 6 1` and compare the main thread's busy time between builds.
+
+The sidebar's tab list and space pager are AppKit (`UI/Sidebar/List`): rows are plain
+layer-backed views rebuilt from the store when it changes, a swipe moves the pager's layers
+and the window tint (`PagedGradientView`) in Core Animation, and SwiftUI keeps the favorites,
+space header, top bar and dock.
+
 Pages are embedded in their pane cards (`EmbeddedPages.swift`): Chromium's page views move
 from their Chrome window into the card, like Arc and Dia, and the Chrome window stays behind
 empty, click-through and never key. Pages go back into their window while DevTools is open.

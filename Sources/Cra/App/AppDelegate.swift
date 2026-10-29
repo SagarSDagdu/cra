@@ -484,6 +484,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             for item in comps?.queryItems ?? [] { if let v = item.value { dict[item.name] = v } }
             if let js = dict["devtoolsjs"] { main.debugRunInDevTools(js) }
             if dict["embedDump"] != nil { NSLog("%@", main.embeddedPagesDump()); return }
+            // Tests that leave the pointer alone: scroll=dy,steps,x,y scrolls the scroll view at a
+            // point of the main window (from its top left); swipe=dx,steps plays a space swipe.
+            if let g = dict["scroll"]?.split(separator: ",").compactMap({ Double($0) }), g.count == 4, let w = main.window {
+                TestGesture.scroll(by: g[0], steps: Int(g[1]), at: NSPoint(x: g[2], y: w.frame.height - g[3]), in: w)
+                return
+            }
+            if let st = dict["status"] { main.browserManager(statusMessage: st); return }
+            // Opens what normally needs a pointer or a held key, for screenshots.
+            if let v = dict["downloads"] { main.sidebarUI.downloadsListOpen = v == "1"; return }
+            if let v = dict["banner"] { SoftwareUpdater.shared.debugUpdated(v == "none" ? nil : v); return }
+            if dict["switcher"] != nil { main.debugTabSwitcher(); return }
+            if dict["jumpPill"] != nil { SpaceListView.jumpToSelected(for: main.sidebarUI, space: store.focusedSpaceID); return }
+            if dict["littlePopup"] != nil { littleWindows.first?.togglePopup(); return }
+            if let c = dict["combine"], let content = main.window?.contentView {
+                let tabs = store.children(of: store.focusedSpace.todayContainerID).filter { $0.tab != nil }
+                guard tabs.count > 1 else { return }
+                let kind: CombineDropPreview.Kind = c == "folder" ? .folder : .split(leading: c == "leading")
+                let pal = store.focusedSpace.theme.palette
+                let v = CombineDropPreview(kind: kind, target: tabs[0], dragged: tabs[1], depth: 0, palette: pal, favicons: favicons)
+                v.frame = NSRect(x: 10, y: content.bounds.height - 420, width: 300, height: CraMetrics.rowHeight)
+                content.addSubview(v)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) { v.removeFromSuperview() }
+                return
+            }
+            if dict["siteControls"] != nil { main.debugSiteControls(); return }
+            if let t = dict["tooltip"], let content = main.window?.contentView {
+                ArcTooltipController.shared.debugShow(t, in: content, at: NSRect(x: 380, y: content.bounds.height - 120, width: 28, height: 28))
+                return
+            }
+            if let g = dict["swipe"]?.split(separator: ",").compactMap({ Double($0) }), g.count == 2 {
+                main.debugSpaceSwipe(dx: g[0], steps: Int(g[1]))
+                return
+            }
             if let id = dict["extensionAction"] { main.runExtensionAction(id); return }
             if let f = dict["floatingSidebar"] { if f == "1" { main.floatingSidebar?.show() } else { main.floatingSidebar?.hide(animated: true) }; return }
             if let method = dict["bcdp"] {

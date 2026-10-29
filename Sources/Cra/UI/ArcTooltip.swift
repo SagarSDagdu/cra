@@ -27,6 +27,10 @@ final class ArcTooltipController {
 
     private struct WeakAnchor { weak var view: (any ArcTooltipTarget)? }
 
+    /// Set while a list scrolls under the pointer: no tip shows or starts waiting, and the
+    /// next one waits for the pointer to rest the full delay.
+    var paused = false { didSet { if paused { dismiss() } } }
+
     private init() {
         clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown]) { [weak self] e in
             self?.dismiss()
@@ -52,7 +56,7 @@ final class ArcTooltipController {
             cancelPending()
             return
         }
-        if shownFor === target { return }
+        if shownFor === target || paused { return }
         startTip(for: target)
     }
 
@@ -66,7 +70,7 @@ final class ArcTooltipController {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: Self.idleDelay, repeats: false) { [weak self, weak view] _ in
             Task { @MainActor in
-                guard let self, let view, self.pendingFor === view else { return }
+                guard let self, let view, self.pendingFor === view, !self.paused else { return }
                 self.show(for: view)
             }
         }
@@ -94,17 +98,24 @@ final class ArcTooltipController {
         pendingFor = nil
     }
 
+    /// Testing: the tip for `help` over a rect of `view`, without a pointer.
+    func debugShow(_ help: String, in view: NSView, at rect: NSRect) {
+        let a = ArcTooltipAnchorView(frame: rect)
+        (a.text, a.keys) = ArcTooltipLabel.split(help)
+        view.addSubview(a)
+        show(for: a)
+    }
+
     private func show(for view: any ArcTooltipTarget) {
         cancelPending()
         guard let window = view.hostWindow, !view.text.isEmpty else { return }
         removePanel()
         let p = LittleTooltipPanel()
         let option = NSEvent.modifierFlags.contains(.option) ? view.optionText : nil
-        let host = NSHostingView(rootView: ArcTooltipLabel(text: option ?? view.text, keys: option == nil ? view.keys : [],
-                                                           subtitle: option == nil ? view.subtitle : nil))
-        let size = host.fittingSize
-        host.setFrameSize(size)
-        p.contentView = host
+        let label = ArcTooltipLabel(text: option ?? view.text, keys: option == nil ? view.keys : [],
+                                    subtitle: option == nil ? view.subtitle : nil)
+        let size = label.frame.size
+        p.contentView = label
         // Buttons: off the bottom-trailing corner of a 16 pt box around the glyph.
         // Rows: Arc's .cursor anchor, 13 pt right of and 14 pt below the pointer.
         let r = view.screenFrame
@@ -283,61 +294,98 @@ extension View {
 
 /// The tip itself: 28 pt navy capsule, 12 pt medium text, 18 pt key caps with a darker
 /// bottom edge (Arc sidebar, 1x captures; Little Arc's larger tip is LittleTooltip).
-struct ArcTooltipLabel: View {
-    let text: String
-    let keys: [String]
-    var subtitle: String? = nil
-
-    static let capEdge = Color(red: 119 / 255, green: 122 / 255, blue: 211 / 255)
+final class ArcTooltipLabel: NSView {
+    static let capEdge = NSColor(red: 119 / 255, green: 122 / 255, blue: 211 / 255, alpha: 1)
     static let maxTextWidth: CGFloat = 280
+    static let fill = NSColor(LittlePalette.tooltip)
+    static let ink = NSColor(LittlePalette.tooltipText)
+    static let cap = NSColor(LittlePalette.tooltipCap)
+    static let capGlyph = NSColor(LittlePalette.tooltipCapGlyph)
+    private static let font = NSFont.systemFont(ofSize: 12, weight: .medium)
 
     static func width(of text: String) -> CGFloat {
-        (text as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12, weight: .medium)]).width
+        (text as NSString).size(withAttributes: [.font: font]).width
     }
 
-    private var wraps: Bool { Self.width(of: text) > Self.maxTextWidth }
+    private let title = NSTextField(wrappingLabelWithString: "")
+    private let sub = NSTextField.sidebarLabel(size: 11)
+    private var caps: [NSView] = []
+    private let multiline: Bool
 
-    var body: some View {
-        let multiline = wraps || subtitle != nil
-        HStack(spacing: 7) {
-            VStack(alignment: .leading, spacing: 1) {
-                // Long titles wrap at a fixed width (ArcTooltipConfiguration.maxWidth; Arc's value is unknown).
-                if wraps {
-                    Text(text).font(.system(size: 12, weight: .medium)).foregroundStyle(LittlePalette.tooltipText)
-                        .lineLimit(3)
-                        .frame(width: Self.maxTextWidth, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    Text(text).font(.system(size: 12, weight: .medium)).foregroundStyle(LittlePalette.tooltipText)
-                }
-                if let subtitle {
-                    Text(subtitle).font(.system(size: 11)).foregroundStyle(LittlePalette.tooltipText.opacity(0.6))
-                }
-            }
-            if !keys.isEmpty {
-                HStack(spacing: 3) {
-                    ForEach(Array(keys.enumerated()), id: \.offset) { _, k in
-                        ZStack(alignment: .top) {
-                            RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Self.capEdge)
-                            Text(k)
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(LittlePalette.tooltipCapGlyph)
-                                .frame(width: 18, height: 16)
-                                .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(LittlePalette.tooltipCap))
-                        }
-                        .frame(width: 18, height: 18)
-                    }
-                }
-            }
-        }
-        .padding(.leading, 10)
-        .padding(.trailing, keys.isEmpty ? 10 : 8)
-        .padding(.vertical, multiline ? 6 : 0)
-        .frame(minHeight: 28)
+    init(text: String, keys: [String], subtitle: String? = nil) {
+        let wraps = Self.width(of: text) > Self.maxTextWidth
+        multiline = wraps || subtitle != nil
+        super.init(frame: .zero)
+        wantsLayer = true
         // No border: unlike Little Arc's tip, the sidebar one goes straight from fill to backdrop.
         // Two or more lines get a rounded rectangle (Cra's choice; Arc's multi-line tip wasn't observed).
-        .background(RoundedRectangle(cornerRadius: multiline ? 10 : 14, style: .circular).fill(LittlePalette.tooltip))
-        .fixedSize()
+        layer?.backgroundColor = Self.fill.cgColor
+        layer?.cornerRadius = multiline ? 10 : 14
+        title.font = Self.font
+        title.textColor = Self.ink
+        title.stringValue = text
+        // Long titles wrap at a fixed width (ArcTooltipConfiguration.maxWidth; Arc's value is unknown).
+        title.maximumNumberOfLines = wraps ? 3 : 1
+        title.lineBreakMode = wraps ? .byWordWrapping : .byClipping
+        title.cell?.truncatesLastVisibleLine = true
+        addSubview(title)
+        if let subtitle {
+            sub.stringValue = subtitle
+            sub.textColor = Self.ink.withAlphaComponent(0.6)
+            addSubview(sub)
+        }
+        for k in keys {
+            let edge = NSView()
+            edge.wantsLayer = true
+            edge.layer?.backgroundColor = Self.capEdge.cgColor
+            edge.layer?.cornerRadius = 4
+            edge.layer?.cornerCurve = .continuous
+            let face = NSView(frame: NSRect(x: 0, y: 2, width: 18, height: 16))
+            face.wantsLayer = true
+            face.layer?.backgroundColor = Self.cap.cgColor
+            face.layer?.cornerRadius = 4
+            face.layer?.cornerCurve = .continuous
+            edge.addSubview(face)
+            let glyph = NSTextField.sidebarLabel(size: 10, weight: .bold)
+            glyph.stringValue = k
+            glyph.textColor = Self.capGlyph
+            glyph.alignment = .center
+            glyph.frame = NSRect(x: -SidebarText.inset, y: (16 - 13) / 2, width: 18 + 2 * SidebarText.inset, height: 13)
+            face.addSubview(glyph)
+            caps.append(edge)
+            addSubview(edge)
+        }
+        layoutContent()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private var titleSize: NSSize {
+        let w = multiline && title.maximumNumberOfLines > 1 ? Self.maxTextWidth : ceil(Self.width(of: title.stringValue))
+        let h = title.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: w + 2 * SidebarText.inset, height: 1000)).height ?? 15
+        return NSSize(width: w, height: ceil(h))
+    }
+
+    /// Lays the label out and sizes the view to fit (SwiftUI's .fixedSize()).
+    private func layoutContent() {
+        let ts = titleSize
+        let subSize = sub.superview == nil ? .zero : NSSize(width: ceil(sub.attributedStringValue.size().width), height: 14)
+        let textW = max(ts.width, subSize.width)
+        let textH = ts.height + (sub.superview == nil ? 0 : 1 + subSize.height)
+        let keysW = caps.isEmpty ? 0 : CGFloat(caps.count) * 18 + CGFloat(caps.count - 1) * 3
+        let contentH = max(textH, caps.isEmpty ? 0 : 18)
+        let h = max(28, contentH + (multiline ? 12 : 0))
+        let w = 10 + textW + (caps.isEmpty ? 0 : 7 + keysW) + (caps.isEmpty ? 10 : 8)
+        setFrameSize(NSSize(width: ceil(w), height: ceil(h)))
+        // VStack(spacing: 1), centred.
+        let top = (h + textH) / 2
+        title.frame = NSRect(x: 10 - SidebarText.inset, y: top - ts.height, width: ts.width + 2 * SidebarText.inset, height: ts.height)
+        sub.frame = NSRect(x: 10 - SidebarText.inset, y: top - ts.height - 1 - subSize.height, width: subSize.width + 2 * SidebarText.inset, height: subSize.height)
+        var x = 10 + textW + 7
+        for c in caps {
+            c.frame = NSRect(x: x, y: (h - 18) / 2, width: 18, height: 18)
+            x += 18 + 3
+        }
     }
 
     /// "Copy URL (⇧⌘C)" → ("Copy URL", ["⇧", "⌘", "C"]).

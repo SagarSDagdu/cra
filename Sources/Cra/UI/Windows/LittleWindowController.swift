@@ -28,7 +28,7 @@ final class LittleWindowState {
     /// Pointer hover, tracked by AppKit (SwiftUI's onHover sleeps while the
     /// Chrome page window, a child, is the key window).
     var hover: LittleHover = .none
-    /// Width of the "Open in" button, reported by SwiftUI for hit-testing.
+    /// Width of the "Open in" button, reported by LittleToolbarView for hit-testing.
     var openButtonWidth: CGFloat = 160
 
     init(targetSpaceID: UUID) { self.targetSpaceID = targetSpaceID }
@@ -117,7 +117,7 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
     private var favicon: NSImage?
     private var promoted = false
     private var commandPanel: CommandBarPanel!
-    private var commandHost: NSHostingView<AnyView>!
+    private var commandHost: CommandBarView!
     private var commandBarOpenedAt = Date.distantPast
     private var commandObserving = false
     private var popup: LittlePopupPanel?
@@ -155,7 +155,7 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = LittlePalette.barNS
         window.contentView = shell
-        shell.toolbarHost.rootView = AnyView(LittleToolbar(state: state, actions: actions).environment(app.store))
+        shell.setToolbar(LittleToolbarView(state: state, actions: actions, store: app.store))
         shell.onHover = { [weak self] h in
             guard let self, self.state.hover != h else { return }
             self.state.hover = h
@@ -171,7 +171,7 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
         actions.closePopup = { [weak self] in self?.closePopup() }
 
         commandPanel = CommandBarPanel()
-        commandHost = NSHostingView(rootView: AnyView(CommandBarView(controller: commandBar).environment(app.favicons)))
+        commandHost = CommandBarView(controller: commandBar, favicons: app.favicons)
         commandPanel.contentView = commandHost
         commandPanel.delegate = self
         commandBar.onCommit = { [weak self] s, typed, mode, force in self?.handleCommit(s, typed: typed, mode: mode, forceNewTab: force) }
@@ -417,10 +417,9 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
     private func showTooltip(_ text: String, caps: [String], for h: LittleHover) {
         guard let window, state.hover == h, popup == nil, !commandBar.isOpen else { return }
         let panel = LittleTooltipPanel()
-        let host = NSHostingView(rootView: AnyView(LittleTooltip(text: text, caps: caps)))
-        let size = host.fittingSize
-        host.setFrameSize(size)
-        panel.contentView = host
+        let tip = LittleTooltipView(text: text, caps: caps)
+        let size = tip.frame.size
+        panel.contentView = tip
         let w = window.frame.width
         // Centred under the control; the chevron tip hugs the right edge like Arc's.
         let cx: CGFloat = switch h {
@@ -455,11 +454,9 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
         tooltipTimer?.invalidate(); hideTooltip()
         commandBar.close()
         let panel = LittlePopupPanel()
-        let view = LittleSpacesPopup(state: state, onPick: { [weak self] sid in self?.closePopup(); self?.promote(to: sid) },
-                                     onClose: { [weak self] in self?.closePopup() })
-            .environment(store)
-        let host = NSHostingView(rootView: AnyView(view))
-        panel.contentView = host
+        panel.contentView = LittleSpacesPopup(state: state, store: store,
+                                              onPick: { [weak self] sid in self?.closePopup(); self?.promote(to: sid) },
+                                              onClose: { [weak self] in self?.closePopup() })
         panel.delegate = self
         let rows = min(store.spaceOrder.count, 6)
         let h = LittleMetrics.popupHeaderHeight + CGFloat(rows) * LittleMetrics.popupRowHeight
@@ -737,7 +734,7 @@ final class LittleWindowController: NSWindowController, NSWindowDelegate, @preco
 
 /// The navy strip on top, the page edge to edge below.
 final class LittleShellView: NSView {
-    let toolbarHost = FirstMouseHostingView(rootView: AnyView(EmptyView()))
+    private(set) var toolbarHost = NSView()
     let page = NSView()
     /// Reports the page area (window coordinates) so a Chrome-style page window can follow it.
     var onPageFrame: ((NSRect) -> Void)?
@@ -751,12 +748,6 @@ final class LittleShellView: NSView {
         super.init(frame: frame)
         wantsLayer = true
         layer?.backgroundColor = LittlePalette.barNS.cgColor
-        toolbarHost.sizingOptions = []
-        toolbarHost.isOverControl = { [weak self] p in
-            guard let self else { return false }
-            // p is in the strip's own coordinates (flipped SwiftUI space: y from the top).
-            return self.hoverTarget(x: p.x, y: self.toolbarHost.isFlipped ? p.y : LittleMetrics.barHeight - p.y) != .none
-        }
         addSubview(toolbarHost)
         page.wantsLayer = true
         page.layer?.cornerCurve = .continuous
@@ -768,6 +759,18 @@ final class LittleShellView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    func setToolbar(_ toolbar: LittleToolbarView) {
+        toolbar.isOverControl = { [weak self] p in
+            guard let self else { return false }
+            // p is in the strip's own coordinates (flipped: y from the top).
+            return self.hoverTarget(x: p.x, y: p.y) != .none
+        }
+        toolbarHost.removeFromSuperview()
+        toolbarHost = toolbar
+        addSubview(toolbar, positioned: .below, relativeTo: page)
+        needsLayout = true
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -785,7 +788,7 @@ final class LittleShellView: NSView {
         onHover?(inBar ? hoverTarget(x: p.x, y: bounds.height - p.y) : .none)
     }
 
-    /// Mirrors LittleToolbar's layout (pill from x 83, 10pt gap, button, 7pt margin).
+    /// Mirrors LittleToolbarView's layout (pill from x 83, 10pt gap, button, 7pt margin).
     private func hoverTarget(x: CGFloat, y: CGFloat) -> LittleHover {
         guard y >= 8, y <= 8 + LittleMetrics.controlHeight else { return .none }
         let w = bounds.width
@@ -867,18 +870,6 @@ final class LittleWindow: NSWindow {
     }
 }
 
-/// The strip's buttons work on the first click even when the page window holds key
-/// status, and only the empty parts of the strip drag the window (a press on the
-/// pill or the button must not start a window-move session).
-final class FirstMouseHostingView: NSHostingView<AnyView> {
-    var isOverControl: ((NSPoint) -> Bool)?
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override var mouseDownCanMoveWindow: Bool {
-        guard let window, let isOverControl else { return true }
-        return !isOverControl(convert(window.mouseLocationOutsideOfEventStream, from: nil))
-    }
-}
-
 /// Borderless, non-activating tooltip panel (never takes key status).
 final class LittleTooltipPanel: NSPanel {
     override var canBecomeKey: Bool { false }
@@ -899,32 +890,47 @@ final class LittleTooltipPanel: NSPanel {
 }
 
 /// Arc's hover tip: 28pt navy pill, 14pt semibold text, 20pt key caps.
-struct LittleTooltip: View {
-    let text: String
-    let caps: [String]
-    var body: some View {
-        HStack(spacing: 6) {
-            Text(text).font(.system(size: 14, weight: .semibold)).foregroundStyle(LittlePalette.tooltipText)
-            if !caps.isEmpty {
-                HStack(spacing: 4) {
-                    ForEach(caps, id: \.self) { c in
-                        Text(c)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(LittlePalette.tooltipCapGlyph)
-                            .frame(width: 20, height: 20)
-                            .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(LittlePalette.tooltipCap))
-                    }
-                }
-                .padding(.leading, 2)
-            }
+final class LittleTooltipView: NSView {
+    init(text: String, caps: [String]) {
+        super.init(frame: .zero)
+        let font = NSFont.systemFont(ofSize: 14, weight: .semibold)
+        let textW = ceil((text as NSString).size(withAttributes: [.font: font]).width)
+        let capsW = caps.isEmpty ? 0 : 2 + CGFloat(caps.count) * 20 + CGFloat(caps.count - 1) * 4
+        let pillW = 10 + textW + (caps.isEmpty ? 0 : 6 + capsW) + (caps.isEmpty ? 10 : 6)
+        // .padding(2) around the 28 pt pill.
+        setFrameSize(NSSize(width: pillW + 4, height: 32))
+        let pill = NSView(frame: NSRect(x: 2, y: 2, width: pillW, height: 28))
+        pill.wantsLayer = true
+        pill.layer?.backgroundColor = NSColor(LittlePalette.tooltip).cgColor
+        pill.layer?.cornerRadius = 10
+        pill.layer?.cornerCurve = .continuous
+        pill.layer?.borderWidth = 1
+        pill.layer?.borderColor = NSColor(LittlePalette.tooltipBorder).cgColor
+        addSubview(pill)
+        let label = NSTextField.sidebarLabel(size: 14, weight: .semibold)
+        label.stringValue = text
+        label.textColor = NSColor(LittlePalette.tooltipText)
+        label.frame = NSRect(x: 10 - SidebarText.inset, y: (28 - 17) / 2, width: textW + 2 * SidebarText.inset, height: 17)
+        pill.addSubview(label)
+        var x = 10 + textW + 6 + 2
+        for c in caps {
+            let cap = NSView(frame: NSRect(x: x, y: 4, width: 20, height: 20))
+            cap.wantsLayer = true
+            cap.layer?.backgroundColor = NSColor(LittlePalette.tooltipCap).cgColor
+            cap.layer?.cornerRadius = 5
+            cap.layer?.cornerCurve = .continuous
+            let glyph = NSTextField.sidebarLabel(size: 12, weight: .semibold)
+            glyph.stringValue = c
+            glyph.textColor = NSColor(LittlePalette.tooltipCapGlyph)
+            glyph.alignment = .center
+            glyph.frame = NSRect(x: -SidebarText.inset, y: (20 - 15) / 2, width: 20 + 2 * SidebarText.inset, height: 15)
+            cap.addSubview(glyph)
+            pill.addSubview(cap)
+            x += 24
         }
-        .padding(.leading, 10)
-        .padding(.trailing, caps.isEmpty ? 10 : 6)
-        .frame(height: 28)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(LittlePalette.tooltip))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(LittlePalette.tooltipBorder, lineWidth: 1))
-        .padding(2)
     }
+
+    required init?(coder: NSCoder) { fatalError() }
 }
 
 /// Borderless child panel for the spaces menu; takes the keyboard for filtering.
@@ -945,210 +951,347 @@ final class LittlePopupPanel: NSPanel {
     }
 }
 
-// MARK: - SwiftUI
+// MARK: - Strip
 
-/// The strip: search pill with puzzle + link icons, split "Open in <Space> ⌘O | ⌄".
-struct LittleToolbar: View {
-    let state: LittleWindowState
-    let actions: LittleWindowActions
-    @Environment(SidebarStore.self) private var store
-    private var hoverPill: Bool { state.hover == .pill }
-    private var hoverOpen: Bool { state.hover == .open }
-    private var hoverChevron: Bool { state.hover == .chevron }
+/// The strip's controls, drawn by AppKit: the address pill (search glyph, centred URL, the
+/// extensions and copy-link icons) and the "Open in <Space> ⌘O | ⌄" button. Hover comes from
+/// the shell's tracking (`state.hover`); clicks land here. They work on the first click even
+/// when the page window holds key status, and only the empty parts of the strip drag the
+/// window (a press on the pill or the button must not start a window-move session).
+@MainActor
+final class LittleToolbarView: NSView {
+    private let state: LittleWindowState
+    private let actions: LittleWindowActions
+    private let store: SidebarStore
+    private let pill = NSView()
+    private let search = NSImageView()
+    private let urlLabel = NSTextField.sidebarLabel(size: 13)
+    private let puzzle = LittleIconView(symbol: "puzzlepiece.extension", size: 15)
+    private let link = LittleIconView(symbol: "link", size: 14)
+    private let openButton = NSView()
+    private let openPart = NSView()
+    private let openLabel = NSTextField.sidebarLabel(size: 13, weight: .medium)
+    private let badge = NSView()
+    private let badgeLabel = NSTextField.sidebarLabel(size: 11, weight: .medium)
+    private let divider = NSView()
+    private let chevronPart = NSView()
+    private let chevron = NSImageView()
+    /// Asked by the shell: does a press here hit a control (else it moves the window)?
+    var isOverControl: ((NSPoint) -> Bool)?
 
-    private var human: String { SuggestionEngine.humanURL(state.url) }
-    private var targetSpace: Space { store.space(state.targetSpaceID) ?? store.focusedSpace }
-
-    var body: some View {
-        HStack(spacing: LittleMetrics.pillGap) {
-            pill
-            openIn
-        }
-        .padding(.leading, LittleMetrics.pillLeft)
-        .padding(.trailing, LittleMetrics.rightMargin)
-        .frame(height: LittleMetrics.barHeight)
-        .frame(maxWidth: .infinity)
-        .background(LittlePalette.bar)
-        .ignoresSafeArea()
+    init(state: LittleWindowState, actions: LittleWindowActions, store: SidebarStore) {
+        self.state = state
+        self.actions = actions
+        self.store = store
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = LittlePalette.barNS.cgColor
+        pill.wantsLayer = true
+        pill.layer?.cornerRadius = 8
+        pill.layer?.cornerCurve = .continuous
+        addSubview(pill)
+        search.image = SidebarSymbols.image("magnifyingglass", size: 13, weight: .medium)
+        search.contentTintColor = NSColor(LittlePalette.icon)
+        search.imageScaling = .scaleNone
+        pill.addSubview(search)
+        urlLabel.textColor = NSColor(LittlePalette.text)
+        urlLabel.alignment = .center
+        pill.addSubview(urlLabel)
+        pill.addSubview(puzzle)
+        pill.addSubview(link)
+        openButton.wantsLayer = true
+        openButton.layer?.backgroundColor = LittlePalette.buttonNS.cgColor
+        openButton.layer?.cornerRadius = 7
+        openButton.layer?.cornerCurve = .continuous
+        openButton.layer?.masksToBounds = true
+        openButton.layer?.borderWidth = 1
+        openButton.layer?.borderColor = NSColor(LittlePalette.buttonBorder).cgColor
+        addSubview(openButton)
+        openPart.wantsLayer = true
+        openButton.addSubview(openPart)
+        openPart.addSubview(openLabel)
+        badge.wantsLayer = true
+        badge.layer?.cornerRadius = 4
+        badge.layer?.cornerCurve = .continuous
+        badge.layer?.backgroundColor = NSColor(LittlePalette.badge).cgColor
+        badgeLabel.stringValue = "⌘O"
+        badgeLabel.textColor = NSColor(LittlePalette.badgeText)
+        badge.addSubview(badgeLabel)
+        openPart.addSubview(badge)
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = NSColor(LittlePalette.buttonBorder).cgColor
+        openButton.addSubview(divider)
+        chevronPart.wantsLayer = true
+        chevron.imageScaling = .scaleNone
+        chevron.contentTintColor = NSColor(LittlePalette.label)
+        chevronPart.addSubview(chevron)
+        openButton.addSubview(chevronPart)
+        observe()
     }
 
-    private var pill: some View {
-        ZStack {
-            Button { actions.openCommandBar() } label: {
-                HStack(spacing: 0) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(LittlePalette.icon)
-                        .frame(width: 34, alignment: .center)
-                    Spacer(minLength: 0)
-                }
-                .overlay {
-                    Text(state.url.isEmpty ? "" : human)
-                        .font(.system(size: 13))
-                        .foregroundStyle(LittlePalette.text)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .padding(.horizontal, 80)
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: LittleMetrics.controlHeight)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            HStack(spacing: 5) {
-                Spacer(minLength: 0)
-                LittleIcon(symbol: "puzzlepiece.extension", size: 15, hover: state.hover == .puzzle) {}
-                LittleIcon(symbol: "link", size: 14, hover: state.hover == .link) { actions.copyURL() }
-            }
-            .padding(.trailing, 2)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isFlipped: Bool { true }
+
+    private func observe() {
+        let (url, hover, popupOpen, space) = withObservationTracking {
+            (state.url, state.hover, state.popupOpen, store.space(state.targetSpaceID) ?? store.focusedSpace)
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.observe() }
         }
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(hoverPill ? LittlePalette.pillHover : LittlePalette.pill))
-        .help(state.url)
+        urlLabel.stringValue = url.isEmpty ? "" : SuggestionEngine.humanURL(url)
+        pill.toolTip = url
+        pill.layer?.backgroundColor = NSColor(hover == .pill ? LittlePalette.pillHover : LittlePalette.pill).cgColor
+        puzzle.hovered = hover == .puzzle
+        link.hovered = hover == .link
+        let text = NSMutableAttributedString(string: "Open in ", attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .medium),
+                                                                             .foregroundColor: NSColor(LittlePalette.label)])
+        text.append(NSAttributedString(string: space.title, attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .bold),
+                                                                         .foregroundColor: NSColor(LittlePalette.spaceName(space.theme))]))
+        openLabel.attributedStringValue = text
+        openButton.toolTip = "Open this page in \(space.title) as a tab (⌘O)"
+        openPart.layer?.backgroundColor = hover == .open ? NSColor(LittlePalette.buttonHover).cgColor : nil
+        chevronPart.layer?.backgroundColor = hover == .chevron ? NSColor(LittlePalette.buttonHover).cgColor : nil
+        chevron.image = SidebarSymbols.image(popupOpen ? "chevron.up" : "chevron.down", size: 10, weight: .bold)
+        needsLayout = true
     }
 
-    private var openIn: some View {
-        let space = targetSpace
-        return HStack(spacing: 0) {
-            Button { actions.promote(nil) } label: {
-                HStack(spacing: 0) {
-                    (Text("Open in ").font(.system(size: 13, weight: .medium)).foregroundStyle(LittlePalette.label)
-                        + Text(space.title).font(.system(size: 13, weight: .bold)).foregroundStyle(LittlePalette.spaceName(space.theme)))
-                        .lineLimit(1)
-                    Text("⌘O")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(LittlePalette.badgeText)
-                        .padding(.horizontal, 5)
-                        .frame(height: 16)
-                        .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(LittlePalette.badge))
-                        .padding(.leading, 6)
-                }
-                .padding(.leading, 10)
-                .padding(.trailing, 8)
-                .frame(height: LittleMetrics.controlHeight)
-                .background(hoverOpen ? LittlePalette.buttonHover : .clear)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(state.url.isEmpty)
-            .help("Open this page in \(space.title) as a tab (⌘O)")
-            Rectangle().fill(LittlePalette.buttonBorder).frame(width: 1, height: LittleMetrics.controlHeight)
-            Button { actions.togglePopup() } label: {
-                Image(systemName: state.popupOpen ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(LittlePalette.label)
-                    .frame(width: LittleMetrics.chevronWidth, height: LittleMetrics.controlHeight)
-                    .background(hoverChevron ? LittlePalette.buttonHover : .clear)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+    override func layout() {
+        super.layout()
+        let w = bounds.width, ch = LittleMetrics.controlHeight, y: CGFloat = 8
+        // Open button: 10 + "Open in <space>" + 6 + ⌘O (5 + text + 5) + 8 | 1 | 29.
+        let tw = ceil(openLabel.attributedStringValue.size().width)
+        let bw = ceil(badgeLabel.attributedStringValue.size().width) + 10
+        let partW = 10 + tw + 6 + bw + 8
+        let openW = partW + 1 + LittleMetrics.chevronWidth
+        if state.openButtonWidth != openW { state.openButtonWidth = openW }
+        openButton.frame = NSRect(x: w - LittleMetrics.rightMargin - openW, y: y, width: openW, height: ch)
+        openPart.frame = NSRect(x: 0, y: 0, width: partW, height: ch)
+        openLabel.frame = NSRect(x: 10 - SidebarText.inset, y: (ch - 16) / 2, width: tw + 2 * SidebarText.inset, height: 16)
+        badge.frame = NSRect(x: 10 + tw + 6, y: (ch - 16) / 2, width: bw, height: 16)
+        badgeLabel.frame = NSRect(x: 5 - SidebarText.inset, y: (16 - 14) / 2, width: bw - 10 + 2 * SidebarText.inset, height: 14)
+        divider.frame = NSRect(x: partW, y: 0, width: 1, height: ch)
+        chevronPart.frame = NSRect(x: partW + 1, y: 0, width: LittleMetrics.chevronWidth, height: ch)
+        chevron.frame = chevronPart.bounds
+        // The pill fills the rest from x 83.
+        let pillW = max(0, openButton.frame.minX - LittleMetrics.pillGap - LittleMetrics.pillLeft)
+        pill.frame = NSRect(x: LittleMetrics.pillLeft, y: y, width: pillW, height: ch)
+        search.frame = NSRect(x: 0, y: 0, width: 34, height: ch)
+        // The URL is centred over the whole pill, 80 pt clear of each end.
+        urlLabel.frame = NSRect(x: 80 - SidebarText.inset, y: (ch - 16) / 2, width: max(0, pillW - 160) + 2 * SidebarText.inset, height: 16)
+        link.frame = NSRect(x: pillW - 2 - 26, y: 2, width: 26, height: 26)
+        puzzle.frame = NSRect(x: pillW - 2 - 26 - 5 - 26, y: 2, width: 26, height: 26)
+    }
+
+    // MARK: Clicks
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override var mouseDownCanMoveWindow: Bool {
+        guard let window, let isOverControl else { return true }
+        return !isOverControl(convert(window.mouseLocationOutsideOfEventStream, from: nil))
+    }
+
+    /// Presses on the empty strip move the window before they get here (mouseDownCanMoveWindow).
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        if openButton.frame.contains(p) {
+            if chevronPart.frame.contains(openButton.convert(p, from: self)) { actions.togglePopup() }
+            else if !state.url.isEmpty { actions.promote(nil) }
+        } else if pill.frame.contains(p) {
+            let q = pill.convert(p, from: self)
+            if link.frame.contains(q) { actions.copyURL() }
+            else if !puzzle.frame.contains(q) { actions.openCommandBar() }
         }
-        .background(LittlePalette.button)
-        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(LittlePalette.buttonBorder, lineWidth: 1))
-        .fixedSize()
-        .background(GeometryReader { g in
-            Color.clear
-                .onAppear { state.openButtonWidth = g.size.width }
-                .onChange(of: g.size.width) { _, w in state.openButtonWidth = w }
-        })
     }
 }
 
 /// Icon in the pill: 26pt hover square, brighter glyph.
-struct LittleIcon: View {
-    let symbol: String
-    let size: CGFloat
-    var hover = false
-    var help: String = ""
-    let action: () -> Void
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: size, weight: .regular))
-                .foregroundStyle(hover ? LittlePalette.iconHot : LittlePalette.icon)
-                .frame(width: 26, height: 26)
-                .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(hover ? LittlePalette.iconHover : .clear))
-                .contentShape(Rectangle())
+private final class LittleIconView: NSView {
+    private let glyph = NSImageView()
+    var hovered = false {
+        didSet {
+            glyph.contentTintColor = NSColor(hovered ? LittlePalette.iconHot : LittlePalette.icon)
+            layer?.backgroundColor = hovered ? NSColor(LittlePalette.iconHover).cgColor : nil
         }
-        .buttonStyle(.plain)
-        .help(help)
     }
+
+    init(symbol: String, size: CGFloat) {
+        super.init(frame: NSRect(x: 0, y: 0, width: 26, height: 26))
+        wantsLayer = true
+        layer?.cornerRadius = 6
+        layer?.cornerCurve = .continuous
+        glyph.image = SidebarSymbols.image(symbol, size: size)
+        glyph.imageScaling = .scaleNone
+        glyph.contentTintColor = NSColor(LittlePalette.icon)
+        glyph.frame = bounds
+        glyph.autoresizingMask = [.width, .height]
+        addSubview(glyph)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 /// Arc's LittleBrowserMoveMenu: "Search Spaces…" with a chevron-up button, then
 /// one 54pt row per space (40pt tile with the emoji on the space colour).
-struct LittleSpacesPopup: View {
-    let state: LittleWindowState
-    let onPick: (UUID) -> Void
-    let onClose: () -> Void
-    @Environment(SidebarStore.self) private var store
-    @State private var query = ""
-    @State private var selected = 0
-    @FocusState private var focused: Bool
+@MainActor
+final class LittleSpacesPopup: NSView, NSTextFieldDelegate {
+    private let state: LittleWindowState
+    private let store: SidebarStore
+    private let onPick: (UUID) -> Void
+    private let onClose: () -> Void
+    private let field = NSTextField()
+    private let close = NSView()
+    private var rows: [NSView] = []
+    private var list: [Space] = []
+    private var selected = 0 { didSet { refreshSelection() } }
 
-    private var spaces: [Space] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        let all = store.orderedSpaces
-        return q.isEmpty ? all : all.filter { $0.title.lowercased().contains(q) }
+    init(state: LittleWindowState, store: SidebarStore, onPick: @escaping (UUID) -> Void, onClose: @escaping () -> Void) {
+        self.state = state
+        self.store = store
+        self.onPick = onPick
+        self.onClose = onClose
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = LittlePalette.buttonNS.cgColor
+        layer?.cornerRadius = 12
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = true
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor(LittlePalette.buttonBorder).cgColor
+        let h = LittleMetrics.popupHeaderHeight
+        let glass = NSImageView(frame: NSRect(x: 14, y: 0, width: 16, height: h))
+        glass.image = SidebarSymbols.image("magnifyingglass", size: 13, weight: .medium)
+        glass.contentTintColor = NSColor(LittlePalette.icon)
+        glass.imageScaling = .scaleNone
+        addSubview(glass)
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.font = .systemFont(ofSize: 14)
+        field.textColor = NSColor.white.withAlphaComponent(0.9)
+        field.placeholderString = "Search Spaces…"
+        field.usesSingleLineMode = true
+        field.cell?.isScrollable = true
+        field.delegate = self
+        addSubview(field)
+        close.wantsLayer = true
+        close.layer?.cornerRadius = 6
+        close.layer?.cornerCurve = .continuous
+        close.layer?.backgroundColor = NSColor(LittlePalette.popupButton).cgColor
+        let up = NSImageView(frame: NSRect(x: 0, y: 0, width: 28, height: 28))
+        up.image = SidebarSymbols.image("chevron.up", size: 11, weight: .bold)
+        up.contentTintColor = NSColor.white.withAlphaComponent(0.9)
+        up.imageScaling = .scaleNone
+        close.addSubview(up)
+        addSubview(close)
+        // Set in init, so didSet doesn't run: highlight by hand.
+        selected = max(0, store.orderedSpaces.firstIndex { $0.id == state.targetSpaceID } ?? 0)
+        rebuild()
     }
 
-    var body: some View {
-        let list = spaces
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "magnifyingglass").font(.system(size: 13, weight: .medium)).foregroundStyle(LittlePalette.icon)
-                TextField("Search Spaces…", text: $query)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 14))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .focused($focused)
-                    .onSubmit { if list.indices.contains(selected) { onPick(list[selected].id) } }
-                    .onExitCommand { onClose() }
-                    .onMoveCommand { dir in
-                        guard !list.isEmpty else { return }
-                        if dir == .down { selected = (selected + 1) % list.count }
-                        if dir == .up { selected = (selected - 1 + list.count) % list.count }
-                    }
-                Button { onClose() } label: {
-                    Image(systemName: "chevron.up")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.9))
-                        .frame(width: 28, height: 28)
-                        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(LittlePalette.popupButton))
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.leading, 14)
-            .padding(.trailing, 9)
-            .frame(height: LittleMetrics.popupHeaderHeight)
-            ForEach(Array(list.prefix(6).enumerated()), id: \.element.id) { i, s in
-                Button { onPick(s.id) } label: {
-                    HStack(spacing: 12) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color(hex: s.theme.accent ?? s.theme.colors.first ?? "#888888"))
-                            Text(s.emoji).font(.system(size: 20))
-                        }
-                        .frame(width: 40, height: 40)
-                        Text(s.title).font(.system(size: 15, weight: .semibold)).foregroundStyle(.white.opacity(0.88)).lineLimit(1)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 14)
-                    .frame(height: LittleMetrics.popupRowHeight)
-                    .background(i == selected ? LittlePalette.buttonHover : .clear)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .onHover { if $0 { selected = i } }
-            }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isFlipped: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.makeFirstResponder(field)
+    }
+
+    private func rebuild() {
+        let q = field.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
+        list = q.isEmpty ? store.orderedSpaces : store.orderedSpaces.filter { $0.title.lowercased().contains(q) }
+        rows.forEach { $0.removeFromSuperview() }
+        rows = list.prefix(6).map { s in
+            let row = FlippedView()
+            row.wantsLayer = true
+            let tile = NSView(frame: NSRect(x: 14, y: (LittleMetrics.popupRowHeight - 40) / 2, width: 40, height: 40))
+            tile.wantsLayer = true
+            tile.layer?.cornerRadius = 9
+            tile.layer?.cornerCurve = .continuous
+            tile.layer?.backgroundColor = NSColor(hex: s.theme.accent ?? s.theme.colors.first ?? "#888888").cgColor
+            let emoji = NSTextField.sidebarLabel(size: 20)
+            emoji.stringValue = s.emoji
+            emoji.alignment = .center
+            emoji.frame = NSRect(x: -SidebarText.inset, y: (40 - 25) / 2, width: 40 + 2 * SidebarText.inset, height: 25)
+            tile.addSubview(emoji)
+            row.addSubview(tile)
+            let title = NSTextField.sidebarLabel(size: 15, weight: .semibold)
+            title.stringValue = s.title
+            title.textColor = NSColor.white.withAlphaComponent(0.88)
+            title.frame = NSRect(x: 14 + 40 + 12 - SidebarText.inset, y: (LittleMetrics.popupRowHeight - 18) / 2,
+                                 width: LittleMetrics.popupWidth - 66 - 14 + 2 * SidebarText.inset, height: 18)
+            row.addSubview(title)
+            addSubview(row)
+            return row
         }
-        .frame(width: LittleMetrics.popupWidth)
-        .background(LittlePalette.button)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(LittlePalette.buttonBorder, lineWidth: 1))
-        .onAppear {
-            focused = true
-            selected = max(0, store.orderedSpaces.firstIndex { $0.id == state.targetSpaceID } ?? 0)
+        needsLayout = true
+        refreshSelection()
+    }
+
+    private func refreshSelection() {
+        for (i, r) in rows.enumerated() {
+            r.layer?.backgroundColor = i == selected ? NSColor(LittlePalette.buttonHover).cgColor : nil
         }
-        .onChange(of: query) { _, _ in selected = 0 }
+    }
+
+    override func layout() {
+        super.layout()
+        let h = LittleMetrics.popupHeaderHeight, w = bounds.width
+        close.frame = NSRect(x: w - 9 - 28, y: (h - 28) / 2, width: 28, height: 28)
+        let fx: CGFloat = 14 + 16 + 10
+        let fh = ceil(field.intrinsicContentSize.height)
+        field.frame = NSRect(x: fx - SidebarText.inset, y: (h - fh) / 2, width: close.frame.minX - 10 - fx + 2 * SidebarText.inset, height: fh)
+        for (i, r) in rows.enumerated() {
+            r.frame = NSRect(x: 0, y: h + CGFloat(i) * LittleMetrics.popupRowHeight, width: w, height: LittleMetrics.popupRowHeight)
+        }
+    }
+
+    // MARK: Keys and pointer
+
+    func controlTextDidChange(_ obj: Notification) {
+        rebuild()
+        selected = 0
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        switch selector {
+        case #selector(NSResponder.insertNewline(_:)):
+            if list.indices.contains(selected) { onPick(list[selected].id) }
+        case #selector(NSResponder.cancelOperation(_:)):
+            onClose()
+        case #selector(NSResponder.moveDown(_:)):
+            if !list.isEmpty { selected = (selected + 1) % list.count }
+        case #selector(NSResponder.moveUp(_:)):
+            if !list.isEmpty { selected = (selected - 1 + list.count) % list.count }
+        default:
+            return false
+        }
+        return true
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for t in trackingAreas where t.owner === self { removeTrackingArea(t) }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeAlways, .inVisibleRect], owner: self, userInfo: nil))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        if let i = rows.firstIndex(where: { $0.frame.contains(p) }), i != selected { selected = i }
+    }
+
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        if close.frame.contains(p) { onClose(); return }
+        if let i = rows.firstIndex(where: { $0.frame.contains(p) }), list.indices.contains(i) { onPick(list[i].id) }
     }
 }

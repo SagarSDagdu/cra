@@ -1,155 +1,320 @@
+import AppKit
 import SwiftUI
 
-/// Arc's command bar: a wide translucent panel, input row with the top
-/// match's favicon, single-line rows "Title — url", the selected row tinted
-/// with the space color, "Switch to Tab" + arrow for open tabs.
-struct CommandBarView: View {
-    let controller: CommandBarController
-    @Environment(FaviconCache.self) private var favicons
-    @Environment(\.colorScheme) private var scheme
-
+/// Arc's command bar: a wide translucent panel, input row with the top match's favicon,
+/// single-line rows "Title — url", the selected row tinted with the space color, "Switch to
+/// Tab" + arrow for open tabs. AppKit: the rows are reused views that change only what changed,
+/// so a keystroke costs the search and a few labels, not a SwiftUI pass over the bar.
+@MainActor
+final class CommandBarView: NSView {
     static let rowHeight: CGFloat = 50
     static let fieldHeight: CGFloat = 60
     static func height(forRows n: Int) -> CGFloat { fieldHeight + (n == 0 ? 0 : CGFloat(n) * rowHeight + CGFloat(n - 1) * 2 + 20) }
 
-    private var dark: Bool { scheme == .dark }
-    @State private var shown = false
+    private let controller: CommandBarController
+    private let favicons: FaviconCache
+    private let material = NSVisualEffectView()
+    private let tint = NSView()
+    private let border = CAShapeLayer()
+    private let shape = CAShapeLayer()
+    private let leadingIcon = NSImageView()
+    private let text: CommandTextField
+    private let info = NSImageView()
+    private let divider = NSView()
+    private var rows: [CommandBarRowView] = []
+    private var syncQueued = false
+    private var attached = false
 
-    /// Arc pops the bar in with a short fade and a hint of scale; driven by the
-    /// controller's open state so it replays on every open.
-    var body: some View {
-        content
-            .opacity(shown ? 1 : 0)
-            .scaleEffect(shown ? 1 : 0.985, anchor: .top)
-            .onChange(of: controller.isOpen, initial: true) { _, open in
-                // Arc's bar appears and disappears within a single frame.
-                var t = Transaction(); t.disablesAnimations = true
-                withTransaction(t) { shown = open }
-            }
+    init(controller: CommandBarController, favicons: FaviconCache) {
+        self.controller = controller
+        self.favicons = favicons
+        text = CommandTextField(controller: controller)
+        super.init(frame: .zero)
+        wantsLayer = true
+        material.blendingMode = .behindWindow
+        material.state = .active
+        tint.wantsLayer = true
+        layer?.mask = shape
+        border.fillColor = nil
+        border.lineWidth = 2
+        leadingIcon.imageScaling = .scaleProportionallyUpOrDown
+        leadingIcon.wantsLayer = true
+        leadingIcon.layer?.cornerCurve = .continuous
+        info.image = SidebarSymbols.image("info.circle", size: 16)
+        info.imageScaling = .scaleNone
+        info.contentTintColor = .secondaryLabelColor
+        divider.wantsLayer = true
+        for v in [material, tint, leadingIcon, text.field, info, divider] as [NSView] { addSubview(v) }
+        layer?.addSublayer(border)
+        border.zPosition = 10
+        sync()
     }
 
-    private var content: some View {
-        let items = controller.result.items
-        return VStack(spacing: 0) {
-            HStack(spacing: 14) {
-                leadingIcon.frame(width: 22, height: 22)
-                CommandTextField(controller: controller)
-                    .frame(height: 30)
-                if controller.query.isEmpty {
-                    Image(systemName: "info.circle")
-                        .font(.system(size: 16, weight: .regular))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.horizontal, 22)
-            .frame(height: Self.fieldHeight)
+    required init?(coder: NSCoder) { fatalError() }
 
-            if !items.isEmpty {
-                Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 1).padding(.horizontal, 16)
-                VStack(spacing: 2) {
-                    ForEach(Array(items.enumerated()), id: \.element.id) { idx, s in
-                        SuggestionRow(suggestion: s, selected: idx == controller.selectedIndex,
-                                      highlight: controller.highlight, focusedSpaceID: controller.focusedSpaceID,
-                                      spaceName: controller.spaceName, queryEmpty: controller.query.isEmpty, dark: dark)
-                            .onHover { if $0 { controller.selectedIndex = idx } }
-                            .onTapGesture { controller.commit(s) }
-                    }
-                }
-                .padding(10)
-            }
+    override var isFlipped: Bool { true }
+
+    private var dark: Bool { effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        sync()
+    }
+
+    private func scheduleSync() {
+        guard !syncQueued else { return }
+        syncQueued = true
+        DispatchQueue.main.async { [weak self] in self?.sync() }
+    }
+
+    private func sync() {
+        syncQueued = false
+        withObservationTracking { apply() } onChange: { [weak self] in
+            Task { @MainActor in self?.scheduleSync() }
         }
-        .frame(width: controller.panelWidth)
-        .background(dark ? AnyShapeStyle(Color.black.opacity(0.74)) : AnyShapeStyle(Color.white.opacity(0.7)))
-        .background(.ultraThinMaterial)
-        .clipShape(UnevenRoundedRectangle(topLeadingRadius: controller.attached ? 10 : 14, bottomLeadingRadius: 14,
-                                          bottomTrailingRadius: 14, topTrailingRadius: controller.attached ? 10 : 14, style: .continuous))
-        .overlay(UnevenRoundedRectangle(topLeadingRadius: controller.attached ? 10 : 14, bottomLeadingRadius: 14,
-                                        bottomTrailingRadius: 14, topTrailingRadius: controller.attached ? 10 : 14, style: .continuous)
-            .strokeBorder(Color.primary.opacity(dark ? 0.12 : 0.08)))
     }
 
-    @ViewBuilder private var leadingIcon: some View {
+    private func apply() {
+        let c = controller
+        let items = c.result.items
+        let dark = self.dark
+        text.update()
+        attached = c.attached
+        // Closest AppKit materials to SwiftUI's .ultraThinMaterial under the bar's tint (dark: compared
+        // pixel for pixel over the same page).
+        material.material = dark ? .hudWindow : .popover
+        tint.layer?.backgroundColor = (dark ? NSColor.black.withAlphaComponent(0.74) : NSColor.white.withAlphaComponent(0.7)).cgColor
+        border.strokeColor = NSColor.labelColor.withAlphaComponent(dark ? 0.12 : 0.08).cgColor
+        divider.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.08).cgColor
+        info.isHidden = !c.query.isEmpty
+        divider.isHidden = items.isEmpty
+
         // Follows the row the arrows moved to; otherwise the completing top match.
-        let previewing = controller.previewText != nil && controller.result.items.indices.contains(controller.selectedIndex)
-        let row = previewing ? controller.result.items[controller.selectedIndex] : controller.result.items.first
+        let previewing = c.previewText != nil && items.indices.contains(c.selectedIndex)
+        let row = previewing ? items[c.selectedIndex] : items.first
         if let s = row, let key = s.faviconKey, s.id != "typed", let img = favicons.image(forKey: key),
-           previewing || controller.result.inlineCompletion != nil || controller.mode == .editURL {
-            Image(nsImage: img).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
-                .frame(width: 20, height: 20).clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+           previewing || c.result.inlineCompletion != nil || c.mode == .editURL {
+            leadingIcon.imageScaling = .scaleProportionallyUpOrDown
+            leadingIcon.image = img
+            leadingIcon.contentTintColor = nil
+            leadingIcon.layer?.cornerRadius = 5
+            leadingIcon.layer?.masksToBounds = true
+            leadingIcon.frame.size = NSSize(width: 20, height: 20)
         } else {
-            Image(systemName: controller.mode == .editURL ? "info.circle" : "magnifyingglass")
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(.secondary)
+            leadingIcon.imageScaling = .scaleNone
+            leadingIcon.image = SidebarSymbols.image(c.mode == .editURL ? "info.circle" : "magnifyingglass", size: 17, weight: .medium)
+            leadingIcon.contentTintColor = .secondaryLabelColor
+            leadingIcon.layer?.masksToBounds = false
+            leadingIcon.frame.size = NSSize(width: 22, height: 22)
         }
+
+        while rows.count < items.count {
+            let r = CommandBarRowView()
+            r.onHover = { [weak self, weak r] in
+                guard let self, let r, let i = self.rows.firstIndex(where: { $0 === r }) else { return }
+                if self.controller.selectedIndex != i { self.controller.selectedIndex = i }
+            }
+            r.onClick = { [weak self, weak r] in
+                guard let self, let r, let i = self.rows.firstIndex(where: { $0 === r }), self.controller.result.items.indices.contains(i) else { return }
+                self.controller.commit(self.controller.result.items[i])
+            }
+            rows.append(r)
+            addSubview(r)
+        }
+        let highlight = NSColor(c.highlight)
+        for (i, r) in rows.enumerated() {
+            guard i < items.count else { r.isHidden = true; continue }
+            r.isHidden = false
+            let s = items[i]
+            r.show(s, icon: s.faviconKey.flatMap { favicons.image(forKey: $0) }, selected: i == c.selectedIndex, highlight: highlight,
+                   otherSpace: s.spaceID.flatMap { $0 != c.focusedSpaceID && s.tabID != nil ? c.spaceName($0) : nil },
+                   queryEmpty: c.query.isEmpty, dark: dark)
+        }
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        let b = bounds
+        material.frame = b
+        tint.frame = b
+        let top: CGFloat = attached ? 10 : 14
+        let path = Self.path(b, top: top, bottom: 14)
+        shape.frame = b
+        shape.path = path
+        border.frame = b
+        border.path = path
+        // Input row: 22 pt in, icon 22, 14 apart, the field 30 tall, the info glyph at the end.
+        let fh = Self.fieldHeight
+        let icon = leadingIcon.frame.size
+        leadingIcon.frame = NSRect(x: 22 + (22 - icon.width) / 2, y: (fh - icon.height) / 2, width: icon.width, height: icon.height)
+        var right = b.width - 22
+        if !info.isHidden {
+            info.frame = NSRect(x: right - 18, y: (fh - 18) / 2, width: 18, height: 18)
+            right -= 18 + 14
+        }
+        let x: CGFloat = 22 + 22 + 14
+        text.field.frame = NSRect(x: x - 1.5, y: (fh - 30) / 2 + 2, width: max(0, right - x), height: 30)
+        divider.frame = NSRect(x: 16, y: fh, width: max(0, b.width - 32), height: 1)
+        var y: CGFloat = fh + 10
+        for r in rows where !r.isHidden {
+            r.frame = NSRect(x: 10, y: y, width: b.width - 20, height: Self.rowHeight)
+            y += Self.rowHeight + 2
+        }
+    }
+
+    /// UnevenRoundedRectangle: smaller top corners while the bar hangs from the toolbar.
+    private static func path(_ r: CGRect, top: CGFloat, bottom: CGFloat) -> CGPath {
+        let p = CGMutablePath()
+        // Flipped view: minY is the top edge.
+        p.move(to: CGPoint(x: r.minX + top, y: r.minY))
+        p.addLine(to: CGPoint(x: r.maxX - top, y: r.minY))
+        p.addArc(tangent1End: CGPoint(x: r.maxX, y: r.minY), tangent2End: CGPoint(x: r.maxX, y: r.minY + top), radius: top)
+        p.addLine(to: CGPoint(x: r.maxX, y: r.maxY - bottom))
+        p.addArc(tangent1End: CGPoint(x: r.maxX, y: r.maxY), tangent2End: CGPoint(x: r.maxX - bottom, y: r.maxY), radius: bottom)
+        p.addLine(to: CGPoint(x: r.minX + bottom, y: r.maxY))
+        p.addArc(tangent1End: CGPoint(x: r.minX, y: r.maxY), tangent2End: CGPoint(x: r.minX, y: r.maxY - bottom), radius: bottom)
+        p.addLine(to: CGPoint(x: r.minX, y: r.minY + top))
+        p.addArc(tangent1End: CGPoint(x: r.minX, y: r.minY), tangent2End: CGPoint(x: r.minX + top, y: r.minY), radius: top)
+        p.closeSubpath()
+        return p
     }
 }
 
-struct SuggestionRow: View {
-    let suggestion: Suggestion
-    let selected: Bool
-    let highlight: Color
-    let focusedSpaceID: UUID?
-    let spaceName: (UUID) -> String
-    let queryEmpty: Bool
-    let dark: Bool
-    @Environment(FaviconCache.self) private var favicons
+/// One suggestion: icon, "Title — detail", and "Switch to Tab" + arrow for open tabs.
+final class CommandBarRowView: NSView {
+    var onHover: () -> Void = {}
+    var onClick: () -> Void = {}
+    private let iconBox = NSView()
+    private let icon = NSImageView()
+    private let emoji = NSTextField.sidebarLabel(size: 16)
+    private let label = NSTextField.sidebarLabel(size: 15)
+    private let trailing = NSTextField.sidebarLabel(size: 14, weight: .medium)
+    private let arrowBox = NSView()
+    private let arrow = NSImageView()
+    private var shown: (Suggestion, NSImage?, Bool, NSColor, String?, Bool, Bool)?
 
-    private var isTab: Bool { suggestion.tabID != nil }
-    private var otherSpace: String? {
-        guard isTab, let sid = suggestion.spaceID, sid != focusedSpaceID else { return nil }
-        return spaceName(sid)
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = 10
+        layer?.cornerCurve = .continuous
+        iconBox.wantsLayer = true
+        iconBox.layer?.cornerRadius = 6
+        iconBox.layer?.cornerCurve = .continuous
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        arrowBox.wantsLayer = true
+        arrowBox.layer?.cornerRadius = 6
+        arrowBox.layer?.cornerCurve = .continuous
+        arrow.image = SidebarSymbols.image("arrow.right", size: 12, weight: .bold)
+        arrow.imageScaling = .scaleNone
+        label.lineBreakMode = .byTruncatingMiddle
+        trailing.textColor = .secondaryLabelColor
+        for v in [iconBox, icon, emoji, label, trailing, arrowBox, arrow] as [NSView] { addSubview(v) }
     }
 
-    var body: some View {
-        HStack(spacing: 14) {
-            icon.frame(width: 26, height: 26)
-            (Text(suggestion.title).font(.system(size: 15, weight: .semibold)).foregroundStyle(.primary)
-             + Text(detailText).font(.system(size: 15)).foregroundStyle(.secondary))
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer(minLength: 8)
-            if isTab {
-                Text(otherSpace ?? (queryEmpty ? "" : "Switch to Tab"))
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(.primary.opacity(0.8))
-                    .frame(width: 22, height: 22)
-                    .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.primary.opacity(0.1)))
-            } else if let t = suggestion.trailing {
-                Text(t).font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary)
-            }
-        }
-        .padding(.horizontal, 14)
-        .frame(height: CommandBarView.rowHeight)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(selected ? highlight : .clear))
-        .contentShape(Rectangle())
-    }
+    required init?(coder: NSCoder) { fatalError() }
 
-    private var detailText: String {
-        switch suggestion.kind {
-        case .switchToTab, .search, .command, .switchSpace, .moveToSpace, .moveToFolder: return ""
-        case .archived: return suggestion.subtitle.isEmpty ? "" : " — \(suggestion.subtitle)"
-        default:
-            guard let url = suggestion.url else { return "" }
-            let human = SuggestionEngine.humanURL(url)
-            return human.lowercased() == suggestion.title.lowercased() ? "" : " — \(human)"
-        }
-    }
+    override var isFlipped: Bool { true }
 
-    @ViewBuilder private var icon: some View {
-        if let key = suggestion.faviconKey, let img = favicons.image(forKey: key) {
-            Image(nsImage: img).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
-                .frame(width: 18, height: 18)
-                .padding(4)
-                .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(dark ? Color.white.opacity(0.14) : Color.black.opacity(0.06)))
-        } else if case .switchSpace = suggestion.kind, let t = suggestion.trailing {
-            Text(t).font(.system(size: 16))
+    func show(_ s: Suggestion, icon image: NSImage?, selected: Bool, highlight: NSColor, otherSpace: String?, queryEmpty: Bool, dark: Bool) {
+        if let o = shown, o.0 == s, o.1 === image, o.2 == selected, o.3 == highlight, o.4 == otherSpace, o.5 == queryEmpty, o.6 == dark { return }
+        let sameContent = shown.map { $0.0 == s && $0.1 === image && $0.4 == otherSpace && $0.5 == queryEmpty && $0.6 == dark } ?? false
+        shown = (s, image, selected, highlight, otherSpace, queryEmpty, dark)
+        layer?.backgroundColor = (selected ? highlight : .clear).cgColor
+        guard !sameContent else { return }
+        if let image {
+            icon.isHidden = false
+            emoji.isHidden = true
+            iconBox.isHidden = false
+            icon.image = image
+            icon.imageScaling = .scaleProportionallyUpOrDown
+            icon.contentTintColor = nil
+            iconBox.layer?.backgroundColor = (dark ? NSColor.white.withAlphaComponent(0.14) : NSColor.black.withAlphaComponent(0.06)).cgColor
+        } else if case .switchSpace = s.kind, let t = s.trailing {
+            icon.isHidden = true
+            iconBox.isHidden = true
+            emoji.isHidden = false
+            emoji.stringValue = t
         } else {
-            Image(systemName: suggestion.symbol ?? "globe")
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(.secondary)
+            iconBox.isHidden = true
+            emoji.isHidden = true
+            icon.isHidden = false
+            icon.image = SidebarSymbols.image(s.symbol ?? "globe", size: 15, weight: .medium)
+            icon.imageScaling = .scaleNone
+            icon.contentTintColor = .secondaryLabelColor
         }
+        let t = NSMutableAttributedString(string: s.title, attributes: [.font: NSFont.systemFont(ofSize: 15, weight: .semibold), .foregroundColor: NSColor.labelColor])
+        t.append(NSAttributedString(string: Self.detail(s), attributes: [.font: NSFont.systemFont(ofSize: 15), .foregroundColor: NSColor.secondaryLabelColor]))
+        label.attributedStringValue = t
+        let isTab = s.tabID != nil
+        if isTab {
+            trailing.font = .systemFont(ofSize: 14, weight: .medium)
+            trailing.stringValue = otherSpace ?? (queryEmpty ? "" : "Switch to Tab")
+        } else {
+            trailing.font = .systemFont(ofSize: 13, weight: .medium)
+            trailing.stringValue = s.trailing ?? ""
+        }
+        arrowBox.isHidden = !isTab
+        arrow.isHidden = !isTab
+        arrow.contentTintColor = NSColor.labelColor.withAlphaComponent(0.8)
+        arrowBox.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.1).cgColor
+        needsLayout = true
+    }
+
+    private static func detail(_ s: Suggestion) -> String {
+        switch s.kind {
+        case .switchToTab, .search, .command, .switchSpace, .moveToSpace, .moveToFolder: return ""
+        case .archived: return s.subtitle.isEmpty ? "" : " — \(s.subtitle)"
+        default:
+            guard let url = s.url else { return "" }
+            let human = SuggestionEngine.humanURL(url)
+            return human.lowercased() == s.title.lowercased() ? "" : " — \(human)"
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        let h = bounds.height
+        // padding 14, icon 26, 14 apart, the title, Spacer(min 8), trailing text, 14, arrow box 22.
+        iconBox.frame = NSRect(x: 14, y: (h - 26) / 2, width: 26, height: 26)
+        if iconBox.isHidden {
+            icon.frame = iconBox.frame
+        } else {
+            icon.frame = iconBox.frame.insetBy(dx: 4, dy: 4)
+        }
+        let es = emoji.intrinsicContentSize
+        emoji.frame = NSRect(x: 14 + (26 - es.width) / 2, y: (h - es.height) / 2, width: es.width, height: es.height)
+        var right = bounds.width - 14
+        if !arrowBox.isHidden {
+            arrowBox.frame = NSRect(x: right - 22, y: (h - 22) / 2, width: 22, height: 22)
+            arrow.frame = arrowBox.frame
+            right -= 22 + 14
+        }
+        if !trailing.stringValue.isEmpty {
+            let tw = ceil(trailing.attributedStringValue.size().width)
+            let th = trailing.intrinsicContentSize.height
+            trailing.frame = NSRect(x: right - tw - SidebarText.inset, y: (h - th) / 2, width: tw + 2 * SidebarText.inset, height: th)
+            right -= tw + 14
+        } else if !arrowBox.isHidden {
+            // The empty label still takes its spacing in the HStack.
+            right -= 14
+        }
+        let x: CGFloat = 14 + 26 + 14
+        let ls = label.intrinsicContentSize
+        label.frame = NSRect(x: x - SidebarText.inset, y: (h - ls.height) / 2, width: max(0, right - 8 - x) + 2 * SidebarText.inset, height: ls.height)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for t in trackingAreas where t.owner === self { removeTrackingArea(t) }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self, userInfo: nil))
+    }
+
+    override func mouseEntered(with event: NSEvent) { onHover() }
+    override func mouseMoved(with event: NSEvent) { onHover() }
+    override func mouseDown(with event: NSEvent) {}
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick() }
     }
 }

@@ -66,7 +66,10 @@ final class SidebarUIState {
     var splitDropTarget: SplitDropTarget?
     /// Live space swipe, in pages away from the focused space (+ toward the next one);
     /// 0 at rest. The sidebar pages and the window tint follow it (Dia: PageSwipeController).
-    var spaceSwipe: CGFloat = 0
+    var spaceSwipe: CGFloat = 0 { didSet { for f in spaceSwipeObservers { f() } } }
+    /// The space pager and the window tint follow the swipe directly in AppKit, not through SwiftUI.
+    @ObservationIgnored private var spaceSwipeObservers: [() -> Void] = []
+    func observeSpaceSwipe(_ f: @escaping () -> Void) { spaceSwipeObservers.append(f) }
     /// Release velocity for the settle spring, relative to the distance left to travel.
     var spaceSettleVelocity: Double = 0
     /// The strip is springing onto its page (after a swipe or a space change); it takes no
@@ -100,8 +103,6 @@ final class SidebarUIState {
     var selectionAnchor: UUID?
     /// A sidebar drag over the space's list and what releasing it would do.
     var listDrop: SidebarListDrop?
-    /// Row and section frames in the list's coordinate space, for hit-testing drags.
-    @ObservationIgnored var rowFrames: [UUID: CGRect] = [:]
     /// Dia's nav-bar status: a short confirmation shown in place of the URL
     /// ("Copied Current URL"), then the URL comes back.
     var toolbarStatus: ToolbarStatus?

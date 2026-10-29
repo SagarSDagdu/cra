@@ -1,13 +1,32 @@
 import AppKit
-import SwiftUI
 
-/// NSTextField wrapper with Chrome/Arc-style inline completion: the
+/// The command bar's NSTextField with Chrome/Arc-style inline completion: the
 /// completed suffix is inserted selected, so typing replaces it and
-/// Backspace removes it without re-completing.
-struct CommandTextField: NSViewRepresentable {
+/// Backspace removes it without re-completing. CommandBarView calls `update`
+/// whenever the controller changes.
+@MainActor
+final class CommandTextField {
     let controller: CommandBarController
+    let field: NSTextField
+    private let coordinator: Coordinator
 
-    func makeNSView(context: Context) -> NSTextField {
+    init(controller: CommandBarController) {
+        self.controller = controller
+        coordinator = Coordinator(controller: controller)
+        field = Self.makeField(controller: controller, coordinator: coordinator)
+    }
+
+    func update() {
+        Self.update(field, controller: controller, coordinator: coordinator)
+        // A completion needs the field's editor, which exists once the field is first responder
+        // (made so on the next turn when the bar opens): apply what is pending again then.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            Self.update(self.field, controller: self.controller, coordinator: self.coordinator)
+        }
+    }
+
+    private static func makeField(controller: CommandBarController, coordinator: Coordinator) -> NSTextField {
         let field = NSTextField(string: controller.fieldText)
         field.isBordered = false
         field.isBezeled = false
@@ -15,22 +34,17 @@ struct CommandTextField: NSViewRepresentable {
         field.focusRingType = .none
         field.font = .systemFont(ofSize: 20, weight: .regular)
         field.placeholderString = controller.placeholder
-        field.delegate = context.coordinator
+        field.delegate = coordinator
         field.lineBreakMode = .byTruncatingTail
         field.cell?.usesSingleLineMode = true
         field.cell?.wraps = false
         field.cell?.isScrollable = true
-        context.coordinator.field = field
-        DispatchQueue.main.async {
-            field.window?.makeFirstResponder(field)
-            field.currentEditor()?.selectAll(nil)
-        }
+        coordinator.field = field
         return field
     }
 
-    func updateNSView(_ field: NSTextField, context: Context) {
+    private static func update(_ field: NSTextField, controller: CommandBarController, coordinator coord: Coordinator) {
         field.placeholderString = controller.placeholder
-        let coord = context.coordinator
         if coord.appliedVersion != controller.fieldTextVersion {
             coord.appliedVersion = controller.fieldTextVersion
             coord.suppressChange = true
@@ -54,8 +68,6 @@ struct CommandTextField: NSViewRepresentable {
             coord.pendingCompletion = nil
         }
     }
-
-    func makeCoordinator() -> Coordinator { Coordinator(controller: controller) }
 
     @MainActor
     final class Coordinator: NSObject, NSTextFieldDelegate {

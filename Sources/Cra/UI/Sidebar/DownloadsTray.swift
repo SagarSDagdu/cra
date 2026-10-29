@@ -1,5 +1,4 @@
 import AppKit
-import SwiftUI
 
 /// Arc's downloads list: hovering the Library button lists the recent downloads over the
 /// bottom of the sidebar, newest at the bottom, and the tab list behind them fades out.
@@ -27,69 +26,177 @@ extension SidebarUIState {
     }
 }
 
-struct DownloadsTray: View {
-    let palette: SpacePalette
-    @Environment(SidebarUIState.self) private var ui
-    private var history: DownloadHistory { .shared }
+/// The list itself, pinned to the bottom of the tab list's area.
+@MainActor
+final class DownloadsTrayView: NSView {
+    private let ui: SidebarUIState
+    var colors = SidebarColors() { didSet { if colors.isDark != oldValue.isDark { for r in rows { r.colors = colors } } } }
+    private var rows: [DownloadsTrayRowView] = []
+    private var shownOpen = false
+    private var ticker: Timer?
 
-    var body: some View {
-        let entries = history.recent
-        let open = ui.downloadsListOpen
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            VStack(alignment: .leading, spacing: DownloadsTrayMetrics.rowPitch - DownloadsTrayMetrics.thumbnail) {
-                ForEach(Array(entries.enumerated()), id: \.element.id) { i, entry in
-                    let fromBottom = Double(entries.count - 1 - i)
-                    DownloadsTrayRow(entry: entry, palette: palette, now: context.date)
-                        .opacity(open ? 1 : 0)
-                        .offset(y: open ? 0 : 5)
-                        .animation(open ? .easeOut(duration: 0.12).delay(fromBottom * 0.025)
-                                        : .easeIn(duration: 0.05).delay(fromBottom * 0.015), value: open)
-                }
-            }
+    init(ui: SidebarUIState) {
+        self.ui = ui
+        super.init(frame: .zero)
+        wantsLayer = true
+        observe()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isFlipped: Bool { true }
+
+    private func observe() {
+        let (entries, open, _) = withObservationTracking {
+            (DownloadHistory.shared.recent, ui.downloadsListOpen, DownloadHistory.shared.thumbnails.count)
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.observe() }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        .allowsHitTesting(open)
-        .onHover { ui.downloadsListHovered = $0; ui.downloadsHoverChanged() }
-        .offset(y: 2)
+        while rows.count < entries.count {
+            let r = DownloadsTrayRowView()
+            r.colors = colors
+            r.alphaValue = shownOpen ? 1 : 0
+            rows.append(r)
+            addSubview(r)
+        }
+        while rows.count > entries.count { rows.removeLast().removeFromSuperview() }
+        for (r, e) in zip(rows, entries) { r.show(e) }
+        refreshAges()
+        if open != shownOpen { animate(open: open) }
+        // TimelineView(.periodic(by: 1)): the ages tick while the list is up.
+        if open, ticker == nil {
+            ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshAges() }
+            }
+        } else if !open {
+            ticker?.invalidate()
+            ticker = nil
+        }
+        needsLayout = true
+    }
+
+    private func refreshAges() {
+        let now = Date()
+        for r in rows { r.now = now }
+    }
+
+    /// Rows rise 5 pt and fade in bottom first, 25 ms apart; they drop back faster.
+    private func animate(open: Bool) {
+        shownOpen = open
+        let n = rows.count
+        for (i, r) in rows.enumerated() {
+            guard let layer = r.layer else { continue }
+            let fromBottom = Double(n - 1 - i)
+            let delay = open ? fromBottom * 0.025 : fromBottom * 0.015
+            let fromOpacity = layer.presentation()?.opacity ?? layer.opacity
+            let fromShift = (layer.presentation()?.value(forKeyPath: "sublayerTransform.translation.y") as? CGFloat) ?? (open ? 5 : 0)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            r.alphaValue = open ? 1 : 0
+            layer.sublayerTransform = CATransform3DMakeTranslation(0, open ? 0 : 5, 0)
+            CATransaction.commit()
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = fromOpacity
+            fade.toValue = open ? 1 : 0
+            let move = CABasicAnimation(keyPath: "sublayerTransform.translation.y")
+            move.fromValue = fromShift
+            move.toValue = open ? 0 : 5
+            let group = CAAnimationGroup()
+            group.animations = [fade, move]
+            group.duration = open ? 0.12 : 0.05
+            group.beginTime = layer.convertTime(CACurrentMediaTime(), from: nil) + delay
+            group.fillMode = .backwards
+            group.timingFunction = CAMediaTimingFunction(name: open ? .easeOut : .easeIn)
+            layer.add(group, forKey: "openClose")
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        // VStack spacing 16 between 40 pt rows, 2 pt lower than the area (.offset(y: 2)).
+        for (i, r) in rows.enumerated() {
+            r.frame = NSRect(x: 0, y: 2 + CGFloat(i) * DownloadsTrayMetrics.rowPitch, width: bounds.width, height: DownloadsTrayMetrics.thumbnail)
+        }
+    }
+
+    // MARK: Pointer
+
+    override func hitTest(_ point: NSPoint) -> NSView? { shownOpen ? super.hitTest(point) : nil }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for t in trackingAreas where t.owner === self { removeTrackingArea(t) }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self, userInfo: nil))
+    }
+
+    override func mouseEntered(with event: NSEvent) { setHovered(ui.downloadsListOpen) }
+    override func mouseMoved(with event: NSEvent) { setHovered(ui.downloadsListOpen) }
+    override func mouseExited(with event: NSEvent) { setHovered(false) }
+
+    private func setHovered(_ h: Bool) {
+        guard ui.downloadsListHovered != h else { return }
+        ui.downloadsListHovered = h
+        ui.downloadsHoverChanged()
     }
 }
 
-private struct DownloadsTrayRow: View {
-    let entry: DownloadHistory.Entry
-    let palette: SpacePalette
-    let now: Date
-    private var ink: Color { palette.isDark ? .white : .black }
+private final class DownloadsTrayRowView: NSView, NSDraggingSource {
+    var colors = SidebarColors() { didSet { refresh() } }
+    private var entry: DownloadHistory.Entry?
+    var now = Date() { didSet { refreshAge() } }
+    private let thumb = NSView()
+    private let name = NSTextField.sidebarLabel(size: 14)
+    private let age = NSTextField.sidebarLabel(size: 12)
+    private var downAt: NSPoint?
 
-    var body: some View {
-        Button { NSWorkspace.shared.open(URL(fileURLWithPath: entry.path)) } label: {
-            HStack(spacing: 13) {
-                Group {
-                    if let image = DownloadHistory.shared.thumbnail(for: entry.path) {
-                        Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
-                    } else {
-                        Color.white.opacity(0.9)
-                    }
-                }
-                .frame(width: DownloadsTrayMetrics.thumbnail, height: DownloadsTrayMetrics.thumbnail)
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                VStack(alignment: .leading, spacing: -1) {
-                    Text((entry.path as NSString).lastPathComponent)
-                        .font(.system(size: 14))
-                        .foregroundStyle(ink.opacity(0.82))
-                        .lineLimit(1).truncationMode(.middle)
-                    Text(Self.age.localizedString(for: min(entry.date, now), relativeTo: now))
-                        .font(.system(size: 12))
-                        .foregroundStyle(ink.opacity(0.5))
-                }
-                .padding(.top, 1)
-            }
-            .padding(.leading, 8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        thumb.wantsLayer = true
+        thumb.layer?.cornerRadius = 6
+        thumb.layer?.cornerCurve = .continuous
+        thumb.layer?.masksToBounds = true
+        thumb.layer?.contentsGravity = .resizeAspectFill
+        addSubview(thumb)
+        name.lineBreakMode = .byTruncatingMiddle
+        addSubview(name)
+        addSubview(age)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isFlipped: Bool { true }
+
+    /// Also when only a thumbnail arrived.
+    func show(_ e: DownloadHistory.Entry) {
+        entry = e
+        refresh()
+    }
+
+    private func refresh() {
+        let ink: NSColor = colors.isDark ? .white : .black
+        name.textColor = ink.withAlphaComponent(0.82)
+        age.textColor = ink.withAlphaComponent(0.5)
+        guard let entry else { return }
+        name.stringValue = (entry.path as NSString).lastPathComponent
+        if let image = DownloadHistory.shared.thumbnail(for: entry.path) {
+            // .aspectRatio(contentMode: .fill): the layer fills and crops.
+            let scale = window?.backingScaleFactor ?? 2
+            var rect = NSRect(x: 0, y: 0, width: DownloadsTrayMetrics.thumbnail, height: DownloadsTrayMetrics.thumbnail)
+            thumb.layer?.contents = image.cgImage(forProposedRect: &rect, context: nil, hints: [.ctm: AffineTransform(scale: scale)])
+            thumb.layer?.contentsScale = scale
+            thumb.layer?.backgroundColor = nil
+        } else {
+            thumb.layer?.contents = nil
+            thumb.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.9).cgColor
         }
-        .buttonStyle(.plain)
-        .onDrag { NSItemProvider(contentsOf: URL(fileURLWithPath: entry.path)) ?? NSItemProvider() }
+        refreshAge()
+    }
+
+    private func refreshAge() {
+        guard let entry else { return }
+        let s = Self.age.localizedString(for: min(entry.date, now), relativeTo: now)
+        if age.stringValue != s { age.stringValue = s }
     }
 
     /// "54 seconds ago", "6 minutes ago".
@@ -98,29 +205,42 @@ private struct DownloadsTrayRow: View {
         f.unitsStyle = .full
         return f
     }()
-}
 
-/// Hides the tab list under the downloads list and fades it back in above it. One
-/// gradient sized by a GeometryReader: fixed-height layers here raised the sidebar's
-/// minimum height and the window grew to fit them.
-struct DownloadsTrayMask: View {
-    let rows: Int
-    let open: Bool
+    override func layout() {
+        super.layout()
+        let t = DownloadsTrayMetrics.thumbnail
+        thumb.frame = NSRect(x: 8, y: 0, width: t, height: t)
+        // HStack(spacing: 13); VStack(spacing: -1) of 17 + 15 with 1 pt on top, centred.
+        let x = 8 + t + 13, w = max(0, bounds.width - x)
+        let top = (t - 32) / 2 + 1
+        name.frame = NSRect(x: x - SidebarText.inset, y: top, width: w + 2 * SidebarText.inset, height: 17)
+        age.frame = NSRect(x: x - SidebarText.inset, y: top + 16, width: w + 2 * SidebarText.inset, height: 15)
+    }
 
-    var body: some View {
-        ZStack {
-            Color.black.opacity(open ? 0 : 1)
-            GeometryReader { g in
-                let h = max(g.size.height, 1)
-                let clearTop = max(0, h - DownloadsTrayMetrics.listHeight(rows: rows) - 1)
-                let fadeTop = max(0, clearTop - DownloadsTrayMetrics.fade)
-                LinearGradient(stops: [.init(color: .black, location: fadeTop / h),
-                                       .init(color: .clear, location: clearTop / h),
-                                       .init(color: .clear, location: 1)],
-                               startPoint: .top, endPoint: .bottom)
-            }
-            .opacity(open ? 1 : 0)
-        }
-        .animation(open ? .easeOut(duration: 0.18) : .easeOut(duration: 0.13).delay(0.08), value: open)
+    // MARK: Click and drag
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func mouseDown(with event: NSEvent) { downAt = event.locationInWindow }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let start = downAt, let entry else { return }
+        let p = event.locationInWindow
+        guard hypot(p.x - start.x, p.y - start.y) > 3 else { return }
+        downAt = nil
+        let item = NSDraggingItem(pasteboardWriter: URL(fileURLWithPath: entry.path) as NSURL)
+        let image = DownloadHistory.shared.thumbnail(for: entry.path) ?? NSWorkspace.shared.icon(forFile: entry.path)
+        item.setDraggingFrame(thumb.frame, contents: image)
+        beginDraggingSession(with: [item], event: event, source: self)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer { downAt = nil }
+        guard downAt != nil, let entry, bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: entry.path))
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        context == .outsideApplication ? [.copy, .generic] : .copy
     }
 }

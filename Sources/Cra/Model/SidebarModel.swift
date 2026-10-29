@@ -393,6 +393,16 @@ enum SearchEngine: String, Codable, CaseIterable, Identifiable {
         case .kagi: return "https://kagi.com/search?q=\(q)"
         }
     }
+    /// Each engine's OpenSearch suggest endpoint, for the command bar's search suggestions.
+    func suggestURL(_ query: String) -> URL? {
+        guard let q = query.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else { return nil }
+        switch self {
+        case .google: return URL(string: "https://www.google.com/complete/search?client=chrome&ie=utf-8&oe=utf-8&q=\(q)")
+        case .duckduckgo: return URL(string: "https://duckduckgo.com/ac/?type=list&q=\(q)")
+        case .bing: return URL(string: "https://api.bing.com/osjson.aspx?query=\(q)")
+        case .kagi: return URL(string: "https://kagi.com/api/autosuggest?q=\(q)")
+        }
+    }
 }
 
 struct AppSettings: Codable, Equatable {
@@ -441,6 +451,9 @@ struct AppSettings: Codable, Equatable {
     var tabSleep: TabSleepThreshold = .oneHour
     /// Privacy ▸ "Always use secure connections": Chrome's HTTPS-Only Mode.
     var httpsOnly: Bool = false
+    /// Arc's searchSuggestEnabled: the command bar asks the search engine for suggestions
+    /// as you type and fills its rows with them.
+    var searchSuggestions: Bool = true
 
     init() {}
 
@@ -542,6 +555,7 @@ extension AppSettings {
         tabSleepEnabled = try c.decodeIfPresent(Bool.self, forKey: .tabSleepEnabled) ?? false
         tabSleep = (try? c.decodeIfPresent(TabSleepThreshold.self, forKey: .tabSleep)) ?? .oneHour
         httpsOnly = try c.decodeIfPresent(Bool.self, forKey: .httpsOnly) ?? false
+        searchSuggestions = try c.decodeIfPresent(Bool.self, forKey: .searchSuggestions) ?? true
     }
 }
 

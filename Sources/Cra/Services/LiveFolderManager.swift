@@ -30,6 +30,11 @@ final class LiveFolderManager {
     static let triggerDelays: [TimeInterval] = [5, 45]
     /// Arc's requestedTooSoon: clicks on refresh closer together than this do nothing.
     static let minimumInterval: TimeInterval = 10
+    /// A folder that failed or waits for a sign-in tries again this often (a Mac waking up has no
+    /// network for a moment; an SSO session renews as soon as a GitHub page is opened).
+    nonisolated static let retryInterval: TimeInterval = 30
+    /// A GitHub page loaded while a folder waits for a sign-in: refresh once the page has settled.
+    @ObservationIgnored private var signInCheck: DispatchWorkItem?
     /// CRA_LIVE_FOLDER_DEBUG=1 writes every GitHub response to <data dir>/live-folder-debug/.
     private static let debug = ProcessInfo.processInfo.environment["CRA_LIVE_FOLDER_DEBUG"] == "1"
 
@@ -55,8 +60,14 @@ final class LiveFolderManager {
         guard NSApp.isActive else { return }
         for f in store?.liveFolders ?? [] {
             let last = f.liveFolder?.lastFetch ?? .distantPast
-            if Date().timeIntervalSince(last) >= age { refresh(f.id) }
+            let failing = f.liveFolder.map { $0.lastError != nil || Self.needsSignIn($0) } ?? false
+            if Date().timeIntervalSince(last) >= (failing ? min(age, Self.retryInterval) : age) { refresh(f.id) }
         }
+    }
+
+    /// GitHub asked for a sign-in: to github.com, or SSO for an organization whose pull requests it held back.
+    nonisolated static func needsSignIn(_ live: LiveFolderData) -> Bool {
+        live.lastError == .notSignedIn || (live.lastError == nil && !live.ssoOrganizations.isEmpty)
     }
 
     /// `force` skips the gap between refreshes: the folder's filters just changed.
@@ -98,7 +109,17 @@ final class LiveFolderManager {
         let old = lastURL[tab]
         lastURL[tab] = url
         if lastURL.count > 500 { lastURL = [tab: url] }
-        guard old != url, let pr = GitHubLiveClient.pullPath(url), !(store?.liveFolders.isEmpty ?? true) else { return }
+        guard old != url, let store, !store.liveFolders.isEmpty else { return }
+        let folders = store.liveFolders
+        guard let page = URL(string: url), page.host == "github.com" else { return }
+        // GitHub sends a signed-out Enterprise Managed User to /enterprises/<slug>/sso (JYSK, 29 Oct 2026).
+        let parts = page.path.split(separator: "/")
+        if parts.count == 3, parts[0] == "enterprises", parts[2] == "sso" {
+            let slug = String(parts[1])
+            for f in folders where f.liveFolder?.enterprise != slug { store.updateLiveFolder(f.id) { $0.enterprise = slug } }
+        }
+        if folders.contains(where: { $0.liveFolder.map(Self.needsSignIn) ?? false }) { checkSignIn() }
+        guard let pr = GitHubLiveClient.pullPath(url) else { return }
         let oldPath = old.flatMap { URL(string: $0)?.path } ?? ""
         let created = oldPath.hasPrefix("/\(pr.owner)/\(pr.repo)/compare")
         let reviewed = url.contains("#pullrequestreview-") && !(old ?? "").contains("#pullrequestreview-")
@@ -108,6 +129,21 @@ final class LiveFolderManager {
                 for f in self?.store?.liveFolders ?? [] { self?.refresh(f.id, force: true) }
             }
         }
+    }
+
+    /// Signing in ends on a GitHub page, and so does an SSO session that renews by itself (an
+    /// identity provider that signs in without asking, like JYSK's ADFS): the folder tries again a
+    /// moment after GitHub pages stop loading, instead of waiting for the next retry.
+    private func checkSignIn() {
+        signInCheck?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            for f in self?.store?.liveFolders ?? [] where f.liveFolder.map(Self.needsSignIn) ?? false {
+                let last = f.liveFolder?.lastFetch ?? .distantPast
+                if Date().timeIntervalSince(last) >= Self.minimumInterval { self?.refresh(f.id, force: true) }
+            }
+        }
+        signInCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
     }
 
     /// One search: the pulls page first (what Arc and Dia read), then GitHub's search page

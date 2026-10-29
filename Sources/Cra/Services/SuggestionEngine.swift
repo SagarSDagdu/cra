@@ -31,6 +31,9 @@ struct Suggestion: Identifiable, Equatable {
     let trailing: String?
     var score: Double
     var spaceID: UUID? = nil
+    /// Matched only as scattered letters ("pota" in "grænselandsPOrTAl"): listed after the
+    /// search engine's suggestions, which Arc shows instead of such matches.
+    var loose = false
     var tabID: UUID? {
         if case .switchToTab(let id) = kind { return id }
         return nil
@@ -51,6 +54,10 @@ struct SuggestionResult {
 final class SuggestionEngine {
     unowned let store: SidebarStore
     unowned let bindings: KeyBindingRegistry
+    private let remote = SearchSuggestions()
+    /// Arc's command bar always lists five rows; search suggestions make up what the
+    /// tabs, history and commands don't fill, so the bar keeps its height while you type.
+    static let maxRows = 5
 
     init(store: SidebarStore, bindings: KeyBindingRegistry) {
         self.store = store
@@ -64,7 +71,7 @@ final class SuggestionEngine {
         let q = query.lowercased()
         var result = SuggestionResult(query: query)
         if q.isEmpty {
-            result.items = recentSuggestions(excluding: currentTabID)
+            result.items = Array(recentSuggestions(excluding: currentTabID).prefix(Self.maxRows))
             return result
         }
 
@@ -97,7 +104,13 @@ final class SuggestionEngine {
         } else {
             items.insert(typed, at: 0)
         }
-        result.items = Array(items.prefix(8))
+        if store.settings.searchSuggestions {
+            let at = items.firstIndex(where: \.loose) ?? items.count
+            if at < Self.maxRows {
+                items.insert(contentsOf: searchSuggestions(query, after: items).prefix(Self.maxRows - at), at: at)
+            }
+        }
+        result.items = Array(items.prefix(Self.maxRows))
         result.inlineCompletion = completion?.text
         return result
     }
@@ -145,7 +158,35 @@ final class SuggestionEngine {
     }
 
     /// The command bar opened or closed: what it searches may have changed since.
-    func resetIndex() { index = nil }
+    func resetIndex() {
+        index = nil
+        remote.reset()
+    }
+
+    /// Asks the search engine about `rawQuery`; `done` runs when its answer is in, to list again.
+    func fetchSearchSuggestions(for rawQuery: String, done: @escaping @MainActor () -> Void) {
+        let query = rawQuery.trimmingCharacters(in: .whitespaces)
+        guard store.settings.searchSuggestions, !query.isEmpty, !query.contains("://") else { return }
+        remote.fetch(query, engine: store.settings.searchEngine, done: done)
+    }
+
+    /// The engine's suggestions not already listed, as search rows (or site rows).
+    private func searchSuggestions(_ query: String, after items: [Suggestion]) -> [Suggestion] {
+        let engine = store.settings.searchEngine
+        let titles = Set(items.map { $0.title.lowercased() })
+        let urls = Set(items.compactMap(\.url))
+        return remote.items(for: query, engine: engine).compactMap { r in
+            let t = r.text.lowercased()
+            guard t != query.lowercased(), !titles.contains(t) else { return nil }
+            guard let url = r.url else {
+                return Suggestion(id: "sugg:\(t)", kind: .search, title: r.text, subtitle: "", url: engine.searchURL(r.text),
+                                  faviconKey: nil, symbol: "magnifyingglass", trailing: nil, score: 0)
+            }
+            guard !urls.contains(url) else { return nil }
+            return Suggestion(id: "sugg:\(url)", kind: .history, title: r.text, subtitle: "", url: url,
+                              faviconKey: FaviconCache.key(for: url), symbol: "globe", trailing: nil, score: 0)
+        }
+    }
 
     // MARK: Typed text
 
@@ -189,6 +230,7 @@ final class SuggestionEngine {
         for (tab, key) in searchIndex.tabs where tab.id != current {
             guard let t = tab.tab else { continue }
             var score = Self.score(q, key)
+            let loose = score < Self.looseBelow && !(tab.title?.lowercased().hasPrefix(q) ?? false)
             if let custom = tab.title?.lowercased(), custom.hasPrefix(q) { score += 40 }
             if score < 30 { continue }
             score += recencyBoost(t.timeLastActiveAt)
@@ -199,22 +241,27 @@ final class SuggestionEngine {
             let pinned = store.isPinned(tab.id)
             out.append(Suggestion(id: "tab:\(tab.id)", kind: .switchToTab(tab.id), title: tab.displayTitle,
                                   subtitle: [spaceName, pinned ? "Pinned" : "", Self.humanURL(t.url)].filter { !$0.isEmpty }.joined(separator: " · "),
-                                  url: t.url, faviconKey: t.faviconKey, symbol: nil, trailing: "Switch to Tab", score: score, spaceID: sid))
+                                  url: t.url, faviconKey: t.faviconKey, symbol: nil, trailing: "Switch to Tab", score: score, spaceID: sid, loose: loose))
         }
         return out
     }
+
+    /// Below this a text score means only scattered letters matched (`fuzzy`).
+    private static let looseBelow = 50.0
 
     private func archiveSuggestions(_ q: String) -> [Suggestion] {
         var out: [Suggestion] = []
         for (entry, key) in searchIndex.archive {
             guard let t = entry.item.tab else { continue }
-            var score = Self.score(q, key) * 0.85
+            let text = Self.score(q, key)
+            var score = text * 0.85
             if score < 30 { continue }
             score += recencyBoost(entry.archivedAt) * 0.5
             let spaceName = entry.sourceSpaceID.flatMap { store.space($0)?.title } ?? ""
             out.append(Suggestion(id: "arch:\(entry.id)", kind: .archived(entry.id), title: entry.item.displayTitle,
                                   subtitle: ["Archived \(Self.relative(entry.archivedAt))", spaceName, Self.humanURL(t.url)].filter { !$0.isEmpty }.joined(separator: " · "),
-                                  url: t.url, faviconKey: t.faviconKey, symbol: nil, trailing: "Restore", score: score))
+                                  url: t.url, faviconKey: t.faviconKey, symbol: nil, trailing: "Restore", score: score,
+                                  loose: text < Self.looseBelow))
         }
         return out
     }
@@ -222,12 +269,13 @@ final class SuggestionEngine {
     private func historySuggestions(_ q: String, openURLs: Set<String>) -> [Suggestion] {
         var out: [Suggestion] = []
         for (h, key) in searchIndex.history where !openURLs.contains(h.url) {
-            var score = Self.score(q, key) * 0.8
+            let text = Self.score(q, key)
+            var score = text * 0.8
             if score < 30 { continue }
             score += min(Double(h.visitCount), 20) * 1.5 + recencyBoost(h.lastVisit) * 0.6
             out.append(Suggestion(id: "hist:\(h.url)", kind: .history, title: h.title.isEmpty ? Self.humanURL(h.url) : h.title,
                                   subtitle: Self.humanURL(h.url), url: h.url, faviconKey: FaviconCache.key(for: h.url),
-                                  symbol: "clock", trailing: nil, score: score))
+                                  symbol: "clock", trailing: nil, score: score, loose: text < Self.looseBelow))
         }
         return out
     }

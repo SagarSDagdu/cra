@@ -22,8 +22,8 @@ final class ShellView: NSView {
     var usesBackdropLayer: Bool { vibrantLight && !vibrantDark && backdropLayer != nil }
     /// Lifts the dark blur toward Arc's mid-grey base before the gradient goes on.
     let vibrancyLift = NSView()
-    let backgroundHost: NSHostingView<SpaceBackground>
-    let sidebarHost: SidebarHostingView
+    let backgroundHost: NSView
+    let sidebarHost: NSView
     let resizeHandle = ResizeHandleView()
     /// The content area (card minus nothing): holds the pane cards and handles.
     let contentContainer = NSView()
@@ -53,7 +53,7 @@ final class ShellView: NSView {
     var onPaneResizeEnded: (([UUID: CGFloat]) -> Void)?
     var onPaneResizeBegan: (() -> Void)?
     /// Builds a pane's toolbar (the window controller owns the environment).
-    var makeToolbar: ((UUID?) -> AnyView)?
+    var makeToolbar: ((UUID?) -> NSView)?
     /// Where the status bubble, toasts and find bar live (the content container, or an
     /// overlay panel's content view when pages are separate windows).
     private(set) var overlayParent: NSView
@@ -61,10 +61,11 @@ final class ShellView: NSView {
     private var animatingFrames = false
     /// Set while panes animate open/closed; layout() keeps their frames.
     private var animatingPanes = false
-    let placeholderHost: NSHostingView<AnyView>
-    let statusHost: NSHostingView<AnyView>
-    let toastHost: NSHostingView<AnyView>
-    let findHost: NSHostingView<AnyView>
+    /// Arc's faint card over the gradient while no tab is selected.
+    let placeholderHost = NSView()
+    let statusHost: NSView
+    let toastHost: NSView
+    let findHost: NSView
 
     /// Stand-in pane id for the no-tab state (toolbar on the gradient, no card).
     static let noTabID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
@@ -140,13 +141,12 @@ final class ShellView: NSView {
     var toastCount = 0
     private var trackingArea: NSTrackingArea?
 
-    init(frame: NSRect, background: SpaceBackground, sidebar: AnyView, toolbar: AnyView, placeholder: AnyView, status: AnyView, toasts: AnyView, find: AnyView) {
-        backgroundHost = NSHostingView(rootView: background)
-        sidebarHost = SidebarHostingView(rootView: sidebar)
-        placeholderHost = NSHostingView(rootView: placeholder)
-        statusHost = NSHostingView(rootView: status)
-        toastHost = NSHostingView(rootView: toasts)
-        findHost = NSHostingView(rootView: find)
+    init(frame: NSRect, background: NSView, sidebar: NSView, toolbar: NSView, status: NSView, toasts: NSView, find: NSView) {
+        backgroundHost = background
+        sidebarHost = sidebar
+        statusHost = status
+        toastHost = toasts
+        findHost = find
         overlayParent = contentContainer
         super.init(frame: frame)
         wantsLayer = true
@@ -200,8 +200,7 @@ final class ShellView: NSView {
             self.layoutSubtreeIfNeeded()
         }
         contentContainer.addSubview(placeholderHost)
-        for h in [statusHost, toastHost, findHost] {
-            h.sizingOptions = []
+        for h in [statusHost, toastHost, findHost] as [NSView] {
             h.isHidden = true
             contentContainer.addSubview(h)
         }
@@ -212,7 +211,6 @@ final class ShellView: NSView {
         contentContainer.addSubview(card)
         paneCards = [card]
         paneIDs = []
-        sidebarHost.sizingOptions = []
         sidebarHost.wantsLayer = true
         sidebarHost.layer?.cornerCurve = .continuous
         addSubview(sidebarHost)
@@ -230,8 +228,6 @@ final class ShellView: NSView {
         return paneCards.first
     }
     func card(for id: UUID) -> PaneCardView? { paneCards.first { $0.tabID == id } }
-    /// The focused pane's toolbar (compatibility with the single-pane shell).
-    var toolbarHost: NSHostingView<AnyView>? { focusedCard?.toolbarHost }
     /// The focused pane's page area; the parking view when there is none.
     var webContainer: NSView { (hasTab ? focusedCard?.webArea : nil) ?? parkingView }
 
@@ -259,7 +255,7 @@ final class ShellView: NSView {
         if paneCards.count == 1, shownIDs.count == 1, let card = paneCards.first,
            (card.tabID == ShellView.noTabID) == (shownIDs[0] == ShellView.noTabID) {
             let id = shownIDs[0]
-            card.retarget(to: id, toolbar: makeToolbar?(id == ShellView.noTabID ? nil : id) ?? AnyView(EmptyView()))
+            card.retarget(to: id)
             card.pageColor = pageColors[id]
             card.toolbarColor = toolbarColors[id]
             card.hasPage = id != ShellView.noTabID && !empty.contains(id)
@@ -273,7 +269,7 @@ final class ShellView: NSView {
             if let existing = paneCards.first(where: { $0.tabID == id }) {
                 cards.append(existing)
             } else {
-                let card = PaneCardView(tabID: id, toolbar: makeToolbar?(id == ShellView.noTabID ? nil : id) ?? AnyView(EmptyView()))
+                let card = PaneCardView(tabID: id, toolbar: makeToolbar?(id == ShellView.noTabID ? nil : id) ?? NSView())
                 card.isDark = isDarkTheme
                 card.pageColor = pageColors[id]
                 card.toolbarColor = toolbarColors[id]
@@ -538,6 +534,9 @@ final class ShellView: NSView {
         }
         placeholderHost.frame = cb
         placeholderHost.isHidden = hasTab
+        // The no-tab card is rounded like a page's (GitHub #6: a new window showed a square one).
+        placeholderHost.layer?.cornerRadius = cardCornerRadius
+        placeholderHost.layer?.cornerCurve = .continuous
         parkingView.frame = cb
 
         // DevTools docks inside the focused card, right of its page.
@@ -651,43 +650,6 @@ final class ShellView: NSView {
             self.layoutSubtreeIfNeeded()
         }
     }
-}
-
-/// Hosts the SwiftUI sidebar. The window is movable by its background; while
-/// the pointer is over a draggable row or tile the window controller turns that
-/// off, so a press starts SwiftUI's `.draggable` instead of a window drag.
-final class SidebarHostingView: NSHostingView<AnyView> {
-    /// SwiftUI's hosting view turns down the click that brings an inactive window forward, so
-    /// that click only activates Cra. Controls marked `.actsOnFirstClick()` take it too: after
-    /// an automatic update Cra restarts in the background, and "See What's New" took two clicks.
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-        if let event, FirstClickArea.Anchor.contains(event) { return true }
-        return super.acceptsFirstMouse(for: event)
-    }
-}
-
-/// Marks the area of a sidebar control that acts on the window's activating click.
-private struct FirstClickArea: NSViewRepresentable {
-    func makeNSView(context: Context) -> Anchor { Anchor() }
-    func updateNSView(_ nsView: Anchor, context: Context) {}
-
-    final class Anchor: NSView {
-        private static let all = NSHashTable<Anchor>.weakObjects()
-
-        override init(frame: NSRect) {
-            super.init(frame: frame)
-            Self.all.add(self)
-        }
-        required init?(coder: NSCoder) { fatalError() }
-
-        static func contains(_ event: NSEvent) -> Bool {
-            all.allObjects.contains { $0.window === event.window && $0.bounds.contains($0.convert(event.locationInWindow, from: nil)) }
-        }
-    }
-}
-
-extension View {
-    func actsOnFirstClick() -> some View { background(FirstClickArea().allowsHitTesting(false)) }
 }
 
 /// Thin vertical strip between sidebar and content that drags the width.

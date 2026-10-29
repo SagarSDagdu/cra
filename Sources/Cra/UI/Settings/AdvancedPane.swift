@@ -30,6 +30,7 @@ struct AdvancedPane: View {
                 }
                 .labelsHidden()
                 .fixedSize()
+                SettingsCheckbox(title: "Show search suggestions", isOn: $store.settings.searchSuggestions)
             }
             SettingsFormRow(label: "When quitting Cra:") {
                 SettingsCheckbox(title: "Warn before quitting", isOn: $store.settings.warnBeforeQuitting)

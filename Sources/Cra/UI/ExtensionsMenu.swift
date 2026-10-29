@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 /// The menu bar's Extensions menu, after Dia 1.54 (Extensions, between History and
 /// Window): one row per extension with its 16 pt icon, in plain ordinal name order
@@ -52,6 +53,67 @@ final class ExtensionsMenu: NSObject, NSMenuDelegate, NSMenuItemValidation {
         pin.submenu = pinMenu
         pin.isEnabled = !entries.isEmpty
         menu.addItem(pin)
+
+        let icons = NSMenuItem(title: "Toolbar Icons", action: nil, keyEquivalent: "")
+        let iconsMenu = NSMenu(title: "Toolbar Icons")
+        for e in entries {
+            let item = NSMenuItem(title: e.name, action: nil, keyEquivalent: "")
+            item.image = Self.menuIcon(store.toolbarIcon(for: e))
+            item.submenu = Self.iconMenu(for: e)
+            iconsMenu.addItem(item)
+        }
+        icons.submenu = iconsMenu
+        icons.isEnabled = !entries.isEmpty
+        menu.addItem(icons)
+    }
+
+    /// How one extension's toolbar button draws: its own icon, monochrome, a symbol or an
+    /// image file (GitHub #9). Also the pinned button's context menu.
+    static func iconMenu(for e: ExtensionStore.Entry) -> NSMenu {
+        let store = ExtensionStore.shared
+        let id = e.extensionID
+        let style = store.iconStyle(id)
+        let menu = NSMenu(title: e.name)
+
+        let original = BlockMenuItem(title: "Original Icon") { store.setIconStyle(id, .init()) }
+        original.state = style == .init() ? .on : .off
+        menu.addItem(original)
+        let mono = BlockMenuItem(title: "Monochrome") {
+            var s = store.iconStyle(id)
+            s.monochrome.toggle()
+            s.symbol = nil
+            store.setIconStyle(id, s)
+        }
+        mono.state = style.monochrome && style.symbol == nil ? .on : .off
+        menu.addItem(mono)
+        menu.addItem(.separator())
+
+        let symbols = NSMenuItem(title: "Symbol", action: nil, keyEquivalent: "")
+        let symbolMenu = NSMenu(title: "Symbol")
+        for name in ExtensionStore.iconSymbols {
+            let item = BlockMenuItem(title: name) {
+                var s = store.iconStyle(id)
+                s.symbol = name
+                s.imageFile = nil
+                store.setIconStyle(id, s)
+            }
+            item.image = NSImage(systemSymbolName: name, accessibilityDescription: name)
+            item.state = style.symbol == name ? .on : .off
+            symbolMenu.addItem(item)
+        }
+        symbols.submenu = symbolMenu
+        symbols.state = style.symbol != nil ? .on : .off
+        menu.addItem(symbols)
+        let choose = BlockMenuItem(title: "Choose Image…") {
+            let panel = NSOpenPanel()
+            panel.allowedContentTypes = [.image]
+            panel.message = "Choose an icon for \(e.name)'s toolbar button"
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            do { try store.setCustomIcon(id, from: url) } catch { NSAlert(error: error).runModal() }
+        }
+        choose.state = style.imageFile != nil ? .on : .off
+        menu.addItem(choose)
+        return menu
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {

@@ -15,7 +15,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
     private(set) var browsers: BrowserManager!
     private(set) var shell: ShellView!
     private var commandPanel: CommandBarPanel!
-    private var commandHost: NSHostingView<AnyView>!
+    private var commandHost: CommandBarView!
     let tabSwitcher = TabSwitcher()
     private let tabSwitcherPanel = TabSwitcherPanel()
     private var spaceEditor: NSWindow?
@@ -81,18 +81,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
 
         let store = app.store
         let palette = focusedSpace.theme.palette
-        let env: (AnyView) -> AnyView = { v in
-            AnyView(v.environment(store).environment(self.sidebarUI).environment(app.favicons).environment(\.sidebarActions, self.sidebarActions))
-        }
         shell = ShellView(frame: window.contentView!.bounds,
-                          background: SpaceBackground(palette: palette, pager: SpacePager(store: store, ui: sidebarUI)),
-                          sidebar: env(AnyView(SidebarRootView())),
-                          toolbar: env(AnyView(ContentToolbarView(palette: palette))),
-                          placeholder: AnyView(EmptyContentView(space: focusedSpace)),
-                          status: AnyView(StatusBubble(overlay: overlay)),
-                          toasts: AnyView(ToastStack(overlay: overlay, onDismiss: { [weak self] id in self?.removeToast(id) })),
-                          find: AnyView(FindBar(overlay: overlay, onFind: { [weak self] q, fwd in self?.find(q, forward: fwd) },
-                                                onClose: { [weak self] in self?.hideFindBar() })))
+                          background: SpaceBackgroundView(store: store, ui: sidebarUI),
+                          sidebar: SidebarView(store: store, ui: sidebarUI, actions: sidebarActions, favicons: app.favicons),
+                          toolbar: PaneToolbarView(paneTabID: nil, store: store, ui: sidebarUI, actions: sidebarActions),
+                          status: StatusBubbleView(overlay: overlay),
+                          toasts: ToastStackView(overlay: overlay, onDismiss: { [weak self] id in self?.removeToast(id) }),
+                          find: FindBarView(overlay: overlay, onFind: { [weak self] q, fwd in self?.find(q, forward: fwd) },
+                                            onClose: { [weak self] in self?.hideFindBar() }))
         shell.sidebarWidth = CGFloat(store.prefs.sidebarWidth)
         shell.sidebarVisible = sidebarVisible
         shell.showToolbar = store.settings.showToolbar
@@ -122,9 +118,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         sidebarUI.onPointerOverDraggableChange = { [weak window] over in window?.isMovableByWindowBackground = !over }
         browsers.paneHost = { [weak self] id in self?.shell.card(for: id)?.webArea }
         shell.makeToolbar = { [weak self] id in
-            guard let self else { return AnyView(EmptyView()) }
-            return AnyView(ContentToolbarView(palette: self.focusedSpace.theme.palette, paneTabID: id)
-                .environment(self.store).environment(self.sidebarUI).environment(app.favicons).environment(\.sidebarActions, self.sidebarActions))
+            guard let self else { return NSView() }
+            return PaneToolbarView(paneTabID: id, store: self.store, ui: self.sidebarUI, actions: self.sidebarActions)
         }
         shell.onPaneResizeBegan = { [weak self] in self?.pageWindowsFollowLive = true }
         shell.onPaneResizeEnded = { [weak self] factors in
@@ -136,10 +131,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         }
 
         commandPanel = CommandBarPanel()
-        commandHost = NSHostingView(rootView: AnyView(CommandBarView(controller: commandBar).environment(app.favicons)))
+        commandHost = CommandBarView(controller: commandBar, favicons: app.favicons)
         commandPanel.contentView = commandHost
         commandPanel.delegate = self
-        tabSwitcherPanel.contentView = NSHostingView(rootView: TabSwitcherView(switcher: tabSwitcher).environment(app.favicons))
+        tabSwitcherPanel.contentView = TabSwitcherView(switcher: tabSwitcher, favicons: app.favicons)
         tabSwitcher.onShow = { [weak self] in self?.showTabSwitcherPanel() }
         tabSwitcher.onHide = { [weak self] in self?.hideTabSwitcherPanel() }
         tabSwitcher.onCommit = { [weak self] id in
@@ -238,7 +233,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         }
         // Toolbar buttons are ~34 pt wide and the click lands near the middle: the popup's
         // right edge lines up with the button's (Chrome anchors popups that way).
-        sidebarActions.runExtension = { [weak self] id in self?.runExtensionAction(id, buttonRightX: NSEvent.mouseLocation.x + 17) }
+        sidebarActions.runExtension = { [weak self] id in self?.runExtensionAction(id, buttonRightX: Self.extensionButtonRightX()) }
         sidebarActions.showExtensionsMenu = { [weak self] in self?.showToolbarExtensionsMenu() }
         // Popups from an extension's shortcut or chrome.action.openPopup() hang where the
         // menu bar's do: under the toolbar at the card's right end of the window in use.
@@ -287,8 +282,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         // views show beyond the palette they observe themselves.
         if shownTheme != space.theme {
             shownTheme = space.theme
-            shell.backgroundHost.rootView = SpaceBackground(palette: palette, pager: SpacePager(store: store, ui: sidebarUI))
-            shell.placeholderHost.rootView = AnyView(EmptyContentView(space: space))
+            shell.placeholderHost.wantsLayer = true
+            shell.placeholderHost.layer?.backgroundColor = (palette.isDark ? NSColor.white.withAlphaComponent(0.04) : NSColor.black.withAlphaComponent(0.03)).cgColor
             shell.isDarkTheme = palette.isDark
             window?.appearance = NSAppearance(named: palette.isDark ? .darkAqua : .aqua)
             // Vibrant themes see through to the desktop like Arc; others are opaque.
@@ -317,10 +312,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         let live = panes.filter { !elsewhere.contains($0) }
         let liveFocus = selected.flatMap { elsewhere.contains($0) ? nil : $0 }
         for c in shell.paneCards {
-            if c.toolbarTheme != space.theme {
-                c.toolbarTheme = space.theme
-                c.toolbarHost.rootView = shell.makeToolbar?(c.tabID == ShellView.noTabID ? nil : c.tabID) ?? AnyView(EmptyView())
-            }
             c.showsElsewhere = elsewhere.contains(c.tabID)
             c.elsewhereSnapshot = c.showsElsewhere ? app.runtime(for: c.tabID)?.snapshot : nil
         }
@@ -431,7 +422,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         syncSidebarUI()
         let colors = browsers.runtimes.compactMapValues { $0.backgroundColor.isEmpty ? nil : $0.backgroundColor }
         if colors != shell.pageColors { shell.pageColors = colors }
-        // Same rule as ContentToolbarView.cardHex.
+        // Same rule as PaneToolbarView's bar colour.
         let bars = browsers.runtimes.compactMapValues { rt in HexColor.components(rt.themeColor) != nil ? rt.themeColor : nil }
         if bars != shell.toolbarColors { shell.toolbarColors = bars }
         if tabID == browsers.visibleTabID { window?.title = store.item(tabID)?.displayTitle ?? "Cra" }
@@ -530,7 +521,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
            host.isVisible, !anchor.isHiddenOrHasHiddenAncestor {
             // Aim at the bin's centre (screen coordinates are y-up, the offset is SwiftUI's y-down).
             let glyph = host.convertToScreen(anchor.convert(anchor.bounds, to: nil))
-            let bin = NSPoint(x: glyph.midX + LibraryButton.binOffset.width, y: glyph.midY - LibraryButton.binOffset.height)
+            let bin = NSPoint(x: glyph.midX + LibraryButtonView.binOffset.width, y: glyph.midY - LibraryButtonView.binOffset.height)
             flight = DownloadFlight.launch(over: window, from: NSEvent.mouseLocation, to: bin)
         }
         let id = download.identifier
@@ -1434,6 +1425,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         sidebarUI.spaceSettleVelocity = 0
     }
 
+    /// A space swipe of `steps` trackpad samples `dx` apart, 8 ms apart (cra://debug?swipe=).
+    func debugSpaceSwipe(dx: CGFloat, steps: Int) {
+        beginSpaceSwipe()
+        for i in 1...max(1, steps) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.008 * Double(i)) { [weak self] in
+                self?.trackSpaceSwipe(by: dx, at: ProcessInfo.processInfo.systemUptime)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.008 * Double(steps + 1)) { [weak self] in self?.endSpaceSwipe() }
+    }
+
     private func trackSpaceSwipe(by dx: CGFloat, at time: TimeInterval) {
         let width = max(1, shell.sidebarWidth)
         swipeTravel += dx
@@ -1470,10 +1472,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         if !(0..<store.spaceOrder.count).contains(index + step) { step = 0 }
         let remaining = CGFloat(step) - pages
         sidebarUI.spaceSettleVelocity = abs(remaining) > 0.001 ? Double(max(-4, min(12, velocity / remaining))) : 0
-        // The new space becomes the strip's page at once, with the swipe re-based so nothing moves,
-        // and only the swipe springs home. It moves the strip as a render effect; animating the
-        // page change moved every row's layout on every frame of the settle.
-        let generation = sidebarUI.beginSpaceSettle()
+        // The new space becomes the strip's page at once and the swipe returns to rest; the space
+        // pager and the window tint spring from where they show to the page in Core Animation
+        // (SpacePagerView, PagedGradientView), so a busy main thread doesn't stop the settle.
         if step != 0 {
             var instant = Transaction()
             instant.disablesAnimations = true
@@ -1482,11 +1483,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
                 store.focusSpace(store.spaceOrder[index + step], window: windowID)
             }
         }
-        withAnimation(sidebarUI.spaceSettleAnimation, completionCriteria: .logicallyComplete) {
-            sidebarUI.spaceSwipe = 0
-        } completion: { [weak self] in
-            self?.sidebarUI.endSpaceSettle(generation)
-        }
+        sidebarUI.spaceSwipe = 0
         // Clicks and shortcuts that switch spaces later start from rest.
         DispatchQueue.main.async { [weak self] in self?.sidebarUI.spaceSettleVelocity = 0 }
     }
@@ -1529,6 +1526,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         }
     }
 
+    /// The right edge (screen x) of the pinned-extension button under the pointer, in the
+    /// toolbar or the sidebar's URL pill (also in the floating sidebar's panel), so a popup
+    /// hangs from the same place wherever the button was clicked (GitHub #8).
+    private static func extensionButtonRightX() -> CGFloat {
+        let mouse = NSEvent.mouseLocation
+        let number = NSWindow.windowNumber(at: mouse, belowWindowWithWindowNumber: 0)
+        if let w = NSApp.window(withWindowNumber: number), let content = w.contentView {
+            let p = w.convertPoint(fromScreen: mouse)
+            var v = content.hitTest(content.superview?.convert(p, from: nil) ?? p)
+            while let view = v, !(view is ToolbarGlyphButton) { v = view.superview }
+            if let button = v { return w.convertToScreen(button.convert(button.bounds, to: nil)).maxX }
+        }
+        return mouse.x + 17
+    }
+
     /// No page for Chrome's popup to attach to (no tab open, no DevTools pipe, a page it
     /// cannot reach): the popup page in a popup-sized window under the button, else the
     /// options page, else Chrome's details page for the extension.
@@ -1541,6 +1553,20 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, BrowserM
         } else {
             store.createTab(url: e.optionsPath.map { base + $0 } ?? "chrome://extensions/?id=\(id)", select: true, window: windowID)
         }
+    }
+
+    func debugSiteControls() { showToolbarExtensionsMenu() }
+
+    func debugTabSwitcher() {
+        let theme = focusedSpace.theme
+        let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        tabSwitcher.isDark = dark
+        tabSwitcher.highlight = theme.switcherHighlight(dark: dark)
+        tabSwitcher.palette = theme.palette
+        tabSwitcher.debugOpen(store.recentTabs(in: focusedSpaceID, limit: TabSwitcherMetrics.maxItems).compactMap { id in
+            guard let it = store.item(id), let tab = it.tab else { return nil }
+            return TabSwitcher.Item(id: id, title: it.displayTitle, iconKey: tab.iconKey, snapshot: browsers.runtime(for: id)?.snapshot)
+        })
     }
 
     /// Arc's sliders button (toolbar and URL pill): the Site Control Center, hung under the
@@ -2040,7 +2066,7 @@ final class CraWindow: NSWindow {
     private func isTitleStrip(_ view: NSView?) -> Bool {
         var v = view
         while let current = v {
-            if current is SidebarHostingView { return false }
+            if current is SidebarView { return false }
             if let shell = current as? ShellView, shell.contentFullscreen { return false }
             v = current.superview
         }

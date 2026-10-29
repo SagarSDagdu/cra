@@ -71,6 +71,27 @@ final class CommandBarController {
         if !allowCompletion { result.inlineCompletion = nil }
         selectedIndex = 0
         previewText = nil
+        let typed = newQuery
+        engine.fetchSearchSuggestions(for: typed) { [weak self] in
+            guard let self, self.isOpen, self.query == typed else { return }
+            self.relist()
+        }
+    }
+
+    /// The search engine answered: list again, keeping the selected row where it still is.
+    private func relist() {
+        let selectedID = result.items.indices.contains(selectedIndex) ? result.items[selectedIndex].id : nil
+        result = engine.suggestions(for: query, mode: mode, currentTabID: store.selectedTabID)
+        if !allowCompletion { result.inlineCompletion = nil }
+        if let i = result.items.firstIndex(where: { $0.id == selectedID }) {
+            selectedIndex = i
+        } else {
+            selectedIndex = 0
+            if previewText != nil {
+                previewText = nil
+                previewVersion += 1
+            }
+        }
     }
 
     func moveSelection(by delta: Int) {

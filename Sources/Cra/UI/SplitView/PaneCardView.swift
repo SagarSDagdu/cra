@@ -7,9 +7,8 @@ import SwiftUI
 /// tinted card with nothing but the toolbar.
 final class PaneCardView: NSView {
     private(set) var tabID: UUID
-    let toolbarHost: NSHostingView<AnyView>
-    /// The theme the toolbar's root view was made with: it is rebuilt only when that changes.
-    var toolbarTheme: SpaceTheme?
+    /// The pane's toolbar (PaneToolbarView); it follows the card's tab itself.
+    let toolbarHost: NSView
     /// Where the Chromium view lives (or where the page window is positioned).
     let webArea = NSView()
     /// Hairline under the toolbar when the pane has no page (Arc draws it on the tinted card).
@@ -49,26 +48,25 @@ final class PaneCardView: NSView {
     var showsElsewhere = false { didSet { elsewhereView.isHidden = !showsElsewhere } }
     private let elsewhereView = NSView()
 
-    /// The card shows another tab now (a tab switch with one pane before and after). Building
-    /// a new card made a new SwiftUI toolbar host on every switch.
-    func retarget(to id: UUID, toolbar: AnyView) {
+    /// The card shows another tab now (a tab switch with one pane before and after): the same
+    /// card and toolbar follow it.
+    func retarget(to id: UUID) {
         tabID = id
-        toolbarHost.rootView = toolbar
+        (toolbarHost as? PaneToolbarView)?.paneTabID = id == ShellView.noTabID ? nil : id
         frozenWebBounds = nil
         showsElsewhere = false
         elsewhereSnapshot = nil
         needsLayout = true
     }
 
-    init(tabID: UUID, toolbar: AnyView) {
+    init(tabID: UUID, toolbar: NSView) {
         self.tabID = tabID
-        toolbarHost = NSHostingView(rootView: toolbar)
+        toolbarHost = toolbar
         super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerRadius = cornerRadius
         layer?.cornerCurve = .continuous
         layer?.masksToBounds = true
-        toolbarHost.sizingOptions = []
         webArea.wantsLayer = true
         webArea.autoresizesSubviews = false
         pageBackground.wantsLayer = true

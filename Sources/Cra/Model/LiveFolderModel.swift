@@ -43,6 +43,15 @@ struct LiveFolderData: Codable, Equatable {
     var lastError: LiveFolderError?
     /// Organizations that want a SAML sign-in before their pull requests show up (Arc: needsSSO).
     var ssoOrganizations: [String] = []
+    /// The enterprise whose single sign-on GitHub sent a tab to (Enterprise Managed Users sign in
+    /// there, not at github.com/login): the folder's sign-in button goes there too.
+    var enterprise: String?
+
+    /// Where to sign in again.
+    var signInURL: String {
+        if let enterprise { return "https://github.com/enterprises/\(enterprise)/sso" }
+        return "https://github.com/login?return_to=%2Fpulls"
+    }
 
     init() {}
     init(from decoder: Decoder) throws {
@@ -53,6 +62,7 @@ struct LiveFolderData: Codable, Equatable {
         lastFetch = try c.decodeIfPresent(Date.self, forKey: .lastFetch)
         lastError = try? c.decodeIfPresent(LiveFolderError.self, forKey: .lastError)
         ssoOrganizations = try c.decodeIfPresent([String].self, forKey: .ssoOrganizations) ?? []
+        enterprise = try c.decodeIfPresent(String.self, forKey: .enterprise)
     }
 }
 

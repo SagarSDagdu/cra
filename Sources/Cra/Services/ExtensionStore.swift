@@ -143,6 +143,151 @@ final class ExtensionStore {
         NotificationCenter.default.post(name: .craPinnedExtensionsChanged, object: self)
     }
 
+    // MARK: Toolbar icons (GitHub #9: a pinned extension's button in Cra's monochrome ink)
+
+    /// How a pinned extension's button draws, keyed by Chromium extension ID, so it survives
+    /// restarts and extension updates. The extension's own icon is untouched elsewhere.
+    struct IconStyle: Codable, Equatable {
+        /// Drawn as a template in the toolbar's ink instead of the extension's colours.
+        var monochrome = false
+        /// An SF Symbol in place of the extension's icon (always monochrome).
+        var symbol: String?
+        /// An image the user picked, copied into "Extension Icons".
+        var imageFile: String?
+    }
+
+    /// Symbols offered in place of an extension's icon.
+    static let iconSymbols = ["shield.lefthalf.filled", "lock.shield", "key", "lock", "person.badge.key",
+                              "eye.slash", "hand.raised", "checkmark.shield", "bolt", "star", "bookmark",
+                              "doc.text", "paintbrush", "globe", "puzzlepiece.extension"]
+
+    private static var iconStylesFile: URL { AppPaths.file("extension-icons.json") }
+    private static var customIconsDir: URL { AppPaths.supportDir.appendingPathComponent("Extension Icons", isDirectory: true) }
+
+    private(set) var iconStyles: [String: IconStyle] = {
+        guard let data = try? Data(contentsOf: ExtensionStore.iconStylesFile) else { return [:] }
+        return (try? JSONDecoder().decode([String: IconStyle].self, from: data)) ?? [:]
+    }()
+    /// One image per extension, so the toolbar sees the same object until the style changes.
+    @ObservationIgnored private var toolbarIcons: [String: NSImage] = [:]
+
+    func iconStyle(_ id: String) -> IconStyle { iconStyles[id] ?? IconStyle() }
+
+    func setIconStyle(_ id: String, _ style: IconStyle) {
+        let old = iconStyle(id)
+        guard style != old else { return }
+        if let file = old.imageFile, file != style.imageFile {
+            try? FileManager.default.removeItem(at: Self.customIconsDir.appendingPathComponent(file))
+        }
+        iconStyles[id] = style == IconStyle() ? nil : style
+        toolbarIcons[id] = nil
+        try? JSONEncoder().encode(iconStyles).write(to: Self.iconStylesFile, options: .atomic)
+    }
+
+    /// Copies `url` in as the extension's toolbar icon.
+    func setCustomIcon(_ id: String, from url: URL) throws {
+        guard NSImage(contentsOf: url) != nil else {
+            throw NSError(domain: "Cra", code: 1, userInfo: [NSLocalizedDescriptionKey: "That file is not an image."])
+        }
+        let fm = FileManager.default
+        try fm.createDirectory(at: Self.customIconsDir, withIntermediateDirectories: true)
+        // A new name each time: the old file is removed once the style no longer points at it.
+        let name = "\(id)-\(UUID().uuidString.prefix(8)).\(url.pathExtension.isEmpty ? "png" : url.pathExtension)"
+        try fm.copyItem(at: url, to: Self.customIconsDir.appendingPathComponent(name))
+        var style = iconStyle(id)
+        style.symbol = nil
+        style.imageFile = name
+        setIconStyle(id, style)
+    }
+
+    /// The pinned button's image: the extension's icon, the user's replacement, or either as a
+    /// template image (the button tints templates with the toolbar's ink).
+    func toolbarIcon(for e: Entry) -> NSImage? {
+        let style = iconStyle(e.extensionID)
+        if style == IconStyle() { return e.icon }
+        if let cached = toolbarIcons[e.extensionID] { return cached }
+        var image: NSImage?
+        if let symbol = style.symbol {
+            image = NSImage(systemSymbolName: symbol, accessibilityDescription: e.name)?
+                .withSymbolConfiguration(.init(pointSize: 15, weight: .regular))
+            image?.isTemplate = true
+        } else {
+            if let file = style.imageFile {
+                image = NSImage(contentsOf: Self.customIconsDir.appendingPathComponent(file)) ?? e.icon
+            } else if style.monochrome {
+                // From the largest icon: in the 16 px one a plate's edge and the mark blur together.
+                let manifest = (try? Data(contentsOf: e.url.appendingPathComponent("manifest.json")))
+                    .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                image = manifest.flatMap { ExtensionImporter.icon(manifest: $0, folder: e.url, minPixels: 128) } ?? e.icon
+            } else {
+                image = e.icon
+            }
+            if style.monochrome { image = image.flatMap(Self.monochrome) }
+        }
+        toolbarIcons[e.extensionID] = image
+        return image
+    }
+
+    /// An icon as a one-ink template, the way Arc's own toolbar glyphs read. An icon drawn on a
+    /// plate (one colour covering most of it: Bitwarden's blue square, Vercel's black disc) keeps
+    /// what stands out from the plate, so Bitwarden becomes its shield. Without a plate, colour
+    /// reads as ink and white as none, so a white badge keeps only its mark. Ink is scaled so the
+    /// strongest is solid; a one-colour glyph (nothing stands out) keeps its silhouette.
+    static func monochrome(_ source: NSImage) -> NSImage? {
+        let n = 64
+        guard let ctx = CGContext(data: nil, width: n, height: n, bitsPerComponent: 8, bytesPerRow: n * 4,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+        source.draw(in: NSRect(x: 0, y: 0, width: n, height: n), from: .zero, operation: .copy, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
+        guard let data = ctx.data?.assumingMemoryBound(to: UInt8.self) else { return nil }
+        let count = n * n
+        // Premultiplied: divide the alpha back out before judging the colour.
+        func rgb(_ i: Int) -> (Double, Double, Double) {
+            let a = Double(data[i * 4 + 3]) / 255
+            return (Double(data[i * 4]) / 255 / a, Double(data[i * 4 + 1]) / 255 / a, Double(data[i * 4 + 2]) / 255 / a)
+        }
+        // The plate: the most common opaque colour (16 levels a channel), if it covers 40 % of the icon.
+        var buckets: [Int: (n: Int, r: Double, g: Double, b: Double)] = [:]
+        var visible = 0
+        for i in 0..<count where data[i * 4 + 3] > 12 {
+            visible += 1
+            guard data[i * 4 + 3] > 240 else { continue }
+            let (r, g, b) = rgb(i)
+            let key = Int(r * 15.99) << 8 | Int(g * 15.99) << 4 | Int(b * 15.99)
+            let o = buckets[key] ?? (0, 0, 0, 0)
+            buckets[key] = (o.n + 1, o.r + r, o.g + g, o.b + b)
+        }
+        let top = buckets.values.max { $0.n < $1.n }
+        let plate = top.flatMap { t in Double(t.n) >= Double(visible) * 0.4 ? (t.r / Double(t.n), t.g / Double(t.n), t.b / Double(t.n)) : nil }
+        var ink = [Double](repeating: 0, count: count)
+        var inkMax = 0.0
+        for i in 0..<count {
+            let a = Double(data[i * 4 + 3]) / 255
+            guard a > 0 else { continue }
+            let (r, g, b) = rgb(i)
+            if let p = plate {
+                ink[i] = a * min(1, ((r - p.0) * (r - p.0) + (g - p.1) * (g - p.1) + (b - p.2) * (b - p.2)).squareRoot() / 0.5)
+            } else {
+                ink[i] = a * max(0, 1 - (0.2126 * r + 0.7152 * g + 0.0722 * b))
+            }
+            inkMax = max(inkMax, ink[i])
+        }
+        let silhouette = inkMax < 0.08
+        for i in 0..<count {
+            let a = Double(data[i * 4 + 3]) / 255
+            let v = silhouette ? a : min(max((ink[i] / inkMax - 0.1) / 0.5, 0), 1)
+            let byte = UInt8((v * 255).rounded())
+            data[i * 4] = 0; data[i * 4 + 1] = 0; data[i * 4 + 2] = 0; data[i * 4 + 3] = byte
+        }
+        guard let cg = ctx.makeImage() else { return nil }
+        let image = NSImage(cgImage: cg, size: NSSize(width: 18, height: 18))
+        image.isTemplate = true
+        return image
+    }
+
     /// Copies an unpacked extension folder (one that holds manifest.json) in.
     func add(folder: URL) throws {
         let fm = FileManager.default

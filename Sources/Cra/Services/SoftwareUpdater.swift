@@ -46,6 +46,7 @@ final class SoftwareUpdater: NSObject {
     private(set) var foundRelease: Release?
     /// The first launch after an update: "Cra Updated!" with See What's New.
     private(set) var updatedTo: String?
+    func debugUpdated(_ v: String?) { updatedTo = v }
     /// The close button on a banner hides it until the next launch (Arc counts these in
     /// autoUpdateBannerDismissalCount).
     var bannerDismissed = false

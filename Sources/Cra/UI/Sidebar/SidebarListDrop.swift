@@ -1,9 +1,8 @@
 import AppKit
-import SwiftUI
 
 /// What releasing a sidebar drag over the space's list would do right now. The
 /// rows read it to draw the live preview (insertion line, rows easing apart,
-/// the row a drop would combine with) and the delegate applies it on drop.
+/// the row a drop would combine with) and SpaceListView applies it on drop.
 struct SidebarListDrop: Equatable {
     enum Target: Equatable {
         /// Before the child at `index` of `parent` (`index == count` appends).
@@ -33,16 +32,15 @@ struct SidebarListDrop: Equatable {
     var rowBelow: UUID?
 }
 
-/// Scrolls a space's list while a drag hovers near its top or bottom edge.
-/// SwiftUI's ScrollView has no autoscroll for custom drops, so with a long
-/// pinned list everything past the fold (Today included) was out of reach.
+/// Scrolls a space's list while a drag hovers near its top or bottom edge, so
+/// with a long pinned list everything past the fold (Today included) stays in reach.
 @MainActor
 final class DragAutoscroller {
     /// Edge band, and the speed at the very edge in points per second.
     static let band: CGFloat = 48
     static let maxSpeed: CGFloat = 900
 
-    fileprivate weak var anchor: NSView?
+    weak var anchor: NSView?
     private var timer: Timer?
     private var lastTick: CFTimeInterval = 0
 
@@ -89,316 +87,6 @@ final class DragAutoscroller {
         clip.scroll(to: r.origin)
         sv.reflectScrolledClipView(clip)
     }
-
-    /// Placed inside the list so the scroller can find the scroll view around it.
-    struct Anchor: NSViewRepresentable {
-        let scroller: DragAutoscroller
-        func makeNSView(context: Context) -> NSView { PassThroughView() }
-        func updateNSView(_ view: NSView, context: Context) { scroller.anchor = view }
-    }
-
-    private final class PassThroughView: NSView {
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    }
-}
-
-/// One drop delegate for the whole pinned + today list. Per-row drop
-/// destinations only report entered/exited, so the list hit-tests the pointer
-/// against the rows' frames itself on every move.
-struct SidebarListDropDelegate: DropDelegate {
-    static let coordinateSpace = "sidebarList"
-    static let nudge: CGFloat = 3
-    static let animation = Animation.snappy(duration: 0.2, extraBounce: 0)
-
-    let space: Space
-    let store: SidebarStore
-    let ui: SidebarUIState
-    let autoscroller: DragAutoscroller
-
-    func validateDrop(info: DropInfo) -> Bool { info.hasItemsConforming(to: [.craSidebarItem]) }
-
-    func dropEntered(info: DropInfo) {
-        // Rows here set draggingID when the drag starts; a drag from another
-        // window only says what it carries through the pasteboard.
-        if let provider = info.itemProviders(for: [.craSidebarItem]).first {
-            _ = provider.loadTransferable(type: SidebarDragItem.self) { [ui] result in
-                guard case .success(let d) = result else { return }
-                DispatchQueue.main.async { ui.draggingID = d.id }
-            }
-        }
-        update(info)
-    }
-
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        update(info)
-        return DropProposal(operation: .move)
-    }
-
-    func dropExited(info: DropInfo) {
-        autoscroller.stop()
-        withAnimation(Self.animation) { ui.listDrop = nil }
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        autoscroller.stop()
-        guard let id = ui.draggingID, store.item(id) != nil else { return false }
-        let drop = ui.listDrop ?? resolve(dragged: id, at: info.location)
-        withAnimation(Self.animation) {
-            ui.listDrop = nil
-            apply(drop)
-        }
-        // Dia: Tabs ▸ "Haptic feedback when reordering tabs".
-        if drop.target != nil, store.settings.hapticFeedbackOnReorder {
-            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .drawCompleted)
-        }
-        ui.draggingID = nil
-        return true
-    }
-
-    private func update(_ info: DropInfo) {
-        autoscroller.update()
-        guard let id = ui.draggingID, store.item(id) != nil else { return }
-        let drop = resolve(dragged: id, at: info.location)
-        guard drop != ui.listDrop else { return }
-        withAnimation(Self.animation) { ui.listDrop = drop }
-        // A tick when a row starts offering to combine, so the change of meaning is felt as well as seen.
-        switch drop.target {
-        case .split?, .newFolder?:
-            if store.settings.hapticFeedbackOnReorder {
-                NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
-            }
-        default: break
-        }
-        // Spring-loaded folders: hovering a closed folder opens it.
-        if case .into(let f)? = drop.target, store.item(f)?.isFolder == true, !store.isExpanded(f) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [ui, store] in
-                guard ui.listDrop?.target == .into(f) else { return }
-                withAnimation(.snappy(duration: 0.22, extraBounce: 0)) { store.setExpanded(f, true) }
-            }
-        }
-    }
-
-    private func apply(_ drop: SidebarListDrop) {
-        let id = drop.draggedID
-        // A picked tab carries the other picks along (a split still takes one pane).
-        let group = ui.group(for: id, in: store)
-        switch drop.target {
-        case .insert(let parent, let index)?:
-            store.moveItems(group, to: parent, index: index)
-        case .newFolder(let tab)?:
-            if let folder = store.createFolder(combining: tab, with: group) { ui.renamingID = folder.id }
-        case .split(let tab, let leading)?:
-            store.createSplit(with: leading ? [id, tab] : [tab, id], at: tab)
-        case .into(let target)?:
-            if store.item(target)?.isFolder == true {
-                store.moveItems(group, to: target, index: nil)
-                store.setExpanded(target, true)
-            } else {
-                store.moveItem(id, to: target, index: nil)
-            }
-        case nil:
-            break
-        }
-    }
-
-    // MARK: Hit testing
-
-    private struct Row {
-        let item: SidebarItem
-        let parent: UUID
-        let index: Int
-        let depth: Int
-        let frame: CGRect
-    }
-
-    /// Rows as drawn: pinned (expanded folders open), then today. Frames stay
-    /// recorded for rows that are no longer drawn (a collapsed pinned list),
-    /// so only drawn rows may be hit.
-    private func visibleRows() -> [Row] {
-        var out: [Row] = []
-        func walk(_ rows: [SidebarItem], _ depth: Int) {
-            for c in rows {
-                guard let f = ui.rowFrames[c.id], let parent = c.parentID,
-                      let i = store.item(parent)?.children.firstIndex(of: c.id) else { continue }
-                out.append(Row(item: c, parent: parent, index: i, depth: depth, frame: f))
-                if c.isFolder, store.isExpanded(c.id) { walk(store.children(of: c.id), depth + 1) }
-            }
-        }
-        walk(store.listedPinnedItems(in: space, window: ui.windowID), 0)
-        walk(store.children(of: space.todayContainerID), 0)
-        return out
-    }
-
-    private func isInside(_ id: UUID, _ ancestor: UUID) -> Bool {
-        var cur = store.item(id)?.parentID
-        var hops = 0
-        while let c = cur, hops < 64 {
-            if c == ancestor { return true }
-            cur = store.item(c)?.parentID
-            hops += 1
-        }
-        return false
-    }
-
-    /// Top and bottom quarters of a row insert before/after it; the middle
-    /// combines: a folder takes the item, a Today tab makes a split (the
-    /// dragged tab goes on the side of the row it hovers), a pinned tab makes
-    /// a new folder, a split row takes a pane.
-    func resolve(dragged id: UUID, at p: CGPoint) -> SidebarListDrop {
-        let rows = visibleRows()
-        let group = ui.group(for: id, in: store)
-        let isTab = store.item(id)?.isTab == true
-        let half = CraMetrics.rowSpacing / 2
-        var target: SidebarListDrop.Target?
-
-        if let r = rows.first(where: { p.y >= $0.frame.minY - half && p.y < $0.frame.maxY + half }) {
-            let f = (p.y - r.frame.minY) / max(1, r.frame.height)
-            let middle = (0.25..<0.75).contains(f)
-            let before = SidebarListDrop.Target.insert(parent: r.parent, index: r.index)
-            let after = SidebarListDrop.Target.insert(parent: r.parent, index: r.index + 1)
-            if group.contains(r.item.id) || isInside(r.item.id, id) {
-                target = nil
-            } else if r.item.isFolder {
-                if f < 0.25 { target = before }
-                else if f >= 0.75 { target = store.isExpanded(r.item.id) ? .insert(parent: r.item.id, index: 0) : after }
-                else { target = .into(r.item.id) }
-            } else if middle && isTab && r.item.isTab {
-                target = isInside(r.item.id, space.todayContainerID)
-                    ? .split(with: r.item.id, leading: p.x < r.frame.midX)
-                    : .newFolder(with: r.item.id)
-            } else if middle && isTab && r.item.isSplit {
-                target = .into(r.item.id)
-            } else {
-                target = f < 0.5 ? before : after
-            }
-        } else {
-            // Between sections or past the last row: the divider splits pinned from today.
-            let pinned = ui.rowFrames[space.pinnedContainerID] ?? .zero
-            let today = ui.rowFrames[space.todayContainerID] ?? .zero
-            if p.y < (pinned.maxY + today.minY) / 2 {
-                target = .insert(parent: space.pinnedContainerID, index: p.y < pinned.minY ? 0 : store.children(of: space.pinnedContainerID).count)
-            } else {
-                // The New Tab row may lead Today, so its first tab, not the section, marks the top.
-                let firstToday = rows.first { $0.parent == space.todayContainerID }?.frame.minY ?? today.minY
-                target = .insert(parent: space.todayContainerID, index: p.y < firstToday ? 0 : store.children(of: space.todayContainerID).count)
-            }
-        }
-
-        // Dropping next to itself, or a folder into itself, changes nothing.
-        if case .insert(let parent, let index)? = target {
-            if parent == id || isInside(parent, id) {
-                target = nil
-            } else if group.count == 1, store.item(id)?.parentID == parent, let old = store.item(parent)?.children.firstIndex(of: id), index == old || index == old + 1 {
-                target = nil
-            }
-        }
-
-        // A live folder fills itself: nothing goes into it from outside, and its tabs make no new folders.
-        switch target {
-        case .into(let f)? where store.item(f)?.isLiveFolder == true: target = nil
-        case .insert(let parent, _)? where store.item(parent)?.isLiveFolder == true && store.item(id)?.parentID != parent: target = nil
-        case .newFolder(let tab)? where store.item(store.item(tab)?.parentID ?? tab)?.isLiveFolder == true: target = nil
-        default: break
-        }
-
-        var drop = SidebarListDrop(draggedID: id, target: target)
-        guard case .insert(let parent, let index)? = target else { return drop }
-        let kids = store.item(parent)?.children ?? []
-        var y: CGFloat?
-        if index < kids.count, let f = rows.first(where: { $0.item.id == kids[index] })?.frame {
-            y = f.minY - half
-        } else if index > 0, let r = rows.last(where: { $0.item.id == kids[index - 1] || isInside($0.item.id, kids[index - 1]) }) {
-            y = r.frame.maxY + half
-        } else if store.item(parent)?.isFolder == true, let f = ui.rowFrames[parent] {
-            y = f.maxY + half
-        }
-        // An empty pinned list shows its own placeholder instead of a line.
-        guard let y, let section = ui.rowFrames[space.todayContainerID] else { return drop }
-        let depth = rows.first { $0.item.id == parent }.map { $0.depth + 1 } ?? 0
-        drop.line = .init(y: y, minX: section.minX + 8 + CGFloat(depth) * CraMetrics.indent, maxX: section.maxX - 6)
-        drop.rowAbove = rows.last { $0.frame.maxY <= y + 1 }?.item.id
-        drop.rowBelow = rows.first { $0.frame.minY >= y - 1 }?.item.id
-        return drop
-    }
-}
-
-/// Registers a row's frame for the list's drop delegate and draws the live
-/// drop preview on it: the dragged row dims, the rows either side of the
-/// insertion line ease apart, a tab the drop would combine with turns into
-/// what it becomes (a split row or a folder), and a folder or split that
-/// would take the item lights up with a label.
-struct SidebarDropPreview: ViewModifier {
-    let id: UUID
-    let palette: SpacePalette
-    var depth = 0
-    @Environment(SidebarStore.self) private var store
-    @Environment(SidebarUIState.self) private var ui
-
-    func body(content: Content) -> some View {
-        let drop = ui.listDrop
-        let nudge: CGFloat = drop?.rowAbove == id ? -SidebarListDropDelegate.nudge : (drop?.rowBelow == id ? SidebarListDropDelegate.nudge : 0)
-        let badge = badge(for: drop?.target)
-        let combine = combine(for: drop)
-        content
-            .background {
-                if badge != nil {
-                    RoundedRectangle(cornerRadius: CraMetrics.rowCorner, style: .continuous)
-                        .fill(palette.selectedFill)
-                        .transition(.opacity)
-                }
-            }
-            .overlay {
-                if let badge {
-                    RoundedRectangle(cornerRadius: CraMetrics.rowCorner, style: .continuous)
-                        .strokeBorder(palette.textPrimary.opacity(0.3), lineWidth: 1.5)
-                        .overlay(alignment: .trailing) {
-                            HStack(spacing: 4) {
-                                Image(systemName: badge.symbol).font(.system(size: 10, weight: .semibold))
-                                Text(badge.label).font(.system(size: 11, weight: .semibold))
-                            }
-                            .foregroundStyle(palette.textPrimary)
-                            .padding(.horizontal, 8)
-                            .frame(height: 22)
-                            .background(Capsule().fill(palette.isDark ? Color.white.opacity(0.14) : Color.white.opacity(0.9)))
-                            .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
-                            .padding(.trailing, 8)
-                        }
-                        .transition(.scale(scale: 0.96).combined(with: .opacity))
-                        .allowsHitTesting(false)
-                }
-            }
-            .opacity(combine != nil ? 0 : (drop.map { isDragged($0.draggedID) } ?? false ? 0.4 : 1))
-            .overlay {
-                if let combine, let target = store.item(id), let dragged = store.item(combine.dragged) {
-                    CombineDropPreview(kind: combine.kind, target: target, dragged: dragged, depth: depth, palette: palette)
-                        .transition(.opacity)
-                        .allowsHitTesting(false)
-                }
-            }
-            .visualEffect { content, _ in content.offset(y: nudge) }
-            // Measured outside the nudge: frames that moved with it fed back into the hit test,
-            // so a pointer near a row edge fell into the widened gap, the target jumped to the
-            // end of the list, the nudge moved away and the target came back, over and over.
-            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(SidebarListDropDelegate.coordinateSpace)) } action: { ui.rowFrames[id] = $0 }
-    }
-
-    /// This row is being dragged, itself or as one of the picked tabs.
-    private func isDragged(_ draggedID: UUID) -> Bool {
-        draggedID == id || (ui.multiSelection.count > 1 && ui.multiSelection.contains(draggedID) && ui.multiSelection.contains(id))
-    }
-
-    private func combine(for drop: SidebarListDrop?) -> (kind: CombineDropPreview.Kind, dragged: UUID)? {
-        switch drop?.target {
-        case .split(let t, let leading)? where t == id: return (.split(leading: leading), drop!.draggedID)
-        case .newFolder(let t)? where t == id: return (.folder, drop!.draggedID)
-        default: return nil
-        }
-    }
-
-    private func badge(for target: SidebarListDrop.Target?) -> (symbol: String, label: String)? {
-        guard case .into(let t)? = target, t == id else { return nil }
-        return store.item(id)?.isFolder == true ? ("folder", "Move to Folder") : ("rectangle.split.3x1", "Add to Split")
-    }
 }
 
 /// A tab row while another tab hovers over its middle, drawn as the row the
@@ -406,129 +94,208 @@ struct SidebarDropPreview: ViewModifier {
 /// dashed pane on the side it will take (the split row's own layout), moving
 /// across when the pointer crosses the row's middle; in Pinned it becomes a
 /// "New Folder" row with both tabs' icons dropping into a stack.
-struct CombineDropPreview: View {
+/// What dropping a row onto another would make, drawn over the target row: a split with the
+/// dragged tab sliding in beside it under a dashed outline, or a new folder with both icons.
+@MainActor
+final class CombineDropPreview: NSView {
     enum Kind: Equatable { case split(leading: Bool), folder }
 
-    let kind: Kind
-    let target: SidebarItem
-    let dragged: SidebarItem
-    let depth: Int
-    let palette: SpacePalette
-    @State private var open = false
+    private let kind: Kind
+    private let target: SidebarItem
+    private let dragged: SidebarItem
+    private let depth: Int
+    private let palette: SpacePalette
+    private let colors: SidebarColors
+    private let favicons: FaviconCache
+    private let card = NSView()
+    private var didOpen = false
 
-    var body: some View {
-        Group {
-            switch kind {
-            case .split(let leading): split(leading: leading)
-            case .folder: folder
-            }
+    init(kind: Kind, target: SidebarItem, dragged: SidebarItem, depth: Int, palette: SpacePalette, favicons: FaviconCache) {
+        self.kind = kind
+        self.target = target
+        self.dragged = dragged
+        self.depth = depth
+        self.palette = palette
+        colors = SidebarColors(palette)
+        self.favicons = favicons
+        super.init(frame: .zero)
+        wantsLayer = true
+        card.wantsLayer = true
+        if let l = card.layer {
+            l.cornerRadius = CraMetrics.rowCorner
+            l.cornerCurve = .continuous
+            l.backgroundColor = colors.selectedFill.cgColor
+            l.borderWidth = 1.5
+            l.shadowColor = NSColor.black.cgColor
+            l.shadowOpacity = palette.isDark ? 0.25 : 0.1
         }
-        .frame(height: CraMetrics.rowHeight)
-        .background(
-            RoundedRectangle(cornerRadius: CraMetrics.rowCorner, style: .continuous)
-                .fill(palette.selectedFill)
-                .shadow(color: .black.opacity(palette.isDark ? 0.25 : 0.1), radius: open ? 6 : 2, y: open ? 2 : 1)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: CraMetrics.rowCorner, style: .continuous)
-                .strokeBorder(palette.textPrimary.opacity(open ? 0.35 : 0), lineWidth: 1.5)
-        )
-        .scaleEffect(open ? 1 : 0.97)
-        .onAppear {
-            withAnimation(.spring(duration: 0.34, bounce: 0.22)) { open = true }
-        }
+        addSubview(card)
     }
 
-    private func split(leading: Bool) -> some View {
-        GeometryReader { geo in
-            let pane = max(0, (geo.size.width - 1) / 2)
-            HStack(spacing: 0) {
-                // Identified cells, so switching sides slides them past each other.
-                ForEach(leading ? [dragged, target] : [target, dragged]) { item in
-                    if item.id == target.id {
-                        cell(target)
-                            .frame(maxWidth: .infinity)
-                    } else {
-                        cell(dragged)
-                            .background(
-                                RoundedRectangle(cornerRadius: CraMetrics.rowCorner - 3, style: .continuous)
-                                    .fill(palette.hoverFill)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: CraMetrics.rowCorner - 3, style: .continuous)
-                                            .strokeBorder(palette.textPrimary.opacity(0.45), style: StrokeStyle(lineWidth: 1.25, dash: [4, 3]))
-                                    )
-                                    .padding(4)
-                            )
-                            .frame(width: open ? pane : 0)
-                            .opacity(open ? 1 : 0)
-                            .offset(x: open ? 0 : (leading ? -12 : 12))
-                            .clipped()
-                    }
-                }
-            }
-            .overlay {
-                Rectangle().fill(palette.separator)
-                    .frame(width: 1)
-                    .padding(.vertical, SplitRow.Metrics.separatorInset)
-                    .opacity(open ? 1 : 0)
-            }
-        }
-        .padding(.leading, CGFloat(depth) * CraMetrics.indent)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    /// `withAnimation(.spring(duration: 0.34, bounce: 0.22)) { open = true }` on appear.
+    private static func spring(_ layer: CALayer?, _ key: String, from: Any, to: Any) {
+        let a = CASpringAnimation(perceptualDuration: 0.34, bounce: 0.22)
+        a.keyPath = key
+        a.fromValue = from
+        a.toValue = to
+        a.duration = a.settlingDuration
+        layer?.add(a, forKey: key)
     }
 
-    private func cell(_ item: SidebarItem) -> some View {
-        HStack(spacing: 8) {
-            FaviconView(key: item.tab?.iconKey, palette: palette)
-                .frame(width: CraMetrics.favicon)
-            Text(item.displayTitle)
-                .font(.system(size: 14))
-                .foregroundStyle(palette.textPrimary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Spacer(minLength: 2)
+    override func layout() {
+        super.layout()
+        guard !didOpen, bounds.width > 0 else { return }
+        didOpen = true
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        card.frame = bounds
+        if let l = card.layer {
+            l.borderColor = colors.textPrimary.withAlphaComponent(0.35).cgColor
+            l.shadowRadius = 6
+            l.shadowOffset = CGSize(width: 0, height: -2)
+            Self.spring(l, "borderColor", from: colors.textPrimary.withAlphaComponent(0).cgColor, to: l.borderColor!)
+            Self.spring(l, "shadowRadius", from: 2.0, to: 6.0)
+            Self.spring(l, "shadowOffset", from: CGSize(width: 0, height: -1), to: l.shadowOffset)
+            // .scaleEffect(0.97 → 1), from the card's centre.
+            let small = bounds.insetBy(dx: bounds.width * 0.015, dy: bounds.height * 0.015)
+            Self.spring(l, "bounds.size", from: small.size, to: bounds.size)
+            Self.spring(l, "position", from: CGPoint(x: small.minX, y: small.minY), to: l.position)
         }
-        .padding(.leading, 8)
-        .padding(.trailing, 4)
-        .frame(maxHeight: .infinity)
+        switch kind {
+        case .split(let leading): buildSplit(leading: leading)
+        case .folder: buildFolder()
+        }
+        CATransaction.commit()
     }
 
-    private var folder: some View {
-        HStack(spacing: 11) {
-            ZStack {
-                Image(systemName: "folder.fill").foregroundStyle(palette.folderFill)
-                Image(systemName: "folder").foregroundStyle(palette.folderTint)
-            }
-            .font(.system(size: 15, weight: .regular))
-            .frame(width: CraMetrics.favicon)
-            .scaleEffect(open ? 1 : 0.4)
-            .opacity(open ? 1 : 0)
-            Text("New Folder")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(palette.textPrimary)
-                .lineLimit(1)
-            Spacer(minLength: 4)
-            ZStack {
-                stackedIcon(target)
-                    .rotationEffect(.degrees(open ? -6 : 0))
-                    .offset(x: open ? -5 : 0)
-                stackedIcon(dragged)
-                    .rotationEffect(.degrees(open ? 7 : 0))
-                    .offset(x: open ? 6 : 22, y: open ? 0 : -8)
-                    .opacity(open ? 1 : 0)
-            }
-            .padding(.trailing, 14)
-        }
-        .padding(.leading, 8 + CGFloat(depth) * CraMetrics.indent)
-        .padding(.trailing, 6)
+    // MARK: Split
+
+    private func cell(_ item: SidebarItem, width: CGFloat) -> NSView {
+        let v = NSView()
+        v.wantsLayer = true
+        let icon = SidebarFaviconView()
+        icon.show(favicons.image(forKey: item.tab?.iconKey), flip: favicons.glyphIsDark(forKey: item.tab?.iconKey) == palette.isDark, colors: colors)
+        let h = bounds.height
+        icon.frame = NSRect(x: 8, y: (h - CraMetrics.favicon) / 2, width: CraMetrics.favicon, height: CraMetrics.favicon)
+        v.addSubview(icon)
+        let label = NSTextField.sidebarLabel(size: 14)
+        label.stringValue = item.displayTitle
+        label.textColor = colors.textPrimary
+        // HStack(spacing: 8) after 8 pt, Spacer(minLength: 2), 4 pt trailing.
+        let x = 8 + CraMetrics.favicon + 8
+        label.frame = NSRect(x: x - SidebarText.inset, y: (h - 17) / 2, width: max(0, width - x - 14) + 2 * SidebarText.inset, height: 17)
+        v.addSubview(label)
+        return v
     }
 
-    private func stackedIcon(_ item: SidebarItem) -> some View {
-        FaviconView(key: item.tab?.iconKey, palette: palette, size: 14)
-            .padding(3)
-            .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(palette.isDark ? Color(white: 0.22) : .white)
-                    .shadow(color: .black.opacity(0.15), radius: 1.5, y: 0.5)
-            )
+    private func buildSplit(leading: Bool) {
+        let x0 = CGFloat(depth) * CraMetrics.indent
+        let w = max(0, bounds.width - x0), h = bounds.height
+        let pane = max(0, (w - 1) / 2)
+        let targetCell = cell(target, width: w - pane)
+        let draggedCell = cell(dragged, width: pane)
+        // The dragged half: a dashed box 4 pt in, clipped while it opens.
+        let dash = CAShapeLayer()
+        dash.fillColor = colors.hoverFill.cgColor
+        dash.strokeColor = colors.textPrimary.withAlphaComponent(0.45).cgColor
+        dash.lineWidth = 1.25
+        dash.lineDashPattern = [4, 3]
+        // Never narrower than its corners: CGPath refuses radii wider than half the rect.
+        let r = CraMetrics.rowCorner - 3
+        let box = { (width: CGFloat) in CGPath(roundedRect: NSRect(x: 4.625, y: 4.625, width: max(2 * r, width - 9.25), height: max(2 * r, h - 9.25)),
+                                               cornerWidth: r, cornerHeight: r, transform: nil) }
+        dash.path = box(pane)
+        draggedCell.layer?.insertSublayer(dash, at: 0)
+        draggedCell.layer?.masksToBounds = true
+        addSubview(targetCell)
+        addSubview(draggedCell)
+        let targetOpen = NSRect(x: leading ? x0 + pane : x0, y: 0, width: w - pane, height: h)
+        let draggedOpen = NSRect(x: leading ? x0 : x0 + w - pane, y: 0, width: pane, height: h)
+        targetCell.frame = targetOpen
+        draggedCell.frame = draggedOpen
+        // Closed: the target fills the row, the dragged half is 0 wide and 12 pt outside it.
+        Self.spring(targetCell.layer, "position", from: CGPoint(x: x0, y: 0), to: targetCell.layer!.position)
+        Self.spring(targetCell.layer, "bounds.size.width", from: w, to: w - pane)
+        let draggedFromX = leading ? x0 - 12 : x0 + w + 12
+        Self.spring(draggedCell.layer, "position", from: CGPoint(x: draggedFromX, y: 0), to: draggedCell.layer!.position)
+        Self.spring(draggedCell.layer, "bounds.size.width", from: 0.0, to: pane)
+        Self.spring(draggedCell.layer, "opacity", from: 0.0, to: 1.0)
+        Self.spring(dash, "path", from: box(9.25), to: dash.path!)
+        let line = NSView(frame: NSRect(x: x0 + w / 2 - 0.5, y: SplitRowMetrics.separatorInset, width: 1, height: h - 2 * SplitRowMetrics.separatorInset))
+        line.wantsLayer = true
+        line.layer?.backgroundColor = colors.separator.cgColor
+        addSubview(line)
+        Self.spring(line.layer, "opacity", from: 0.0, to: 1.0)
+    }
+
+    // MARK: Folder
+
+    private func buildFolder() {
+        let x0 = 8 + CGFloat(depth) * CraMetrics.indent
+        let h = bounds.height
+        let tones = palette.folderColors(nil)
+        // The folder: its outline over its fill, popping from 40%.
+        let folder = CALayer()
+        folder.frame = NSRect(x: x0, y: (h - 16) / 2, width: CraMetrics.favicon, height: 16)
+        for (name, color) in [("folder.fill", NSColor(tones.fill)), ("folder", NSColor(tones.tint))] {
+            let l = CALayer()
+            l.frame = folder.bounds
+            l.contentsGravity = .center
+            l.contentsScale = window?.backingScaleFactor ?? 2
+            l.contents = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 15, weight: .regular).applying(.init(paletteColors: [color])))
+            folder.addSublayer(l)
+        }
+        layer?.addSublayer(folder)
+        Self.spring(folder, "transform.scale", from: 0.4, to: 1.0)
+        Self.spring(folder, "opacity", from: 0.0, to: 1.0)
+        let label = NSTextField.sidebarLabel(size: 14, weight: .medium)
+        label.stringValue = "New Folder"
+        label.textColor = colors.textPrimary
+        let lx = x0 + CraMetrics.favicon + 11
+        label.frame = NSRect(x: lx - SidebarText.inset, y: (h - 17) / 2, width: max(0, bounds.width - lx - 60) + 2 * SidebarText.inset, height: 17)
+        addSubview(label)
+        // Both icons stacked 14 pt from the trailing edge, fanning out.
+        let cx = bounds.width - 6 - 14 - 10
+        let back = stackedIcon(target, centre: CGPoint(x: cx, y: h / 2))
+        let front = stackedIcon(dragged, centre: CGPoint(x: cx, y: h / 2))
+        // SwiftUI's angles and offsets as they are: this view is flipped, y grows down like SwiftUI's.
+        back.transform = CATransform3DConcat(CATransform3DMakeRotation(-6 * .pi / 180, 0, 0, 1), CATransform3DMakeTranslation(-5, 0, 0))
+        front.transform = CATransform3DConcat(CATransform3DMakeRotation(7 * .pi / 180, 0, 0, 1), CATransform3DMakeTranslation(6, 0, 0))
+        Self.spring(back, "transform", from: CATransform3DIdentity, to: back.transform)
+        Self.spring(front, "transform", from: CATransform3DMakeTranslation(22, -8, 0), to: front.transform)
+        Self.spring(front, "opacity", from: 0.0, to: 1.0)
+    }
+
+    private func stackedIcon(_ item: SidebarItem, centre: CGPoint) -> CALayer {
+        let l = CALayer()
+        l.bounds = CGRect(x: 0, y: 0, width: 20, height: 20)
+        l.position = centre
+        l.cornerRadius = 5
+        l.cornerCurve = .continuous
+        l.backgroundColor = (palette.isDark ? NSColor(white: 0.22, alpha: 1) : .white).cgColor
+        l.shadowColor = NSColor.black.cgColor
+        l.shadowOpacity = 0.15
+        l.shadowRadius = 1.5
+        l.shadowOffset = CGSize(width: 0, height: 0.5)
+        let icon = SidebarFaviconView(size: 14)
+        icon.show(favicons.image(forKey: item.tab?.iconKey), flip: favicons.glyphIsDark(forKey: item.tab?.iconKey) == palette.isDark, colors: colors)
+        let face = CALayer()
+        face.frame = CGRect(x: 3, y: 3, width: 14, height: 14)
+        face.contentsGravity = .resizeAspect
+        face.contentsScale = window?.backingScaleFactor ?? 2
+        face.cornerRadius = 14 * 0.22
+        face.masksToBounds = true
+        if let image = icon.image {
+            face.contents = image.layerContents(forContentsScale: face.contentsScale)
+        }
+        l.addSublayer(face)
+        layer?.addSublayer(l)
+        return l
     }
 }

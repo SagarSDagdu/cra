@@ -1,5 +1,4 @@
 import AppKit
-import SwiftUI
 
 /// Arc's floating sidebar: with the sidebar hidden, touching the window's left
 /// edge slides the sidebar in over the page; it leaves when the pointer does.
@@ -25,7 +24,7 @@ final class FloatingSidebarController {
     private let slider = NSView()
     private let blur = NSVisualEffectView()
     private let lift = NSView()
-    private var gradientHost: NSHostingView<SpaceBackground>?
+    private var gradientHost: PaletteBackgroundView?
     private var trafficLights: FloatingTrafficLights?
 
     enum Metrics {
@@ -117,8 +116,7 @@ final class FloatingSidebarController {
         lift.wantsLayer = true
         lift.autoresizingMask = [.width, .height]
         slider.addSubview(lift)
-        let g = NSHostingView(rootView: SpaceBackground(palette: palette()))
-        g.sizingOptions = []
+        let g = PaletteBackgroundView(palette: palette())
         g.autoresizingMask = [.width, .height]
         slider.addSubview(g)
         gradientHost = g
@@ -133,7 +131,7 @@ final class FloatingSidebarController {
         let pal = palette()
         let t = CraTuning.shared
         for v in [blur, lift, gradientHost as NSView?].compactMap({ $0 }) { v.frame = slider.bounds }
-        gradientHost?.rootView = SpaceBackground(palette: pal)
+        gradientHost?.palette = pal
         blur.isHidden = !pal.vibrant
         lift.isHidden = !pal.vibrant
         blur.material = pal.isDark ? .underWindowBackground : t.material

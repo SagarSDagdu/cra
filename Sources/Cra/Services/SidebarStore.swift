@@ -1085,8 +1085,11 @@ final class SidebarStore {
             }
         }
         // Gone from the results (merged, reviewed, closed): marked now, removed once the grace is over.
+        // An organization whose SSO session lapsed only hid its pull requests: those stay as they are.
+        let ssoHidden = Set(ssoOrganizations.map { $0.lowercased() })
         for id in existing.values {
             guard var it = items[id], var t = it.tab, t.liveGoneAt == nil else { continue }
+            if let url = t.liveItemURL, let p = GitHubLiveClient.pullPath(url), ssoHidden.contains(p.owner.lowercased()) { continue }
             t.liveGoneAt = Date()
             it.data = .tab(t)
             items[id] = it

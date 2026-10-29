@@ -135,7 +135,3 @@ enum DownloadFlight {
         }
     }()
 }
-
-private final class FlippedView: NSView {
-    override var isFlipped: Bool { true }
-}

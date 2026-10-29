@@ -210,19 +210,9 @@ struct NoiseOverlay: View {
 
 struct SpaceBackground: View {
     let palette: SpacePalette
-    /// The main window passes the store so the tint follows a space swipe.
-    var pager: SpacePager?
 
     var body: some View {
-        if let pager {
-            let spaces = pager.store.pagedSpaces(window: pager.ui.windowID)
-            let focused = pager.store.focusedSpaceID(window: pager.ui.windowID)
-            let index = spaces.firstIndex { $0.id == focused } ?? 0
-            PagedSpaceBackground(palettes: spaces.map(\.theme.palette), position: Double(index) + Double(pager.ui.spaceSwipe))
-                .animation(pager.ui.spaceSettleAnimation, value: focused)
-        } else {
-            gradient
-        }
+        gradient
     }
 
     private var gradient: some View {
@@ -257,40 +247,208 @@ struct SpaceBackground: View {
     }
 }
 
-struct SpacePager {
-    let store: SidebarStore
-    let ui: SidebarUIState
-}
+/// The main window's background in AppKit: the paged space gradient (Core Animation) under the
+/// theme's noise. It follows the window's focused space itself; a space switch used to rebuild a
+/// SwiftUI background whenever the theme changed.
+@MainActor
+final class SpaceBackgroundView: NSView {
+    private let store: SidebarStore
+    private let ui: SidebarUIState
+    private let gradient: PagedGradientView
+    private let noise = ThemeNoiseView()
 
-/// The window tint while paging between spaces: the two neighbouring spaces'
-/// gradients mixed colour by colour at the fractional page position (Dia blends
-/// its space tint with the paging progress). Animatable, so the settle spring
-/// drives it frame by frame.
-struct PagedSpaceBackground: View, Animatable {
-    let palettes: [SpacePalette]
-    var position: Double
-
-    var animatableData: Double {
-        get { position }
-        set { position = newValue }
+    init(store: SidebarStore, ui: SidebarUIState) {
+        self.store = store
+        self.ui = ui
+        gradient = PagedGradientView(store: store, ui: ui)
+        super.init(frame: .zero)
+        wantsLayer = true
+        addSubview(gradient)
+        addSubview(noise)
+        observe()
     }
 
-    var body: some View {
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    private func observe() {
+        let palette = withObservationTracking { store.focusedSpace(window: ui.windowID).theme.palette } onChange: { [weak self] in
+            Task { @MainActor in self?.observe() }
+        }
+        noise.apply(palette)
+    }
+
+    override func layout() {
+        super.layout()
+        gradient.frame = bounds
+        noise.frame = bounds
+    }
+
+}
+
+/// NoiseOverlay in AppKit: the noise texture tiled in points, drawn once per size, at 9–10%,
+/// multiplied over light themes, screened over dark.
+final class ThemeNoiseView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func apply(_ palette: SpacePalette) {
+        alphaValue = palette.noise * (palette.isDark ? 0.1 : 0.09)
+        wantsLayer = true
+        layer?.compositingFilter = palette.isDark ? "screenBlendMode" : "multiplyBlendMode"
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor(patternImage: NoiseTexture.image).setFill()
+        dirtyRect.fill()
+    }
+}
+
+/// SpaceBackground(palette:) in AppKit, for a view that shows one palette (the floating sidebar).
+final class PaletteBackgroundView: NSView {
+    var palette: SpacePalette { didSet { apply() } }
+    private let gradient = CAGradientLayer()
+    private let noise = ThemeNoiseView()
+
+    init(palette: SpacePalette) {
+        self.palette = palette
+        super.init(frame: .zero)
+        wantsLayer = true
+        gradient.startPoint = CGPoint(x: 0.5, y: 1)
+        gradient.endPoint = CGPoint(x: 0.5, y: 0)
+        layer?.addSublayer(gradient)
+        addSubview(noise)
+        apply()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    private func apply() {
+        let stops = SpaceBackground.stops(palette)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        gradient.colors = stops.map(\.color.cgColor)
+        gradient.locations = stops.map { NSNumber(value: $0.location) }
+        CATransaction.commit()
+        noise.apply(palette)
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        gradient.frame = bounds
+        CATransaction.commit()
+        noise.frame = bounds
+    }
+}
+
+/// The window tint while paging between spaces: the two neighbouring spaces' gradients mixed
+/// colour by colour at the fractional page position (Dia blends its space tint with the paging
+/// progress). A gradient layer set straight from the swipe, and sprung by Core Animation when it
+/// settles: in SwiftUI it re-rendered and re-laid out the window's background on every frame.
+@MainActor
+final class PagedGradientView: NSView {
+    private let store: SidebarStore
+    private let ui: SidebarUIState
+    private let gradient = CAGradientLayer()
+    private var placed: (index: Int, ids: [UUID], swipe: CGFloat)?
+    private var pendingVelocity = 0.0
+    private static let samples = 5
+    private static let settleKey = "settle"
+
+    init(store: SidebarStore, ui: SidebarUIState) {
+        self.store = store
+        self.ui = ui
+        super.init(frame: .zero)
+        wantsLayer = true
+        gradient.startPoint = CGPoint(x: 0.5, y: 1)
+        gradient.endPoint = CGPoint(x: 0.5, y: 0)
+        gradient.locations = (0..<Self.samples).map { NSNumber(value: Double($0) / Double(Self.samples - 1)) }
+        layer?.addSublayer(gradient)
+        ui.observeSpaceSwipe { [weak self] in self?.swipeChanged() }
+        observe()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    private func observe() {
+        withObservationTracking {
+            _ = store.pagedSpaces(window: ui.windowID).map(\.theme)
+            _ = store.focusedSpaceID(window: ui.windowID)
+            _ = CraTuning.shared.gradientAlphaScale
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                self?.placed = nil
+                self?.observe()
+            }
+        }
+        needsLayout = true
+    }
+
+    private func swipeChanged() {
+        if ui.spaceSwipe == 0 { pendingVelocity = ui.spaceSettleVelocity }
+        // Under the fingers the tint follows at once; a settle waits for the space change.
+        if ui.spaceSwipe != 0 { update() } else { needsLayout = true }
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        gradient.frame = bounds
+        CATransaction.commit()
+        update()
+    }
+
+    private func update() {
+        let spaces = store.pagedSpaces(window: ui.windowID)
+        guard !spaces.isEmpty else { return }
+        let ids = spaces.map(\.id)
+        let index = ids.firstIndex(of: store.focusedSpaceID(window: ui.windowID)) ?? 0
+        let palettes = spaces.map(\.theme.palette)
+        let swipe = ui.spaceSwipe
+        let target = Self.colors(palettes, at: Double(index) + Double(swipe))
+        let moved = placed.map { $0.index != index || $0.swipe != 0 } ?? false
+        let sameSpaces = placed?.ids == ids
+        placed = (index, ids, swipe)
+        if swipe == 0, moved, sameSpaces, let from = gradient.presentation()?.colors ?? gradient.colors {
+            let spring = CASpringAnimation(perceptualDuration: 0.4, bounce: 0)
+            spring.keyPath = "colors"
+            spring.fromValue = from
+            spring.toValue = target
+            spring.initialVelocity = pendingVelocity
+            spring.duration = spring.settlingDuration
+            pendingVelocity = 0
+            setColors(target)
+            gradient.add(spring, forKey: Self.settleKey)
+        } else {
+            if swipe != 0 { gradient.removeAnimation(forKey: Self.settleKey) }
+            setColors(target)
+        }
+    }
+
+    private func setColors(_ colors: [CGColor]) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        gradient.colors = colors
+        CATransaction.commit()
+    }
+
+    static func colors(_ palettes: [SpacePalette], at position: Double) -> [CGColor] {
         let last = max(0, palettes.count - 1)
         let p = min(max(position, 0), Double(last))
         let lo = Int(p.rounded(.down)), hi = min(last, lo + 1)
         let f = p - Double(lo)
         let a = palettes[lo], b = palettes[hi]
-        let samples = 5
-        let stops = (0..<samples).map { k -> Gradient.Stop in
+        return (0..<samples).map { k in
             let t = Double(k) / Double(samples - 1)
-            return Gradient.Stop(color: Color(nsColor: Self.mix(Self.color(a, at: t), Self.color(b, at: t), f)), location: t)
+            return mix(color(a, at: t), color(b, at: t), f).cgColor
         }
-        ZStack {
-            LinearGradient(stops: stops, startPoint: .top, endPoint: .bottom)
-            NoiseOverlay(amount: a.noise + (b.noise - a.noise) * f, isDark: f < 0.5 ? a.isDark : b.isDark)
-        }
-        .ignoresSafeArea()
     }
 
     private static func color(_ palette: SpacePalette, at t: Double) -> NSColor {

@@ -1434,9 +1434,12 @@ class CraDevToolsObserver : public CefDevToolsMessageObserver {
                                 size_t result_size) override {
         NSString* json = [[NSString alloc] initWithBytes:result length:result_size encoding:NSUTF8StringEncoding] ?: @"";
         NSNumber* key = @(message_id);
+        // Capture the table, not `this`: the tab can close before this block runs, and
+        // CraBrowser's dealloc then frees the observer (read freed memory, crashed 29 Oct).
+        NSMutableDictionary<NSNumber*, void (^)(NSString*, NSString*)>* table = pending;
         dispatch_async(dispatch_get_main_queue(), ^{
-            void (^done)(NSString*, NSString*) = pending[key];
-            [pending removeObjectForKey:key];
+            void (^done)(NSString*, NSString*) = table[key];
+            [table removeObjectForKey:key];
             if (done) success ? done(json, nil) : done(nil, json);
         });
     }
@@ -2097,6 +2100,19 @@ static void MarkProfileExitedCleanly(NSString* profileDir) {
 
 - (BOOL)isHandlingSendEvent { return _handlingSendEvent; }
 - (void)setHandlingSendEvent:(BOOL)handlingSendEvent { _handlingSendEvent = handlingSendEvent; }
+
+// A background test instance (CRA_TEST_BACKGROUND, HitchMonitor.swift) never takes the front:
+// Chromium activates the app whenever it shows one of its windows.
+static BOOL CraTestBackground(void) {
+    static BOOL background = [NSProcessInfo.processInfo.environment[@"CRA_TEST_BACKGROUND"] isEqualToString:@"1"];
+    return background;
+}
+- (void)activateIgnoringOtherApps:(BOOL)flag {
+    if (!CraTestBackground()) [super activateIgnoringOtherApps:flag];
+}
+- (void)activate {
+    if (!CraTestBackground()) [super activate];
+}
 
 // A Chromium page view, wherever it lives: in its own window, or embedded in a Cra
 // window's pane (EmbeddedPages.swift), where sendEvent's other two checks miss it.
